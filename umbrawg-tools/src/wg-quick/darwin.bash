@@ -113,20 +113,20 @@ del_routes() {
 		[[ $netif == "$REAL_INTERFACE" ]] && todelete+=( "$destination" )
 	done < <(netstat -nr -f inet)
 	for destination in "${todelete[@]}"; do
-		cmd route -q delete -inet "$destination" >/dev/null || true
+		cmd route -q -n delete -inet "$destination" >/dev/null || true
 	done
 	todelete=( )
 	while read -r destination gateway _ netif; do
 		[[ $netif == "$REAL_INTERFACE" || ( $netif == lo* && $gateway == "$REAL_INTERFACE" ) ]] && todelete+=( "$destination" )
 	done < <(netstat -nr -f inet6)
 	for destination in "${todelete[@]}"; do
-		cmd route -q delete -inet6 "$destination" >/dev/null || true
+		cmd route -q -n delete -inet6 "$destination" >/dev/null || true
 	done
 	for destination in "${ENDPOINTS[@]}"; do
 		if [[ $destination == *:* ]]; then
-			cmd route -q delete -inet6 "$destination" >/dev/null || true
+			cmd route -q -n delete -inet6 "$destination" >/dev/null || true
 		else
-			cmd route -q delete -inet "$destination" >/dev/null || true
+			cmd route -q -n delete -inet "$destination" >/dev/null || true
 		fi
 	done
 }
@@ -149,6 +149,7 @@ add_addr() {
 }
 
 set_mtu() {
+	# TODO: use better set_mtu algorithm from freebsd.bash
 	local mtu=0 current_mtu=-1 destination netif defaultif
 	if [[ -n $MTU ]]; then
 		cmd ifconfig "$REAL_INTERFACE" mtu "$MTU"
@@ -231,9 +232,9 @@ set_endpoint_direct_route() {
 	for endpoint in "${old_endpoints[@]}"; do
 		[[ $remove_all_old -eq 0 && " ${ENDPOINTS[*]} " == *" $endpoint "* ]] && continue
 		if [[ $endpoint == *:* && $AUTO_ROUTE6 -eq 1 ]]; then
-			cmd route -q delete -inet6 "$endpoint" >/dev/null 2>&1 || true
+			cmd route -q -n delete -inet6 "$endpoint" >/dev/null 2>&1 || true
 		elif [[ $AUTO_ROUTE4 -eq 1 ]]; then
-			cmd route -q delete -inet "$endpoint" >/dev/null 2>&1 || true
+			cmd route -q -n delete -inet "$endpoint" >/dev/null 2>&1 || true
 		fi
 	done
 
@@ -244,18 +245,18 @@ set_endpoint_direct_route() {
 		fi
 		if [[ $endpoint == *:* && $AUTO_ROUTE6 -eq 1 ]]; then
 			if [[ -n $GATEWAY6 ]]; then
-				cmd route -q add -inet6 "$endpoint" -gateway "$GATEWAY6" >/dev/null || true
+				cmd route -q -n add -inet6 "$endpoint" -gateway "$GATEWAY6" >/dev/null || true
 			else
 				# Prevent routing loop
-				cmd route -q add -inet6 "$endpoint" ::1 -blackhole >/dev/null || true
+				cmd route -q -n add -inet6 "$endpoint" ::1 -blackhole >/dev/null || true
 			fi
 			added+=( "$endpoint" )
 		elif [[ $AUTO_ROUTE4 -eq 1 ]]; then
 			if [[ -n $GATEWAY4 ]]; then
-				cmd route -q add -inet "$endpoint" -gateway "$GATEWAY4" >/dev/null || true
+				cmd route -q -n add -inet "$endpoint" -gateway "$GATEWAY4" >/dev/null || true
 			else
 				# Prevent routing loop
-				cmd route -q add -inet "$endpoint" 127.0.0.1 -blackhole >/dev/null || true
+				cmd route -q -n add -inet "$endpoint" 127.0.0.1 -blackhole >/dev/null || true
 			fi
 			added+=( "$endpoint" )
 		fi
@@ -309,16 +310,17 @@ add_route() {
 	if [[ $1 == */0 && ( -z $TABLE || $TABLE == auto ) ]]; then
 		if [[ $1 == *:* ]]; then
 			AUTO_ROUTE6=1
-			cmd route -q add -inet6 ::/1 -interface "$REAL_INTERFACE" >/dev/null
-			cmd route -q add -inet6 8000::/1 -interface "$REAL_INTERFACE" >/dev/null
+			cmd route -q -n add -inet6 ::/1 -interface "$REAL_INTERFACE" >/dev/null
+			cmd route -q -n add -inet6 8000::/1 -interface "$REAL_INTERFACE" >/dev/null
 		else
 			AUTO_ROUTE4=1
-			cmd route -q add -inet 0.0.0.0/1 -interface "$REAL_INTERFACE" >/dev/null
-			cmd route -q add -inet 128.0.0.0/1 -interface "$REAL_INTERFACE" >/dev/null
+			cmd route -q -n add -inet 0.0.0.0/1 -interface "$REAL_INTERFACE" >/dev/null
+			cmd route -q -n add -inet 128.0.0.0/1 -interface "$REAL_INTERFACE" >/dev/null
 		fi
 	else
 		[[ $TABLE == main || $TABLE == auto || -z $TABLE ]] || die "Darwin only supports TABLE=auto|main|off"
-		cmd route -q add "-$family" "$1" -interface "$REAL_INTERFACE" >/dev/null
+		[[ $(route -n get "-$family" "$1" 2>/dev/null) =~ interface:\ $REAL_INTERFACE$'\n' ]] || cmd route -q -n add -$family "$1" -interface "$REAL_INTERFACE" >/dev/null
+
 	fi
 }
 
@@ -327,6 +329,7 @@ set_config() {
 }
 
 save_config() {
+	# TODO: actually save addresses and DNS by running ifconfig and networksetup
 	local old_umask new_config current_config address cmd
 	new_config=$'[Interface]\n'
 	for address in "${ADDRESSES[@]}"; do
@@ -411,7 +414,7 @@ cmd_up() {
 	done
 	set_mtu
 	up_if
-	for i in $(while read -r _ i; do for i in $i; do [[ $i =~ ^[0-9a-z:.]+/[0-9]+$ ]] && echo "$i"; done; done < <(wg show "$REAL_INTERFACE" allowed-ips)); do
+	for i in $(while read -r _ i; do for i in $i; do [[ $i =~ ^[0-9a-z:.]+/[0-9]+$ ]] && echo "$i"; done; done < <(wg show "$REAL_INTERFACE" allowed-ips) | sort -nr -k 2 -t /); do
 		add_route "$i"
 	done
 	[[ $AUTO_ROUTE4 -eq 1 || $AUTO_ROUTE6 -eq 1 ]] && set_endpoint_direct_route
