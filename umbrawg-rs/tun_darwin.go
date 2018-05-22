@@ -154,7 +154,7 @@ func CreateTUN(name string) (TUNDevice, error) {
 	tun, err := CreateTUNFromFile(os.NewFile(uintptr(fd), ""))
 
 	if err == nil && name == "utun" {
-		fname := os.Getenv("WG_DARWIN_UTUN_NAME_FILE")
+		fname := os.Getenv("WG_TUN_NAME_FILE")
 		if fname != "" {
 			ioutil.WriteFile(fname, []byte(tun.(*NativeTun).name+"\n"), 0400)
 		}
