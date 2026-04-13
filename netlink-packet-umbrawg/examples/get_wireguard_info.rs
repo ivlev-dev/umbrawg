@@ -26,11 +26,12 @@ async fn main() {
     let (connection, mut handle, _) = new_connection().unwrap();
     tokio::spawn(connection);
 
-    let genlmsg: GenlMessage<WireguardMessage> =
-        GenlMessage::from_payload(WireguardMessage {
-            cmd: WireguardCmd::GetDevice,
-            attributes: vec![WireguardAttribute::IfName(argv[1].clone())],
-        });
+    let msg = WireguardMessage::new(
+        WireguardCmd::GetDevice,
+        vec![WireguardAttribute::IfName(argv[1].clone())],
+    );
+
+    let genlmsg: GenlMessage<WireguardMessage> = GenlMessage::from_payload(msg);
     let mut nlmsg = NetlinkMessage::from(genlmsg);
     nlmsg.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
 
