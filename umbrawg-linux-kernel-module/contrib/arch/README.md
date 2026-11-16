@@ -76,8 +76,9 @@ modinfo umbrawg.ko
 Проверено на хосте: пакет собирается из дерева, `dkms.conf` содержит
 `PACKAGE_VERSION` = `pkgver`, модуль компилируется `make LLVM=1` с
 заголовками `7.3.4-1-cachyos-bore-lto`, `modinfo` показывает
-`version: 3.1.20261113-02`. Дополнительно проверен полный цикл DKMS без
-установки пакета в систему:
+`version: 3.1.20261113-02`. Повторная проверка на текущем `master` подтвердила
+тот же результат: правок в `PKGBUILD` не потребовалось. Дополнительно проверен
+полный цикл DKMS без установки пакета в систему:
 
 ```sh
 dkms add   -m umbrawg -v <pkgver> --dkmstree /tmp/dkms/lib --sourcetree /tmp/dkms/src
