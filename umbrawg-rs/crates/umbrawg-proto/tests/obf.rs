@@ -447,3 +447,74 @@ fn zero_key_disables_protection() {
     obfuscator.protect(b"UmbraWGS1234", &mut data).unwrap();
     assert_eq!(data, [1, 2, 3, 4]);
 }
+
+struct CountingRng {
+    inner: TestRng,
+    fills: usize,
+}
+
+impl CountingRng {
+    fn new(seed: u64) -> Self {
+        Self {
+            inner: TestRng::new(seed),
+            fills: 0,
+        }
+    }
+}
+
+impl rand_core::RngCore for CountingRng {
+    fn next_u32(&mut self) -> u32 {
+        self.inner.next_u32()
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.inner.next_u64()
+    }
+
+    fn fill_bytes(&mut self, dst: &mut [u8]) {
+        self.fills += 1;
+        self.inner.fill_bytes(dst);
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dst);
+        Ok(())
+    }
+}
+
+fn obfuscated_params() -> ObfParams {
+    ObfParams {
+        s4: 8,
+        h1: 1..=4,
+        h2: 0..=2,
+        h3: 5..=9,
+        h4: 100..=1000,
+        ..ObfParams::default()
+    }
+}
+
+#[test]
+fn transport_obfuscation_draws_from_the_buffered_rng() {
+    let params = obfuscated_params();
+    let obfuscator = Obfuscator::new(&params);
+    assert!(obfuscator.is_enabled());
+    let mut rng = umbrawg_crypto::random::BufferedRng::new(CountingRng::new(23));
+    let mut packet = [0u8; 320];
+    let mut prefixes = Vec::new();
+    for counter in 0..200u64 {
+        let layout = obfuscator
+            .begin_transport(&mut rng, &mut packet, 7, counter)
+            .unwrap();
+        assert_eq!(layout.padding, usize::from(params.s4));
+        prefixes.push(packet[..usize::from(params.s4)].to_vec());
+    }
+    let fills = rng.get_ref().fills;
+    assert!(
+        fills <= 2,
+        "200 packets must fit into a couple of buffers, got {fills} source fills"
+    );
+    assert!(
+        prefixes.windows(2).any(|pair| pair[0] != pair[1]),
+        "every packet must get a fresh random prefix"
+    );
+}

@@ -10,6 +10,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use umbrawg_crypto::random::BufferedRng;
 use umbrawg_device::{
     DatagramSink, Device, DeviceConfig, DeviceError, IncomingMeta, IoContext, PacketIo, Peer,
 };
@@ -264,7 +265,7 @@ fn send_run<R: rand_core::RngCore>(
 }
 
 fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
-    let mut rng = rand_core::OsRng;
+    let mut rng = BufferedRng::new(rand_core::OsRng);
     let mut scratch = vec![0u8; MAX_PACKET + 512];
     let mut tx_buffer = vec![0u8; MAX_PACKET + 512];
     let mut recv_queue =
