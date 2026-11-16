@@ -135,6 +135,7 @@ async fn run_set(interface: &str, arguments: &[String]) -> CommandResult {
     }
     let config = Config::from_args(arguments).map_err(|error| error.to_string())?;
     warn_about_host_bits(&config);
+    warn_about_unsupported_advanced_security(interface, &config).await;
     let set = SetDevice {
         name: interface.to_owned(),
         replace_peers: false,
@@ -153,6 +154,7 @@ async fn run_config_file(
 ) -> CommandResult {
     let config = read_config(filename)?;
     warn_about_host_bits(&config);
+    warn_about_unsupported_advanced_security(interface, &config).await;
     let result = match command {
         "setconf" => umbrawg_ctl::setconf(interface, &config).await,
         "addconf" => umbrawg_ctl::addconf(interface, &config).await,
@@ -170,6 +172,22 @@ fn read_config(filename: &std::path::Path) -> Result<Config, String> {
 fn warn_about_host_bits(config: &Config) {
     for allowed_ip in config.allowed_ips_with_host_bits() {
         eprintln!("Warning: AllowedIP has nonzero host part: {allowed_ip}");
+    }
+}
+
+async fn warn_about_unsupported_advanced_security(interface: &str, config: &Config) {
+    if !config
+        .peers
+        .iter()
+        .any(|peer| peer.advanced_security.is_some())
+    {
+        return;
+    }
+    if umbrawg_ctl::uapi::has_interface(interface).await {
+        eprintln!(
+            "Warning: AdvancedSecurity is only supported by the kernel module; \
+             ignoring it for userspace interface `{interface}'"
+        );
     }
 }
 

@@ -1,15 +1,16 @@
 use futures::StreamExt;
 use genetlink::{new_connection, GenetlinkHandle};
 use netlink_packet_core::{
-    Emitable, NetlinkMessage, NetlinkPayload, Nla, NLA_TYPE_MASK, NLM_F_ACK, NLM_F_DUMP,
-    NLM_F_REQUEST,
+    Emitable, NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST,
 };
 use netlink_packet_generic::{
     ctrl::{nlas::GenlCtrlAttrs, GenlCtrl, GenlCtrlCmd},
     GenlMessage,
 };
 use netlink_packet_umbrawg::constants::UWGDEVICE_F_REPLACE_PEERS;
-use netlink_packet_umbrawg::constants::{UWGPEER_F_REMOVE_ME, UWGPEER_F_REPLACE_ALLOWEDIPS};
+use netlink_packet_umbrawg::constants::{
+    UWGPEER_F_HAS_ADVANCED_SECURITY, UWGPEER_F_REMOVE_ME, UWGPEER_F_REPLACE_ALLOWEDIPS,
+};
 use netlink_packet_umbrawg::{
     UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCmd,
     UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
@@ -20,15 +21,6 @@ use crate::error::Error;
 use crate::model::{Device, Peer, SetDevice, TimeSpec};
 
 const MAX_MESSAGE_SIZE: usize = 60_000;
-
-/// `UWGPEER_F_HAS_ADVANCED_SECURITY` from `uapi/umbrawg.h`.
-///
-/// The bit is reported in `UWGPEER_A_FLAGS` of `UWG_CMD_GET_DEVICE` replies.
-/// It is not exposed by the pinned `netlink-packet-umbrawg` release yet.
-const UWGPEER_F_HAS_ADVANCED_SECURITY: u32 = 1 << 3;
-
-/// `UWGPEER_A_ADVANCED_SECURITY` (`NLA_FLAG`, kind 11) from `uapi/umbrawg.h`.
-const UWGPEER_A_ADVANCED_SECURITY: u16 = 11;
 
 pub async fn get_device(name: &str) -> Result<Device, Error> {
     let (mut handle, _) = connect().await?;
@@ -354,6 +346,9 @@ fn peer_attributes(peer: &umbrawg_config::PeerConfig, version: u32) -> Result<Um
             attributes.push(UmbrawgPeerAttribute::PersistentKeepalive(keepalive.lo()));
         }
     }
+    if peer.advanced_security == Some(true) {
+        attributes.push(UmbrawgPeerAttribute::AdvancedSecurity(true));
+    }
     if let Some(allowed_ips) = &peer.allowed_ips {
         if !allowed_ips.is_empty() {
             attributes.push(UmbrawgPeerAttribute::AllowedIps(
@@ -529,10 +524,12 @@ impl DeviceBuilder {
                         target.advanced_security = Some(false);
                     }
                 }
-                UmbrawgPeerAttribute::Other(value)
-                    if value.kind() & NLA_TYPE_MASK == UWGPEER_A_ADVANCED_SECURITY =>
-                {
-                    target.advanced_security = Some(true);
+                UmbrawgPeerAttribute::AdvancedSecurity(enabled) => {
+                    if *enabled {
+                        target.advanced_security = Some(true);
+                    } else if target.advanced_security.is_none() {
+                        target.advanced_security = Some(false);
+                    }
                 }
                 _ => {}
             }
@@ -571,7 +568,7 @@ fn parse_header(name: &str, value: &str) -> Result<U32Range, Error> {
 mod tests {
     use super::*;
     use crate::model::ConfigApplication;
-    use netlink_packet_core::{Emitable, ParseableParametrized};
+    use netlink_packet_core::{Emitable, Nla, ParseableParametrized};
     use netlink_packet_generic::GenlHeader;
 
     fn config() -> SetDevice {
@@ -589,6 +586,7 @@ mod tests {
             )
             .expect("valid"),
             preshared_key: None,
+            advanced_security: None,
             allowed_ips: Some(vec!["10.0.0.0/8".parse().expect("valid")]),
             endpoint: Some("192.0.2.1:51820".parse().expect("valid")),
             persistent_keepalive: Some(U16Range::single(25)),
@@ -605,6 +603,7 @@ mod tests {
             )
             .expect("valid"),
             preshared_key: None,
+            advanced_security: None,
             allowed_ips: None,
             endpoint: None,
             persistent_keepalive: None,
@@ -752,6 +751,7 @@ mod tests {
             config.peers.push(umbrawg_config::PeerConfig {
                 public_key: Key::from_bytes(key),
                 preshared_key: None,
+                advanced_security: None,
                 allowed_ips: Some(vec!["10.0.0.0/8".parse().expect("valid")]),
                 endpoint: None,
                 persistent_keepalive: None,
@@ -910,13 +910,53 @@ mod tests {
 
     #[test]
     fn reads_advanced_security_from_the_flag_attribute() {
-        use netlink_packet_core::DefaultNla;
         let key = Key::from_bytes([6u8; 32]);
-        let nla = DefaultNla::new(UWGPEER_A_ADVANCED_SECURITY, Vec::new());
         let device = peer_device(UmbrawgPeer(vec![
             UmbrawgPeerAttribute::PublicKey(key.to_bytes()),
-            UmbrawgPeerAttribute::Other(nla),
+            UmbrawgPeerAttribute::AdvancedSecurity(true),
         ]));
         assert_eq!(device.peers[0].advanced_security, Some(true));
+    }
+
+    fn sent_peer(advanced_security: Option<bool>) -> UmbrawgPeer {
+        let mut config = config();
+        config.peers[0].advanced_security = advanced_security;
+        let messages = build_set_messages(&config, 3).expect("valid");
+        messages[0]
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                UmbrawgAttribute::Peers(peers) => Some(peers[0].clone()),
+                _ => None,
+            })
+            .expect("peer")
+    }
+
+    #[test]
+    fn sends_advanced_security_for_enabled_peers_only() {
+        assert!(sent_peer(Some(true))
+            .0
+            .contains(&UmbrawgPeerAttribute::AdvancedSecurity(true)));
+        assert!(!sent_peer(Some(false))
+            .0
+            .iter()
+            .any(|attribute| matches!(attribute, UmbrawgPeerAttribute::AdvancedSecurity(_))));
+        assert!(!sent_peer(None)
+            .0
+            .iter()
+            .any(|attribute| matches!(attribute, UmbrawgPeerAttribute::AdvancedSecurity(_))));
+    }
+
+    #[test]
+    fn advanced_security_wire_format_is_a_presence_flag() {
+        use netlink_packet_umbrawg::constants::UWGPEER_A_ADVANCED_SECURITY;
+        let peer = sent_peer(Some(true));
+        let attribute = peer
+            .0
+            .iter()
+            .find(|attribute| matches!(attribute, UmbrawgPeerAttribute::AdvancedSecurity(_)))
+            .expect("advanced security");
+        assert_eq!(attribute.kind(), UWGPEER_A_ADVANCED_SECURITY);
+        assert_eq!(attribute.value_len(), 0);
     }
 }

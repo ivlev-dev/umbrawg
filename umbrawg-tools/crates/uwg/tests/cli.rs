@@ -251,6 +251,41 @@ fn syncconf_with_an_empty_runtime_replaces_all_peers() {
 }
 
 #[test]
+fn config_commands_accept_advanced_security_on_userspace() {
+    let directory = runtime_dir();
+    let path = directory.join("uwg0.conf");
+    std::fs::write(
+        &path,
+        format!(
+            "[Interface]\nPrivateKey = {PRIVATE}\n\n[Peer]\nPublicKey = {PEER_ONE}\nAdvancedSecurity = on\nAllowedIPs = 10.1.0.0/16\n"
+        ),
+    )
+    .expect("write config");
+    for command in ["setconf", "addconf", "syncconf"] {
+        let runtime = directory.join(command);
+        std::fs::create_dir_all(&runtime).expect("runtime directory");
+        let fake = FakeUapi::start(&runtime, get_response());
+        let output = run(&runtime, &[command, "uwg0", path.to_str().expect("path")]);
+        assert!(
+            output.status.success(),
+            "{command} stderr: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            stderr(&output),
+            "Warning: AdvancedSecurity is only supported by the kernel module; ignoring it for userspace interface `uwg0'\n",
+            "{command}"
+        );
+        let requests = fake.set_requests();
+        assert_eq!(requests.len(), 1, "{command}");
+        assert!(!requests[0].contains("advanced_security"), "{command}");
+        assert!(!requests[0].contains("advanced-security"), "{command}");
+        assert!(requests[0].contains("allowed_ip=10.1.0.0/16"), "{command}");
+    }
+    let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
 fn setconf_warns_about_host_bits() {
     let directory = runtime_dir();
     let fake = FakeUapi::start(&directory, get_response());

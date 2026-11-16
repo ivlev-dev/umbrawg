@@ -180,6 +180,12 @@ pub struct DeviceConfig {
 pub struct PeerConfig {
     pub public_key: Key,
     pub preshared_key: Option<Key>,
+    /// `AdvancedSecurity` of the peer.
+    ///
+    /// The kernel module owns this setting: `uwg` only reports it through
+    /// `UWGPEER_A_ADVANCED_SECURITY` and never sends it to the userspace
+    /// UAPI daemon, which has no such key.
+    pub advanced_security: Option<bool>,
     pub allowed_ips: Option<Vec<AllowedIp>>,
     pub endpoint: Option<SocketAddr>,
     pub persistent_keepalive: Option<U16Range>,
@@ -546,6 +552,9 @@ impl Config {
             if let Some(key) = &peer.preshared_key {
                 push_entry(&mut section, "PresharedKey", key.to_base64());
             }
+            if let Some(value) = peer.advanced_security {
+                push_entry(&mut section, "AdvancedSecurity", bool_text(value));
+            }
             if let Some(allowed_ips) = &peer.allowed_ips {
                 if !allowed_ips.is_empty() {
                     let value = allowed_ips
@@ -691,6 +700,7 @@ impl DeviceConfig {
 struct PeerBuilder {
     public_key: Option<Key>,
     preshared_key: Option<Key>,
+    advanced_security: Option<bool>,
     allowed_ips: Option<Vec<AllowedIp>>,
     endpoint: Option<SocketAddr>,
     persistent_keepalive: Option<U16Range>,
@@ -703,6 +713,10 @@ impl PeerBuilder {
         match key.as_str() {
             "publickey" => self.public_key = Some(Key::from_base64(&entry.value)?),
             "presharedkey" => self.preshared_key = Some(Key::from_base64(&entry.value)?),
+            "advancedsecurity" => {
+                self.advanced_security =
+                    Some(parse_bool_at(entry, "AdvancedSecurity", &entry.value)?);
+            }
             "allowedips" => {
                 let parsed = parse_allowed_ips(&entry.value, entry.line, "AllowedIPs")?;
                 match &mut self.allowed_ips {
@@ -743,6 +757,10 @@ impl PeerBuilder {
                 self.endpoint = Some(parse_endpoint(value, true)?);
                 2
             }
+            "advanced-security" => {
+                self.advanced_security = Some(parse_bool("AdvancedSecurity", value)?);
+                2
+            }
             "persistent-keepalive" => {
                 self.persistent_keepalive = Some(U16Range::parse(value)?);
                 2
@@ -764,6 +782,7 @@ impl PeerBuilder {
         Ok(PeerConfig {
             public_key: self.public_key.ok_or(Error::MissingPeerPublicKey)?,
             preshared_key: self.preshared_key,
+            advanced_security: self.advanced_security,
             allowed_ips: self.allowed_ips,
             endpoint: self.endpoint,
             persistent_keepalive: self.persistent_keepalive,
@@ -1005,6 +1024,7 @@ DisableCookies = off
 [Peer]
 PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
 PresharedKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
+AdvancedSecurity = on
 AllowedIPs = 10.0.0.0/8, fd00::/64
 Endpoint = 192.0.2.1:51820
 PersistentKeepalive = 25
@@ -1042,6 +1062,7 @@ PersistentKeepalive = 25
             Some("192.0.2.1:51820".parse().expect("valid"))
         );
         assert_eq!(peer.persistent_keepalive, Some(U16Range::single(25)));
+        assert_eq!(peer.advanced_security, Some(true));
     }
 
     #[test]
@@ -1053,6 +1074,51 @@ PersistentKeepalive = 25
         assert!(emitted.contains("H1 = 61220074-118999195"));
         assert!(emitted.contains("I1 = <b 0x160d2f><c>"));
         assert!(emitted.contains("AllowedIPs = 10.0.0.0/8, fd00::/64"));
+        assert!(emitted.contains("AdvancedSecurity = on"));
+    }
+
+    #[test]
+    fn parses_peer_advanced_security() {
+        let config = Config::parse(
+            "[Peer]\npublickey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nADVANCEDSECURITY = on\n",
+        )
+        .expect("valid config");
+        assert_eq!(config.peers[0].advanced_security, Some(true));
+        let emitted = config.to_ini(false);
+        assert!(emitted.contains("AdvancedSecurity = on\n"));
+
+        for value in ["on", "ON", "true", "TRUE", "1"] {
+            let input = format!(
+                "[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nAdvancedSecurity = {value}\n"
+            );
+            let config = Config::parse(&input).expect("valid config");
+            assert_eq!(config.peers[0].advanced_security, Some(true), "{value}");
+        }
+        for value in ["off", "OFF", "false", "False", "0"] {
+            let input = format!(
+                "[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nAdvancedSecurity = {value}\n"
+            );
+            let config = Config::parse(&input).expect("valid config");
+            assert_eq!(config.peers[0].advanced_security, Some(false), "{value}");
+            assert!(config.to_ini(false).contains("AdvancedSecurity = off\n"));
+        }
+    }
+
+    #[test]
+    fn rejects_bad_peer_advanced_security() {
+        assert!(Config::parse(
+            "[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nAdvancedSecurity = maybe\n"
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn omits_advanced_security_when_unset() {
+        let config =
+            Config::parse("[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n")
+                .expect("valid config");
+        assert_eq!(config.peers[0].advanced_security, None);
+        assert!(!config.to_ini(false).contains("AdvancedSecurity"));
     }
 
     #[test]
@@ -1108,6 +1174,8 @@ PersistentKeepalive = 25
             "10.0.0.0/8,fd00::/64",
             "persistent-keepalive",
             "25",
+            "advanced-security",
+            "on",
         ];
         let config = Config::from_args(args).expect("valid arguments");
         assert_eq!(config.device.listen_port, Some(51820));
@@ -1117,6 +1185,7 @@ PersistentKeepalive = 25
         assert_eq!(config.device.obfuscation.random_trailers, Some(true));
         assert_eq!(config.peers.len(), 1);
         assert_eq!(config.peers[0].allowed_ips.as_ref().map(Vec::len), Some(2));
+        assert_eq!(config.peers[0].advanced_security, Some(true));
     }
 
     #[test]
@@ -1206,6 +1275,7 @@ PersistentKeepalive = 25
         config.peers.push(PeerConfig {
             public_key: Key::from_base64(PUBLIC).expect("valid"),
             preshared_key: None,
+            advanced_security: None,
             allowed_ips: Some(vec![
                 "10.0.0.0/8".parse().expect("valid"),
                 "10.1.2.3/8".parse().expect("valid"),

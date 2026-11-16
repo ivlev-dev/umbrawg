@@ -1174,6 +1174,7 @@ ListenPort=51820
 
 [Peer]
 PublicKey=xyz=
+AdvancedSecurity=on
 AllowedIPs=10.0.0.0/24
 ";
         let runner = mock_from(move |command, _| {
@@ -1217,6 +1218,7 @@ ListenPort=51820
 
 [Peer]
 PublicKey=xyz=
+AdvancedSecurity=on
 AllowedIPs=10.0.0.0/24
 ";
         assert_eq!(fs::read_to_string(&config.config_file).unwrap(), expected);
