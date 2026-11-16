@@ -217,6 +217,7 @@ start_daemons() {
         UMBRAWG_RUNTIME_DIR="$DAEMON_A" \
         UMBRAWG_LOG_LEVEL="${UMBRAWG_LOG_LEVEL:-info}" \
         UMBRAWG_PARALLEL_RX="$parallel" \
+        UMBRAWG_RX_SCHED="${UMBRAWG_RX_SCHED:-peer}" \
         UMBRAWG_RX_STATS="${UMBRAWG_RX_STATS:-1}" \
         "$DAEMON_BIN" --foreground "$IFACE_A" >>"$RUNDIR/$tag-a.log" 2>&1 &
     DAEMON_PID_A=$!
@@ -225,6 +226,7 @@ start_daemons() {
         UMBRAWG_RUNTIME_DIR="$DAEMON_B" \
         UMBRAWG_LOG_LEVEL="${UMBRAWG_LOG_LEVEL:-info}" \
         UMBRAWG_PARALLEL_RX="$parallel" \
+        UMBRAWG_RX_SCHED="${UMBRAWG_RX_SCHED:-peer}" \
         UMBRAWG_RX_STATS="${UMBRAWG_RX_STATS:-1}" \
         "$DAEMON_BIN" --foreground "$IFACE_B" >>"$RUNDIR/$tag-b.log" 2>&1 &
     DAEMON_PID_B=$!
@@ -392,7 +394,10 @@ iperf_tcp() {
     sleep 0.5
     ns "$PID_A" "$IPERF3" -c "$TUN_B" -p "$port" -t 3 -f m >"$RUNDIR/iperf-tcp.log" 2>&1 || true
     wait "$server" 2>/dev/null || true
-    awk '/receiver/ {for (i = 1; i <= NF; i++) if ($i == "Mbits/sec" || $i == "Gbits/sec") value = $(i - 1) " " $i} END {print value}' \
+    awk '
+        /receiver/ {for (i = 1; i <= NF; i++) if ($i == "Mbits/sec" || $i == "Gbits/sec") rate = $(i - 1) " " $i}
+        /sender/ {if ($(NF - 1) ~ /^[0-9]+$/) retr = $(NF - 1)}
+        END {print (rate == "" ? "n/a" : rate) "|" (retr == "" ? "n/a" : retr)}' \
         "$RUNDIR/iperf-tcp.log"
 }
 
@@ -519,11 +524,12 @@ record() {
     local obf=$3
     local hs=$4
     local tcp=$5
-    local udp=$6
-    local sha=$7
-    local drops=$8
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$tag" "$parallel" "$obf" "$hs" "$tcp" "$udp" "$sha" "$drops" >>"$SUMMARY"
+    local retr=$6
+    local udp=$7
+    local sha=$8
+    local drops=$9
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$tag" "$parallel" "$obf" "$hs" "$tcp" "$retr" "$udp" "$sha" "$drops" >>"$SUMMARY"
 }
 
 run_case() {
@@ -568,10 +574,13 @@ run_case() {
     log "ping: потери $ping_loss"
 
     local tcp="skipped"
+    local tcp_retr="skipped"
     local udp="skipped"
     if [ -n "$IPERF3" ]; then
         tcp="$(iperf_tcp)"
-        log "iperf3 TCP: $tcp"
+        tcp_retr="${tcp##*|}"
+        tcp="${tcp%%|*}"
+        log "iperf3 TCP: $tcp, ретрансмиты $tcp_retr"
         udp="$(iperf_udp)"
         log "iperf3 UDP: $udp"
         if [ -n "$MIN_TCP_MBIT" ] && [ "$MIN_TCP_MBIT" != "0" ]; then
@@ -696,7 +705,7 @@ run_case() {
     if [ "$parallel" = "1" ]; then
         compact="A:$(drops_compact "$RUNDIR/$tag-a.log") B:$(drops_compact "$RUNDIR/$tag-b.log")"
     fi
-    record "$tag" "$parallel" "$obf" "$handshakes" "$tcp" "$udp" "$sha_result" "$compact"
+    record "$tag" "$parallel" "$obf" "$handshakes" "$tcp" "$tcp_retr" "$udp" "$sha_result" "$compact"
 
     stop_daemons
     rm -rf "$DAEMON_A" "$DAEMON_B"
@@ -705,6 +714,7 @@ run_case() {
 
 log "uwg: $UWG_BIN"
 log "демон: $DAEMON_BIN"
+log "UMBRAWG_RX_SCHED: ${UMBRAWG_RX_SCHED:-peer}"
 log "iperf3: ${IPERF3:-нет}"
 log "nc: ${NC:-нет}"
 log "файл для проверки целостности: ${FILE_MIB} MiB"
@@ -735,7 +745,9 @@ HEADER_KEY="$(uwg_for "$RUNDIR" genkey)"
 head -c "$((FILE_MIB * 1024 * 1024))" /dev/urandom >"$RUNDIR/payload.bin"
 log "payload sha256: $(sha256sum "$RUNDIR/payload.bin" | awk '{print $1}')"
 
-if [ "${UWB_DP_QUICK:-0}" = "1" ]; then
+if [ -n "${CASES:-}" ]; then
+    :
+elif [ "${UWB_DP_QUICK:-0}" = "1" ]; then
     CASES="obf1p0 obf1p1"
 else
     CASES="obf1p0 obf1p1 obf0p0 obf0p1"
@@ -751,11 +763,11 @@ for combo in $CASES; do
     esac
 done
 
-printf '\n%-12s %-4s %-4s %-22s %-22s %-24s %s\n' \
-    "прогон" "par" "obf" "handshake A/B" "iperf3 TCP" "iperf3 UDP" "дропы"
-while IFS=$'\t' read -r tag parallel obf hs tcp udp sha drops; do
-    printf '%-12s %-4s %-4s %-22s %-22s %-24s %s\n' \
-        "$tag" "$parallel" "$obf" "$hs" "$tcp" "$udp" "$drops"
+printf '\n%-12s %-4s %-4s %-22s %-22s %-12s %-24s %s\n' \
+    "прогон" "par" "obf" "handshake A/B" "iperf3 TCP" "ретрансмиты" "iperf3 UDP" "дропы"
+while IFS=$'\t' read -r tag parallel obf hs tcp retr udp sha drops; do
+    printf '%-12s %-4s %-4s %-22s %-22s %-12s %-24s %s\n' \
+        "$tag" "$parallel" "$obf" "$hs" "$tcp" "$retr" "$udp" "$drops"
     printf '%-12s sha256 файла: %s\n' "" "$sha"
 done <"$SUMMARY"
 
