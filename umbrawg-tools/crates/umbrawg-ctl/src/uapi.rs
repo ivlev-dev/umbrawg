@@ -104,6 +104,12 @@ pub async fn set_device_at(path: &Path, config: &SetDevice) -> Result<(), Error>
     parse_set_response(&response)
 }
 
+/// Serializes a set request for the userspace UAPI socket.
+///
+/// Peer `AdvancedSecurity` is a kernel-only setting: the daemon has no such
+/// key, so it is not written here. The kernel module reports and accepts it
+/// through `UWGPEER_A_ADVANCED_SECURITY` instead; `uwg` warns when a
+/// configuration carrying the key is applied to a userspace interface.
 pub fn build_set_request(config: &SetDevice) -> Result<String, Error> {
     let mut output = String::new();
     output.push_str("set=1\n");
@@ -544,6 +550,7 @@ errno=0
                 Key::from_hex("606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f")
                     .expect("valid"),
             ),
+            advanced_security: Some(true),
             allowed_ips: Some(vec![
                 "10.0.0.0/8".parse().expect("valid"),
                 "fd00::/64".parse().expect("valid"),
@@ -582,6 +589,7 @@ errno=0
             peer.endpoint,
             Some("192.0.2.1:51820".parse().expect("valid"))
         );
+        assert_eq!(peer.advanced_security, None);
     }
 
     #[test]
@@ -624,6 +632,15 @@ errno=0
     }
 
     #[test]
+    fn does_not_send_advanced_security_to_the_daemon() {
+        let config = set_device();
+        assert_eq!(config.peers[0].advanced_security, Some(true));
+        let request = build_set_request(&config).expect("valid request");
+        assert!(!request.contains("advanced_security"));
+        assert!(!request.contains("advanced-security"));
+    }
+
+    #[test]
     fn serializes_removed_peer() {
         let mut config = set_device();
         config.peers[0].remove = true;
@@ -646,6 +663,7 @@ errno=0
             )
             .expect("valid"),
             preshared_key: None,
+            advanced_security: None,
             allowed_ips: None,
             endpoint: None,
             persistent_keepalive: None,
@@ -664,6 +682,7 @@ errno=0
         config.peers.push(umbrawg_config::PeerConfig {
             public_key: Key::from_bytes([1u8; 32]),
             preshared_key: None,
+            advanced_security: None,
             allowed_ips: Some(vec!["10.0.0.0/8".parse().expect("valid")]),
             endpoint: None,
             persistent_keepalive: None,

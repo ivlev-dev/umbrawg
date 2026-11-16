@@ -89,6 +89,7 @@ impl Device {
             .map(|peer| PeerConfig {
                 public_key: peer.public_key.clone(),
                 preshared_key: peer.preshared_key.clone().filter(|key| !key.is_zero()),
+                advanced_security: peer.advanced_security,
                 allowed_ips: if peer.allowed_ips.is_empty() {
                     None
                 } else {
@@ -189,6 +190,7 @@ impl SetDevice {
             set.peers.push(PeerConfig {
                 public_key: peer.public_key.clone(),
                 preshared_key: None,
+                advanced_security: None,
                 allowed_ips: None,
                 endpoint: None,
                 persistent_keepalive: None,
@@ -262,6 +264,7 @@ mod tests {
             config.peers[0].persistent_keepalive,
             Some(U16Range::single(25))
         );
+        assert_eq!(config.peers[0].advanced_security, Some(true));
     }
 
     #[test]
@@ -292,6 +295,7 @@ mod tests {
             config.peers.push(PeerConfig {
                 public_key: Key::from_bytes(*key),
                 preshared_key: None,
+                advanced_security: None,
                 allowed_ips: None,
                 endpoint: None,
                 persistent_keepalive: None,

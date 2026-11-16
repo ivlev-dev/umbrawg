@@ -49,6 +49,8 @@ prints one tab-separated value per line, intended for scripts. With
 \fIreject-after-time\fP, \fIkeepalive-timeout\fP,
 \fImax-handshake-attempts\fP, \fIrandom-trailers\fP, \fIdisable-cookies\fP,
 \fIadvanced-security\fP.
+\fBmax_handshake_attempts\fP is accepted as an alias of
+\fImax-handshake-attempts\fP for compatibility with legacy \fBawg\fP(8).
 .TP
 \fBshowconf\fP \fI<interface>\fP
 Shows the current configuration in the format described by
@@ -89,9 +91,10 @@ Boolean UmbraWG 3.1 parameters.
 .IP
 Peer arguments are introduced by \fBpeer\fP \fI<base64-public-key>\fP and accept
 \fBremove\fP, \fBpreshared-key\fP \fI<file>\fP, \fBendpoint\fP
-\fI<address>:<port>\fP, \fBpersistent-keepalive\fP \fI<value>\fP, and
-\fBallowed-ips\fP \fI<cidr>[,<cidr>]...\fP. Repeating \fBpeer\fP starts a new
-peer. An empty \fBallowed-ips\fP value removes all allowed IPs.
+\fI<address>:<port>\fP, \fBpersistent-keepalive\fP \fI<value>\fP,
+\fBallowed-ips\fP \fI<cidr>[,<cidr>]...\fP, and \fBadvanced-security\fP
+\fI<on|off>\fP. Repeating \fBpeer\fP starts a new peer. An empty
+\fBallowed-ips\fP value removes all allowed IPs.
 .TP
 \fBsetconf\fP \fI<interface>\fP \fI<file>\fP
 Applies a configuration file. Existing peers not present in the file are
@@ -135,7 +138,10 @@ The \fB[Interface]\fP section accepts:
 \fBDisableCookies\fP.
 .PP
 Each \fB[Peer]\fP section accepts \fBPublicKey\fP, \fBPresharedKey\fP,
-\fBAllowedIPs\fP, \fBEndpoint\fP, and \fBPersistentKeepalive\fP.
+\fBAdvancedSecurity\fP, \fBAllowedIPs\fP, \fBEndpoint\fP, and
+\fBPersistentKeepalive\fP. \fBAdvancedSecurity\fP is a kernel-only setting:
+it is applied through netlink and ignored with a warning for userspace
+interfaces.
 .PP
 The \fBuwg-quick\fP-only keys \fBAddress\fP, \fBDNS\fP, \fBMTU\fP, \fBTable\fP,
 \fBPreUp\fP, \fBPostUp\fP, \fBPreDown\fP, \fBPostDown\fP, and \fBSaveConfig\fP

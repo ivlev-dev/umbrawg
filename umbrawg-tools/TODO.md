@@ -11,7 +11,9 @@
 - Конфигурация: INI с полным набором параметров AmneziaWG/UmbraWG 3.1;
   парсинг `uwg-quick` переведён на общие примитивы `umbrawg-config`.
 - AdvancedSecurity пира: чтение флага из netlink (`uwg show`,
-  `uwg show <iface> advanced-security`); ядро выставляет его само.
+  `uwg show <iface> advanced-security`), ключ `AdvancedSecurity` в `[Peer]`,
+  `showconf`/`save` и отправка в ядро через `UWGPEER_A_ADVANCED_SECURITY`;
+  ядро выставляет его само, а userspace UAPI такого ключа не имеет.
 - Тесты: 190 (unit, 10 CLI на фейковом UAPI-сокете, 2 parity-теста `strip`
   против bash-версии).
 - CI: fmt/clippy/test, тесты стенда (`bench`) и статические проверки упаковки
@@ -81,7 +83,9 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # 17 тестов �
 
 ## Известные проблемы
 
-- AdvancedSecurity пира доступен только для чтения: ядро 3.1 выставляет флаг само.
+- AdvancedSecurity пира поддерживает только kernel netlink: userspace UAPI
+  такого ключа не знает, поэтому `uwg` предупреждает и пропускает его. Полная
+  поддержка в демоне — отдельная задача.
 - Пакеты (`debian/`, spec) собираются из Rust-дерева; для source-upload в Debian
   нужен vendor `netlink-packet-umbrawg`.
 - CI собирает ARM-тарболы, но не запускает тесты на ARM-хостах.
