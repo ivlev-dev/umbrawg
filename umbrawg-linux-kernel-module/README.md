@@ -24,7 +24,7 @@ Open `Terminal` and proceed with following instructions:
 1. (Optionally) Upgrade your system to latest packages including latest available kernel by running `apt-get full-upgrade`.
 After kernel upgrade reboot is required.
 2. Install pre-requisites - run `sudo apt install -y software-properties-common python3-launchpadlib gnupg2 linux-headers-$(uname -r)`.
-3. Run `sudo add-apt-repository ppa:amnezia/ppa`.
+3. Install the `umbrawg-dkms` package from the project repository.
 4. Finally execute `sudo apt-get install -y umbrawg`.
 
 ### RHEL/CentOS/SUSE/Fedora Core
@@ -34,7 +34,7 @@ After kernel upgrade reboot is required.
 Open `Terminal` and run:
 
 ```shell
-sudo dnf copr enable amneziavpn/amneziawg
+sudo dnf copr enable ivlev-dev/umbrawg
 sudo dnf install umbrawg-dkms umbrawg-tools
 ```
 
@@ -47,7 +47,7 @@ You may need to install kernel headers and/or build essentials packages before r
 
 1. In Terminal:
     ```shell
-    git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git
+    git clone https://github.com/ivlev-dev/umbrawg-linux-kernel-module.git
     cd umbrawg-linux-kernel-module/src
     ```
 
