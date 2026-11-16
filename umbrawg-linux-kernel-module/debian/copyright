@@ -1,7 +1,7 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
-Upstream-Name: WireGuard Linux Compat
-Source: https://www.wireguard.com/
-Upstream-Contact: WireGuard mailing list <wireguard@lists.zx2c4.com>
+Upstream-Name: UmbraWG Linux kernel module
+Source: https://github.com/ivlev-dev/umbrawg-linux-kernel-module
+Upstream-Contact: Alex Ivlev <ai@itegroup.ru>
 
 Files: *
 Copyright: 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>

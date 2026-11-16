@@ -4,9 +4,9 @@ Name:           umbrawg-dkms
 Version:        1.0.20241112
 Release:        1%{?dist}
 Epoch:          1
-URL:            https://www.wireguard.com/
-Summary:        Fast, modern, secure VPN tunnel
-License:        GPLv2
+URL:            https://github.com/ivlev-dev/umbrawg-linux-kernel-module
+Summary:        UmbraWG - WireGuard-compatible VPN tunnel with obfuscation
+License:        GPL-2.0-only
 Group:          System Environment/Kernel
 BuildArch:      noarch
 
@@ -28,13 +28,9 @@ Requires:       python3-devel
 Requires:       git
 
 %description
-WireGuard is a novel VPN that runs inside the Linux Kernel and uses
-state-of-the-art cryptography (the "Noise" protocol). It aims to be
-faster, simpler, leaner, and more useful than IPSec, while avoiding
-the massive headache. It intends to be considerably more performant
-than OpenVPN. WireGuard is designed as a general purpose VPN for
-running on embedded interfaces and super computers alike, fit for
-many different circumstances. It runs over UDP.
+UmbraWG is a WireGuard-compatible VPN tunnel for Linux with additional
+obfuscation and traffic-shaping features. This package builds the kernel
+module through DKMS against the installed kernel headers.
 
 %prep
 %autosetup -p1 -n umbrawg-linux-kernel-module-%{version}
