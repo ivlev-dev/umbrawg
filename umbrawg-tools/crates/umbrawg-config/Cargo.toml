@@ -10,3 +10,5 @@ thiserror.workspace = true
 zeroize.workspace = true
 base64.workspace = true
 hex.workspace = true
+getrandom = "0.3"
+x25519-dalek = { version = "2", features = ["static_secrets"] }

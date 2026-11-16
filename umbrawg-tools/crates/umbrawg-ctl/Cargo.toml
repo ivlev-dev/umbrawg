@@ -17,3 +17,4 @@ futures.workspace = true
 thiserror.workspace = true
 log.workspace = true
 libc.workspace = true
+hex.workspace = true

@@ -17,7 +17,7 @@ repository = "https://github.com/ivlev-dev/umbrawg-tools"
 [workspace.dependencies]
 umbrawg-config = { path = "crates/umbrawg-config" }
 umbrawg-ctl = { path = "crates/umbrawg-ctl" }
-netlink-packet-umbrawg = { path = "../../netlink-packet-umbrawg" }
+netlink-packet-umbrawg = { path = "../netlink-packet-umbrawg" }
 netlink-packet-generic = "0.4"
 netlink-packet-core = "0.8"
 netlink-proto = "0.12"
