@@ -1,0 +1,12 @@
+[package]
+name = "umbrawg-noise"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+umbrawg-crypto.workspace = true
+umbrawg-proto.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "umbrawg-device"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+umbrawg-crypto.workspace = true
+umbrawg-proto.workspace = true
+umbrawg-noise.workspace = true
+thiserror.workspace = true
+zeroize.workspace = true
+log.workspace = true
+parking_lot = "0.12"
+arc-swap = "1"
+crossbeam-channel = "0.5"
