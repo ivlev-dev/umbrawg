@@ -755,7 +755,7 @@ fn test_unknown_peer_parse_and_emit() {
         let mut out = ((4 + payload.len()) as u16).to_le_bytes().to_vec();
         out.extend_from_slice(&kind.to_le_bytes());
         out.extend_from_slice(payload);
-        while !out.len().is_multiple_of(4) {
+        while out.len() % 4 != 0 {
             out.push(0);
         }
         out
