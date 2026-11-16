@@ -9,6 +9,7 @@ pkgbase = umbrawg-daemon-git
 	makedepends = cargo
 	makedepends = rust
 	depends = glibc
+	depends = gcc-libs
 	optdepends = umbrawg-tools: управление интерфейсами через uwg и uwg-quick
 	provides = umbrawg-daemon
 	conflicts = umbrawg-daemon

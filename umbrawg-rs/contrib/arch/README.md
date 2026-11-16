@@ -32,7 +32,7 @@ AUR-совместимые заготовки пакета userspace-демон�
 
 ## Зависимости
 
-- `depends`: `glibc`.
+- `depends`: `glibc`, `gcc-libs` (`libgcc_s` нужен Rust-бинарнику).
 - `optdepends`: `umbrawg-tools` (`uwg`, `uwg-quick`).
 - `makedepends`: `cargo`, `rust`.
 - `arch`: `x86_64`, `aarch64` (собрано и проверено только на x86_64).
@@ -54,9 +54,13 @@ systemd-analyze verify /tmp/pkg/usr/lib/systemd/system/umbrawg@.service
 отклоняет `set` от непривилегированного uid с `EACCES`), поэтому в упаковочной
 проверке они исключены; полный прогон — `cargo test --workspace` от root.
 
-Проверено на хосте: `umbrawg-daemon-git` и `umbrawg-daemon` собираются,
-`umbrawg 0.1.0` из распакованного пакета печатает версию и справку, юнит и
-tmpfiles на месте, `/etc/umbrawg` — `0700`.
+Проверено на хосте: `umbrawg-daemon-git` собирается из ветки с параллельным RX
+(`makepkg -f --nodeps --skipinteg`), `check()` проходит 405 тестов в 23
+наборах, `umbrawg 0.1.0` из распакованного пакета печатает версию и справку,
+юнит и tmpfiles на месте, `systemd-analyze verify` для `umbrawg@.service`
+ошибок не находит (только предупреждение об отсутствии `/usr/bin/umbrawg` в
+распакованном дереве), `/etc/umbrawg` — `0700`. Стабильный `umbrawg-daemon` —
+шаблон до появления тега, в этой проверке не собирался.
 
 ## Публикация в AUR
 

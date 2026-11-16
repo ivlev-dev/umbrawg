@@ -9,6 +9,7 @@ pkgbase = umbrawg-daemon
 	makedepends = cargo
 	makedepends = rust
 	depends = glibc
+	depends = gcc-libs
 	optdepends = umbrawg-tools: управление интерфейсами через uwg и uwg-quick
 	conflicts = umbrawg-daemon-git
 	source = umbrawg-daemon-0.1.0.tar.gz::https://github.com/ivlev-dev/umbrawg-rs/archive/v0.1.0.tar.gz
