@@ -62,6 +62,16 @@ userspace-демоном из `umbrawg-rs`.
 - Добавлены man-страницы `uwg(8)`/`uwg-quick(8)`, bash/zsh/fish completions,
   systemd-юниты `uwg-quick@.service`, `uwg-quick.target`, `umbrawg@.service`
   и скрипты `scripts/package/`.
+- `.deb` и `.rpm` собраны и проверены в контейнерах (`debian:trixie`,
+  `rust:1.85-bookworm`, `debian:bookworm`, `fedora:latest`): установка,
+  `uwg --version`, smoke-скрипт `debian/tests/smoke`, man-страницы,
+  completions, systemd-юниты и `/etc/umbrawg` с правами `0700`.
+- `build-deb.sh` при отсутствии `Build-Depends` в виде пакетов (rustup-образы)
+  проверяет `cargo`/`rustc` из `PATH` и версию `rustc` против `rust-version`,
+  после чего добавляет `dpkg-buildpackage -d`.
+- Добавлены `debian/umbrawg-tools.lintian-overrides` для `/lib/systemd/system`
+  (merged-/usr) и режима `0700` у `/etc/umbrawg`; в README описана сборка
+  пакетов в Docker.
 
 ## [0.1.0]
 

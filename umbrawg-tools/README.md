@@ -81,7 +81,52 @@ scripts/package/build-rpm.sh    # dist/*.rpm через rpmbuild -ba
 - каталог `/etc/umbrawg` с правами `0700`.
 
 Юнит `umbrawg@.service` рассчитан на демон `umbrawg` из `umbrawg-rs`; в пакет
-`umbrawg-tools` он ставится как готовый файл, сам демон поставляется отдельно.
+`umbrawg-tools` он ставится как готовый файл, сам демон поставляется отдельно,
+поэтому до установки `umbrawg` `systemd-analyze verify` ругается на
+отсутствующий `ExecStart`.
+
+### Сборка в Docker
+
+Оба дерева (`umbrawg-tools` и `netlink-packet-umbrawg`) должны лежать рядом;
+каталог репозитория монтируется в контейнер, `-w` указывает на `umbrawg-tools`.
+
+`.deb` собирается на дистрибутиве с `cargo`/`rustc` >= 1.85 из архива, тогда
+`dpkg-buildpackage` проверяет `Build-Depends` как обычно:
+
+```sh
+docker run --rm -v "$(cd .. && pwd):/src" -w "/src/$(basename "$PWD")" \
+  debian:trixie bash -c 'apt-get update && apt-get install -y --no-install-recommends \
+    build-essential cargo rustc dpkg-dev debhelper ca-certificates && \
+    scripts/package/build-deb.sh'
+```
+
+В образах с rustup (`rust:1.85-bookworm`) пакетов `cargo`/`rustc` нет, и
+`dpkg-checkbuilddeps` не может их подтвердить. В этом случае `build-deb.sh`
+проверяет `cargo`, `rustc`, `dh` в `PATH`, сверяет версию `rustc` с
+`rust-version` из `Cargo.toml` и только затем передаёт `dpkg-buildpackage -d`.
+
+`.rpm` собирается в Fedora:
+
+```sh
+docker run --rm -v "$(cd .. && pwd):/src" -w "/src/$(basename "$PWD")" \
+  fedora:latest bash -c 'dnf install -y rpm-build cargo rust gcc make \
+    systemd-rpm-macros && scripts/package/build-rpm.sh'
+```
+
+Готовые файлы складываются в `dist/`. Проверка содержимого:
+
+```sh
+dpkg-deb -c dist/umbrawg-tools_*.deb
+dpkg-deb -I dist/umbrawg-tools_*.deb
+rpm -qlp dist/umbrawg-tools-*.x86_64.rpm
+rpm -qip dist/umbrawg-tools-*.x86_64.rpm
+lintian dist/umbrawg-tools_*.deb
+```
+
+Юниты в `.deb` ставятся в `/lib/systemd/system`: так их находит debhelper 13
+из bookworm и генерирует maint-скрипты; на merged-/usr это тот же
+`/usr/lib/systemd/system`. Преднамеренные отклонения (`/lib`, режим `0700` у
+`/etc/umbrawg`) описаны в `debian/umbrawg-tools.lintian-overrides`.
 
 ## Использование
 
