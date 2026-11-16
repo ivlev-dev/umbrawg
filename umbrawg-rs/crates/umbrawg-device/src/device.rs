@@ -43,6 +43,30 @@ pub struct IncomingSnapshot {
     timings: Timings,
 }
 
+/// Транспортный сегмент, разобранный до расшифровки.
+///
+/// Содержит результаты классификации сообщения и поиска сессии, но не
+/// расшифрованные данные: `keypair.open` и проверка повтора выполняются позже,
+/// возможно, в другом потоке.
+#[derive(Clone)]
+pub struct PreparedTransport {
+    peer: Arc<Peer>,
+    keypair: Arc<Keypair>,
+    padding: usize,
+    header_end: usize,
+}
+
+/// Результат подготовки входящего сегмента к обработке.
+#[derive(Clone)]
+pub enum PreparedIncoming {
+    /// Транспортный пакет с известной сессией.
+    Transport(PreparedTransport),
+    /// Управляющий пакет (рукопожатие, cookie).
+    Control(DetectedPacket),
+    /// Пакет отброшен на этапе классификации.
+    Dropped,
+}
+
 pub struct DeviceConfig {
     pub private_key: Option<Key>,
     pub listen_port: u16,
@@ -1009,60 +1033,108 @@ impl Device {
         snapshot: &IncomingSnapshot,
         ctx: &mut IoContext<'_, R, S>,
     ) -> Result<IncomingOutcome> {
+        let prepared = self.prepare_incoming(packet, snapshot, ctx.now);
+        self.handle_prepared(packet, prepared, source, snapshot, ctx)
+    }
+
+    /// Классифицирует сегмент и находит сессию, не расшифровывая данные.
+    ///
+    /// Может выполняться в отдельном потоке приёма: результат передаётся в
+    /// [`Device::handle_prepared`] вместе с буфером пакета.
+    #[must_use]
+    pub fn prepare_incoming(
+        &self,
+        packet: &mut [u8],
+        snapshot: &IncomingSnapshot,
+        now: Instant,
+    ) -> PreparedIncoming {
         if packet.len() < MESSAGE_MINIMUM_LENGTH {
-            return Ok(IncomingOutcome::Dropped);
+            return PreparedIncoming::Dropped;
         }
         let obfuscator = Obfuscator::new(&snapshot.params);
         let Some(detected) = obfuscator.detect(packet) else {
-            return Ok(IncomingOutcome::Dropped);
+            return PreparedIncoming::Dropped;
         };
         if obfuscator.unprotect_detected(packet, detected).is_err() {
-            return Ok(IncomingOutcome::Dropped);
+            return PreparedIncoming::Dropped;
         }
-        match detected.kind {
-            MessageKind::Transport => {
-                self.handle_transport(packet, detected, source, snapshot, ctx)
-            }
-            MessageKind::Initiation => {
-                self.handle_initiation(packet, detected.padding, source, ctx)
-            }
-            MessageKind::Response => self.handle_response(packet, detected.padding, source, ctx),
-            MessageKind::Cookie => self.handle_cookie(packet, detected.padding, ctx),
+        if detected.kind != MessageKind::Transport {
+            return PreparedIncoming::Control(detected);
         }
+        let padding = detected.padding;
+        let Some(header_end) = padding.checked_add(TRANSPORT_HEADER_SIZE) else {
+            return PreparedIncoming::Dropped;
+        };
+        if packet.len() < header_end + aead::TAG_LEN {
+            return PreparedIncoming::Dropped;
+        }
+        let receiver = read_u32(packet, padding + 4);
+        let Some(entry) = self.index.lookup(receiver) else {
+            return PreparedIncoming::Dropped;
+        };
+        let Some(keypair) = entry.keypair else {
+            return PreparedIncoming::Dropped;
+        };
+        if keypair.is_expired(now, snapshot.timings.keychain_expire()) {
+            return PreparedIncoming::Dropped;
+        }
+        PreparedIncoming::Transport(PreparedTransport {
+            peer: entry.peer,
+            keypair,
+            padding,
+            header_end,
+        })
     }
 
-    fn handle_transport<R: RngCore, S: PacketIo>(
+    /// Обрабатывает сегмент, подготовленный [`Device::prepare_incoming`].
+    pub fn handle_prepared<R: RngCore, S: PacketIo>(
         &self,
         packet: &mut [u8],
-        detected: DetectedPacket,
+        prepared: PreparedIncoming,
         source: SocketAddr,
         snapshot: &IncomingSnapshot,
         ctx: &mut IoContext<'_, R, S>,
     ) -> Result<IncomingOutcome> {
-        let padding = detected.padding;
-        let header_end = padding + TRANSPORT_HEADER_SIZE;
-        if packet.len() < header_end + aead::TAG_LEN {
-            return Ok(IncomingOutcome::Dropped);
+        match prepared {
+            PreparedIncoming::Transport(prepared) => {
+                self.handle_transport_prepared(packet, prepared, source, snapshot, ctx)
+            }
+            PreparedIncoming::Control(detected) => match detected.kind {
+                MessageKind::Initiation => {
+                    self.handle_initiation(packet, detected.padding, source, ctx)
+                }
+                MessageKind::Response => {
+                    self.handle_response(packet, detected.padding, source, ctx)
+                }
+                MessageKind::Cookie => self.handle_cookie(packet, detected.padding, ctx),
+                MessageKind::Transport => Ok(IncomingOutcome::Dropped),
+            },
+            PreparedIncoming::Dropped => Ok(IncomingOutcome::Dropped),
         }
-        let receiver = read_u32(packet, padding + 4);
-        let counter = read_u64(packet, padding + 8);
-        let Some(entry) = self.index.lookup(receiver) else {
-            return Ok(IncomingOutcome::Dropped);
-        };
-        let Some(keypair) = entry.keypair else {
-            return Ok(IncomingOutcome::Dropped);
-        };
+    }
+
+    fn handle_transport_prepared<R: RngCore, S: PacketIo>(
+        &self,
+        packet: &mut [u8],
+        prepared: PreparedTransport,
+        source: SocketAddr,
+        snapshot: &IncomingSnapshot,
+        ctx: &mut IoContext<'_, R, S>,
+    ) -> Result<IncomingOutcome> {
+        let PreparedTransport {
+            peer,
+            keypair,
+            padding,
+            header_end,
+        } = prepared;
         let timings = &snapshot.timings;
-        if keypair.is_expired(ctx.now, timings.keychain_expire()) {
-            return Ok(IncomingOutcome::Dropped);
-        }
+        let counter = read_u64(packet, padding + 8);
         let Some(plaintext) = keypair.open(counter, &mut packet[header_end..]) else {
             return Ok(IncomingOutcome::Dropped);
         };
         if !keypair.validate_replay(counter) {
             return Ok(IncomingOutcome::Dropped);
         }
-        let peer = entry.peer;
         if !peer.running() {
             return Ok(IncomingOutcome::Dropped);
         }

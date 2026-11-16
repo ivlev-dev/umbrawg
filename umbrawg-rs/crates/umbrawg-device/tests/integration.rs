@@ -7,7 +7,8 @@ use rand_core::RngCore;
 use umbrawg_crypto::{Key, PrivateKey, PublicKey};
 use umbrawg_device::{
     AllowedIp, DatagramSink, Device, DeviceConfig, DeviceControl, DeviceError, IncomingMeta,
-    IncomingOutcome, IoContext, PacketIo, Peer, PeerConfig, PeerState, SendOutcome, Timings,
+    IncomingOutcome, IoContext, PacketIo, Peer, PeerConfig, PeerState, PreparedIncoming,
+    SendOutcome, Timings,
 };
 use umbrawg_proto::special::SpecialPacket;
 use umbrawg_proto::ObfParams;
@@ -920,4 +921,156 @@ fn incoming_snapshot_matches_handle_incoming() {
         assert_eq!(from_snapshot, outcome);
         assert_eq!(from_snapshot, IncomingOutcome::Dropped);
     }
+}
+
+fn encrypted_data(pair: &mut Pair, now: Instant, payload: &[u8]) -> Sent {
+    let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], payload);
+    let mut output = vec![0u8; 65_535];
+    {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_data(&pair.peer_b, &packet, &mut output, &mut ctx)
+            .unwrap();
+    }
+    let mut sent = pair.io_a.take_sent();
+    assert_eq!(sent.len(), 1);
+    sent.remove(0)
+}
+
+#[test]
+fn prepared_transport_is_delivered_like_the_direct_path() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    let packet = encrypted_data(&mut pair, now, b"direct path");
+
+    let direct = deliver_one(
+        packet.clone(),
+        pair.addr_a,
+        &pair.b,
+        &mut pair.io_b,
+        &mut pair.rng,
+        now,
+        &mut pair.scratch,
+    );
+    assert!(matches!(direct, IncomingOutcome::Delivered(_)));
+
+    assert_eq!(pair.io_b.delivered.len(), 1);
+    let second = encrypted_data(&mut pair, now, b"direct path");
+    let mut payload = second.payload;
+    let snapshot = pair.b.incoming_snapshot();
+    let prepared = pair.b.prepare_incoming(&mut payload, &snapshot, now);
+    assert!(matches!(prepared, PreparedIncoming::Transport(_)));
+    let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_b);
+    let outcome = pair
+        .b
+        .handle_prepared(&mut payload, prepared, pair.addr_a, &snapshot, &mut ctx)
+        .unwrap();
+    assert!(matches!(outcome, IncomingOutcome::Delivered(_)));
+    assert_eq!(pair.io_b.delivered.len(), 2);
+    assert_eq!(pair.io_b.delivered[0].0, pair.io_b.delivered[1].0);
+    assert_eq!(pair.io_b.delivered[0].1, pair.io_b.delivered[1].1);
+}
+
+#[test]
+fn prepared_transport_rejects_a_replay() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    let packet = encrypted_data(&mut pair, now, b"replay path");
+
+    let mut payload = packet.payload.clone();
+    let snapshot = pair.b.incoming_snapshot();
+    let prepared = pair.b.prepare_incoming(&mut payload, &snapshot, now);
+    assert!(matches!(prepared, PreparedIncoming::Transport(_)));
+    let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_b);
+    assert!(matches!(
+        pair.b
+            .handle_prepared(&mut payload, prepared, pair.addr_a, &snapshot, &mut ctx)
+            .unwrap(),
+        IncomingOutcome::Delivered(_)
+    ));
+
+    let mut duplicate = packet.payload;
+    let prepared = pair.b.prepare_incoming(&mut duplicate, &snapshot, now);
+    assert!(matches!(prepared, PreparedIncoming::Transport(_)));
+    let outcome = pair
+        .b
+        .handle_prepared(&mut duplicate, prepared, pair.addr_a, &snapshot, &mut ctx)
+        .unwrap();
+    assert_eq!(outcome, IncomingOutcome::Dropped);
+    assert_eq!(pair.io_b.delivered.len(), 1);
+}
+
+#[test]
+fn prepared_control_packet_completes_the_handshake() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a.initiate_handshake(&pair.peer_b, &mut ctx).unwrap();
+    }
+    let mut sent = pair.io_a.take_sent();
+    assert_eq!(sent.len(), 1);
+    let mut payload = sent.remove(0).payload;
+    let snapshot = pair.b.incoming_snapshot();
+    let prepared = pair.b.prepare_incoming(&mut payload, &snapshot, now);
+    assert!(matches!(prepared, PreparedIncoming::Control(_)));
+    let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_b);
+    let outcome = pair
+        .b
+        .handle_prepared(&mut payload, prepared, pair.addr_a, &snapshot, &mut ctx)
+        .unwrap();
+    assert_eq!(outcome, IncomingOutcome::Handshake);
+    assert!(!pair.io_b.take_sent().is_empty());
+}
+
+#[test]
+fn prepared_unknown_session_is_dropped() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    let packet = encrypted_data(&mut pair, now, b"unknown path");
+    let mut payload = packet.payload;
+    payload[4..8].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef]);
+    let snapshot = pair.b.incoming_snapshot();
+    let prepared = pair.b.prepare_incoming(&mut payload, &snapshot, now);
+    assert!(matches!(prepared, PreparedIncoming::Dropped));
+}
+
+#[test]
+fn prepared_gro_segments_are_delivered_independently() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let mut payloads = Vec::new();
+    for index in 0..3u8 {
+        let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[b'A' + index; 100]);
+        let mut output = vec![0u8; 65_535];
+        {
+            let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+            pair.a
+                .send_data(&pair.peer_b, &packet, &mut output, &mut ctx)
+                .unwrap();
+        }
+        payloads.push(pair.io_a.take_sent().remove(0).payload);
+    }
+    let gro_size = payloads[0].len();
+    assert!(payloads.iter().all(|payload| payload.len() == gro_size));
+    let mut datagram: Vec<u8> = payloads.concat();
+    let snapshot = pair.b.incoming_snapshot();
+
+    for offset in (0..datagram.len()).step_by(gro_size) {
+        let segment = &mut datagram[offset..offset + gro_size];
+        let prepared = pair.b.prepare_incoming(segment, &snapshot, now);
+        assert!(matches!(prepared, PreparedIncoming::Transport(_)));
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_b);
+        let outcome = pair
+            .b
+            .handle_prepared(segment, prepared, pair.addr_a, &snapshot, &mut ctx)
+            .unwrap();
+        assert!(matches!(outcome, IncomingOutcome::Delivered(_)));
+    }
+    assert_eq!(pair.io_b.delivered.len(), 3);
 }
