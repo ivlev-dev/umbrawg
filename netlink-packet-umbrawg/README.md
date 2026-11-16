@@ -113,6 +113,23 @@ In addition to standard WireGuard attributes (`PrivateKey`, `PublicKey`, `Peers`
 Peer attributes: `PersistentKeepalive(u16)` is the pre-3.0 wire format, while
 UmbraWG 3.0 sends a `u32` (packed `u16` range), parsed into
 `PersistentKeepaliveRange(u32)`.
+## CI
+
+GitHub Actions runs:
+
+- `cargo test --lib` for unit tests;
+- `cargo test --test properties` for the `proptest` suite;
+- `cargo +nightly fuzz build` to keep both fuzz targets compiling;
+- `cargo +nightly fmt --all -- --check` and
+  `cargo +nightly clippy --all-targets -- -D warnings`;
+- integration tests against a loaded `umbrawg` kernel module.
+
+Integration tests need root, `iproute2`, and the module. A dedicated preflight
+job probes `ip link add ... type umbrawg`; if the family is unavailable the
+integration job is skipped with an explicit warning instead of silently
+passing. The tests themselves also soft-skip when run manually without root,
+so use the preflight when you need a trustworthy result.
+
 ## License
 
 This project is licensed under the [MIT License](./LICENSE).

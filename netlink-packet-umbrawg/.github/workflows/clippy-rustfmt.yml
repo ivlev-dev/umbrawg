@@ -6,6 +6,10 @@ on:
   push:
     branches:
       - main
+      - "feature/**"
+
+permissions:
+  contents: read
 
 jobs:
   rustfmt_clippy:
@@ -16,16 +20,16 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
 
-      - name: Install Rust Nightly
-        run: |
-          rustup override set nightly
-          rustup update nightly
-          rustup component add rustfmt clippy
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
 
       - name: rustfmt
-        run: cargo fmt --all -- --check
+        run: cargo +nightly fmt --all -- --check
 
       - name: clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo +nightly clippy --all-targets -- -D warnings
