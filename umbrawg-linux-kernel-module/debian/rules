@@ -12,8 +12,12 @@ UMBRAWG_ARGS = V=1
 %:
 	dh $@ --with dkms
 
+override_dh_auto_configure:
+	sed -i 's/^PACKAGE_VERSION=.*/PACKAGE_VERSION="$(DEB_VERSION)"/' src/dkms.conf
+	sed -i 's/^UMBRAWG_VERSION = .*/UMBRAWG_VERSION = $(DEB_VERSION)/' src/Makefile
+
 override_dh_auto_install:
-	$(MAKE) -C src DESTDIR=`pwd`/debian/umbrawg-dkms DKMSDIR=/usr/src/umbrawg-$(DEB_VERSION_UPSTREAM) dkms-install
+	$(MAKE) -C src DESTDIR=`pwd`/debian/umbrawg-dkms DKMSDIR=/usr/src/umbrawg-$(DEB_VERSION) dkms-install
 
 override_dh_dkms:
 	dh_dkms -p umbrawg-dkms -- src/dkms.conf
