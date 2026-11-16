@@ -1,88 +1,77 @@
-# [wireguard-tools](https://git.zx2c4.com/wireguard-tools/about/) &mdash; tools for configuring [WireGuard](https://www.wireguard.com/)
+# umbrawg-tools
 
-This supplies the main userspace tooling for using and configuring WireGuard
-tunnels, including the
-[`awg(8)`](https://git.zx2c4.com/wireguard-tools/about/src/man/wg.8) and
-[`awg-quick(8)`](https://git.zx2c4.com/wireguard-tools/about/src/man/wg-quick.8)
-utilities. This project supports Linux, OpenBSD, FreeBSD, macOS, Windows, and
-Android.
+Rust-утилиты для настройки UmbraWG: `uwg` и `uwg-quick`.
 
-**More information may be found at [WireGuard.com](https://www.wireguard.com/).**
+Работают с обоими бэкендами:
 
-## Building
+- модуль ядра `umbrawg` (generic netlink, семейство `umbrawg`);
+- userspace-демон `umbrawg` (UAPI-сокет `/var/run/umbrawg/<iface>.sock`).
 
-    $ cd src
-    $ make
+Бэкенд выбирается автоматически: если найден UAPI-сокет интерфейса — используется он,
+иначе netlink.
 
-There are no dependencies other than a good C compiler and a sane libc.
+## Состав
 
-## Installing
+| Крейт | Назначение |
+|---|---|
+| `umbrawg-config` | ключи, конфигурация INI, параметры обфускации 3.1 |
+| `umbrawg-ctl` | netlink- и UAPI-клиент, снимок состояния устройства |
+| `uwg` | CLI: `genkey`, `genpsk`, `pubkey`, `show`, `showconf`, `set`, `setconf` |
+| `uwg-quick` | `up`, `down`, `strip`, `save` (порт `wg-quick` для Linux) |
 
-    # make install
+`legacy-c/` — прежняя C-реализация (эталон поведения и тест-векторов), не собирается.
+`contrib/` — сторонние примеры, не собираются.
 
-This command takes into account several environment variables:
+## Сборка
 
-  * `PREFIX`               default: `/usr`
-  * `DESTDIR`              default:
-  * `BINDIR`               default: `$(PREFIX)/bin`
-  * `LIBDIR`               default: `$(PREFIX)/lib`
-  * `MANDIR`               default: `$(PREFIX)/share/man`
-  * `BASHCOMPDIR`          default: `$(PREFIX)/share/bash-completion/completions`
-  * `RUNSTATEDIR`          default: `/var/run`
-  * `PKG_CONFIG`           default: `pkg-config`
+Нужен соседний репозиторий `netlink-packet-umbrawg` (`Cargo.toml` использует path-зависимость
+`../netlink-packet-umbrawg`).
 
-  * `WITH_BASHCOMPLETION`  default: [auto-detect]
-  * `WITH_WGQUICK`         default: [auto-detect]
-  * `WITH_SYSTEMDUNITS`    default: [auto-detect]
-  * `DEBUG`                default:
+```sh
+cargo build --release
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+```
 
-The first section is rather standard. The second section is not:
+## Использование
 
-  * `WITH_BASHCOMPLETION` decides whether or not bash completion files for the
-    tools are installed. This is just a nice thing for people who have bash.
-    If you don't have bash, or don't want this, set the environment variable
-    to `no`. If you'd like to force its use, even if bash-completion isn't
-    detected in `DESTDIR`, then set it to `yes`.
+```sh
+uwg genkey | uwg pubkey
+uwg show uwg0
+uwg showconf uwg0
+uwg setconf uwg0 /etc/umbrawg/uwg0.conf
+uwg set uwg0 listen-port 51820
+uwg-quick up uwg0
+uwg-quick down uwg0
+uwg-quick strip uwg0
+```
 
-  * `WITH_WGQUICK` decides whether or not the wg-quick(8) script is installed.
-    This is a very quick and dirty bash script for reading a few extra
-    variables from wg(8)-style configuration files, and automatically
-    configures the interface. If you don't have bash, you probably don't want
-    this at all. Likewise, if you already have a working network management
-    tool or configuration, you probably want to integrate wg(8) or the direct
-    WireGuard API into your network manager, rather than using wg-quick(8).
-    But for folks who like simple quick and dirty scripts, this is nice. If you'd
-    like to force its use, even if bash isn't detected in DESTDIR, then set it
-    to `yes`.
+Конфиги: `/etc/umbrawg/<iface>.conf`. Runtime: `/var/run/umbrawg/`.
 
-  * `WITH_SYSTEMDUNITS` decides whether or not systemd units are installed for
-    wg-quick(8). If you don't use systemd, you certainly don't want this, and
-    should set it to `no`. If systemd isn't auto-detected, but you still would
-    like to install it, set this to `yes`.
+Переменные окружения:
 
-  * `DEBUG` decides whether to build with `-g`, when set to `yes`.
+- `UWG_RUNTIME_DIR` — каталог UAPI-сокетов (по умолчанию `/var/run/umbrawg`);
+- `UWG_QUICK_USERSPACE_IMPLEMENTATION` — демон для `uwg-quick up` (по умолчанию `umbrawg`);
+- `UWG_COLOR_MODE`, `UWG_HIDE_KEYS` — оформление вывода.
 
-If you're a simple `make && make install` kind of user, you can get away with
-not setting these variables and relying on the auto-detection. However, if
-you're writing a package for a distro, you'll want to explicitly set these,
-depending on what you want.
+## Параметры обфускации
 
-## `contrib/`
+Поддерживаются все параметры UmbraWG 3.1: `H1..H4`, `S1..S4`, `Jc`, `Jmin`, `Jmax`,
+`I1..I5`, `HeaderProtectionKey`, `ContentPaddingAddition`, `RandomTrailers`, `DisableCookies`,
+`RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts`.
 
-The `contrib/` subdirectory contains various scripts and examples. Most of these
-are not immediately useful for production use, but should provide inspiration for
-creating fully-featured tools. See the `README` in each directory.
+Пример профиля — `bench/obf-params.conf`.
 
-## Testing integration scripts
+## Тесты и стенд
 
-Integration scripts live in `scripts/`:
+```sh
+cargo test --workspace          # unit + CLI + parity strip против legacy-c
+scripts/test-kernel.sh          # утилиты против модуля ядра
+scripts/test-userspace.sh       # утилиты против userspace-демона
+scripts/test-two-nodes.sh       # 2 netns: ping + iperf3, с обфускацией и без
+bench/bench.sh                  # матрица замеров (см. TODO.md)
+```
 
-- `scripts/test-kernel.sh` — builds and tests the kernel module and `uwg` against kernel backend.
-- `scripts/test-userspace.sh` — tests `uwg` against userspace daemon UAPI socket (skips if binary is missing).
-- `scripts/test-two-nodes.sh` — builds a two-node tunnel and runs ping plus 3-second TCP/UDP iperf3 tests with and without obfuscation.
+## Документация для разработчика
 
-Run on the target host as root.
-
-## License
-
-This project is released under the [GPLv2](COPYING).
+Состояние проекта, известные проблемы и план работ — в [TODO.md](TODO.md).
