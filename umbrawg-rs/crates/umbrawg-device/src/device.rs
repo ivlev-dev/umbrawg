@@ -27,7 +27,9 @@ use crate::buffer::{BufferPool, DEFAULT_BUFFER_SIZE};
 use crate::error::{DeviceError, Result};
 use crate::gso::BatchLayout;
 use crate::index::IndexTable;
-use crate::io::{DatagramSink, IncomingMeta, IncomingOutcome, IoContext, PacketIo};
+use crate::io::{
+    DatagramSink, IncomingDropCounters, IncomingMeta, IncomingOutcome, IoContext, PacketIo,
+};
 use crate::keypair::Keypair;
 use crate::obf::{build_fixed_message, endpoint_bytes, send_pre_handshake, unix_time_seconds};
 use crate::peer::{Peer, PeerConfig, PeerState};
@@ -137,6 +139,7 @@ pub struct Device {
     mtu: AtomicU16,
     next_peer_id: AtomicU32,
     staging_pool: Arc<BufferPool>,
+    incoming_drops: IncomingDropCounters,
 }
 
 impl Device {
@@ -177,6 +180,7 @@ impl Device {
                 config.staged_pool_capacity,
                 DEFAULT_BUFFER_SIZE,
             )),
+            incoming_drops: IncomingDropCounters::default(),
         })
     }
 
@@ -293,6 +297,11 @@ impl Device {
     #[must_use]
     pub fn allowed_ips(&self) -> &crate::allowedips::AllowedIps {
         &self.allowed_ips
+    }
+
+    #[must_use]
+    pub fn incoming_drop_counters(&self) -> &IncomingDropCounters {
+        &self.incoming_drops
     }
 
     #[must_use]
@@ -1130,9 +1139,11 @@ impl Device {
         let timings = &snapshot.timings;
         let counter = read_u64(packet, padding + 8);
         let Some(plaintext) = keypair.open(counter, &mut packet[header_end..]) else {
+            self.incoming_drops.note_open_failed();
             return Ok(IncomingOutcome::Dropped);
         };
         if !keypair.validate_replay(counter) {
+            self.incoming_drops.note_replay();
             return Ok(IncomingOutcome::Dropped);
         }
         if !peer.running() {
@@ -1164,6 +1175,7 @@ impl Device {
             return Ok(IncomingOutcome::Dropped);
         };
         if self.allowed_ips.lookup(address) != Some(peer.id()) {
+            self.incoming_drops.note_allowed_ips();
             return Ok(IncomingOutcome::Dropped);
         }
         self.timers_data_received(&peer, timings, ctx.rng, ctx.now);

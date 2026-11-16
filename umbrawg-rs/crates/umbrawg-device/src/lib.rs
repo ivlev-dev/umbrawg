@@ -26,7 +26,9 @@ pub use device::{
 pub use error::{DeviceError, Result};
 pub use gso::{BatchLayout, GroSegments, GsoGroup, MAX_GSO_GROUPS, MAX_GSO_SEGMENTS};
 pub use index::{IndexEntry, IndexTable};
-pub use io::{DatagramSink, IncomingMeta, IncomingOutcome, IoContext, PacketIo};
+pub use io::{
+    DatagramSink, IncomingDropCounters, IncomingMeta, IncomingOutcome, IoContext, PacketIo,
+};
 pub use keypair::{Keypair, Keypairs, RemovedIndexes};
 pub use peer::{Peer, PeerConfig, PeerState};
 pub use ratelimiter::RateLimiter;
