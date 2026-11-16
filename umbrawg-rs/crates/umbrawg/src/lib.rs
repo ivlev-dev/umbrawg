@@ -18,8 +18,10 @@ use umbrawg_transport::{
     AddressFamily, Endpoint, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
 };
 use umbrawg_tun::{Tun, TunConfig, TunError, TunSet, VirtioNetHdr};
-use umbrawg_uapi::{socket_dir, UapiListener};
+use umbrawg_uapi::{socket_dir, ServerHandle, UapiListener};
 
+mod parallel;
+mod ring;
 mod rx;
 mod tx;
 
@@ -264,6 +266,122 @@ fn send_run<R: rand_core::RngCore>(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn pump_tun_tx<R: rand_core::RngCore>(
+    device: &Device,
+    socket: &Socket,
+    tun: &mut Tun,
+    rng: &mut R,
+    now: Instant,
+    scratch: &mut [u8],
+    tx_buffer: &mut [u8],
+    batch_buffer: &mut [u8],
+    batch: &mut TxBatch,
+    rx: &mut RxBatch,
+    tun_slices: &mut [&mut [u8]],
+    tun_sizes: &mut [usize],
+    rekey: &mut Vec<Arc<Peer>>,
+) -> bool {
+    let mut busy = false;
+    loop {
+        match tun.read_batch_sizes(tun_slices, tun_sizes) {
+            Ok(0) => break,
+            Ok(count) => {
+                busy = true;
+                log::debug!("tun batch of {count} segments");
+                let mut plaintexts: [&[u8]; TUN_BATCH] = [&[]; TUN_BATCH];
+                let mut pending = 0usize;
+                let mut current: Option<Arc<Peer>> = None;
+                for index in 0..count {
+                    let length = tun_sizes[index];
+                    if length == 0 {
+                        continue;
+                    }
+                    let packet = &tun_slices[index][..length];
+                    let Some(destination) = packet_destination(packet) else {
+                        continue;
+                    };
+                    let Some(peer) = device.route(destination) else {
+                        log::debug!("no peer for {destination}");
+                        continue;
+                    };
+                    let same = current
+                        .as_ref()
+                        .is_some_and(|known| Arc::ptr_eq(known, &peer));
+                    if !same {
+                        if let Some(previous) = current.as_ref() {
+                            send_run(
+                                device,
+                                socket,
+                                tun,
+                                rng,
+                                now,
+                                scratch,
+                                tx_buffer,
+                                batch_buffer,
+                                batch,
+                                previous,
+                                &plaintexts[..pending],
+                                rekey,
+                                rx,
+                            );
+                            pending = 0;
+                        }
+                        current = Some(peer);
+                    }
+                    plaintexts[pending] = packet;
+                    pending += 1;
+                    if pending == TUN_BATCH {
+                        if let Some(peer) = current.as_ref() {
+                            send_run(
+                                device,
+                                socket,
+                                tun,
+                                rng,
+                                now,
+                                scratch,
+                                tx_buffer,
+                                batch_buffer,
+                                batch,
+                                peer,
+                                &plaintexts[..pending],
+                                rekey,
+                                rx,
+                            );
+                        }
+                        pending = 0;
+                    }
+                }
+                if pending > 0 {
+                    if let Some(peer) = current.as_ref() {
+                        send_run(
+                            device,
+                            socket,
+                            tun,
+                            rng,
+                            now,
+                            scratch,
+                            tx_buffer,
+                            batch_buffer,
+                            batch,
+                            peer,
+                            &plaintexts[..pending],
+                            rekey,
+                            rx,
+                        );
+                    }
+                }
+            }
+            Err(error) if is_tun_would_block(&error) => break,
+            Err(error) => {
+                log::debug!("tun read failed: {error}");
+                break;
+            }
+        }
+    }
+    busy
+}
+
 fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
     let mut rng = BufferedRng::new(rand_core::OsRng);
     let mut scratch = vec![0u8; MAX_PACKET + 512];
@@ -309,105 +427,22 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
             }
         }
         let active = socket.as_ref().expect("socket is bound");
-        let mut busy = false;
         rekey.clear();
-
-        loop {
-            match tun.read_batch_sizes(&mut tun_slices, &mut tun_sizes) {
-                Ok(0) => break,
-                Ok(count) => {
-                    busy = true;
-                    log::debug!("tun batch of {count} segments");
-                    let mut plaintexts: [&[u8]; TUN_BATCH] = [&[]; TUN_BATCH];
-                    let mut pending = 0usize;
-                    let mut current: Option<Arc<Peer>> = None;
-                    for index in 0..count {
-                        let length = tun_sizes[index];
-                        if length == 0 {
-                            continue;
-                        }
-                        let packet = &tun_slices[index][..length];
-                        let Some(destination) = packet_destination(packet) else {
-                            continue;
-                        };
-                        let Some(peer) = device.route(destination) else {
-                            log::debug!("no peer for {destination}");
-                            continue;
-                        };
-                        let same = current
-                            .as_ref()
-                            .is_some_and(|known| Arc::ptr_eq(known, &peer));
-                        if !same {
-                            if let Some(previous) = current.as_ref() {
-                                send_run(
-                                    &device,
-                                    active,
-                                    &tun,
-                                    &mut rng,
-                                    now,
-                                    &mut scratch,
-                                    &mut tx_buffer,
-                                    &mut batch_buffer,
-                                    &mut batch,
-                                    previous,
-                                    &plaintexts[..pending],
-                                    &mut rekey,
-                                    &mut rx,
-                                );
-                                pending = 0;
-                            }
-                            current = Some(peer);
-                        }
-                        plaintexts[pending] = packet;
-                        pending += 1;
-                        if pending == TUN_BATCH {
-                            if let Some(peer) = current.as_ref() {
-                                send_run(
-                                    &device,
-                                    active,
-                                    &tun,
-                                    &mut rng,
-                                    now,
-                                    &mut scratch,
-                                    &mut tx_buffer,
-                                    &mut batch_buffer,
-                                    &mut batch,
-                                    peer,
-                                    &plaintexts[..pending],
-                                    &mut rekey,
-                                    &mut rx,
-                                );
-                            }
-                            pending = 0;
-                        }
-                    }
-                    if pending > 0 {
-                        if let Some(peer) = current.as_ref() {
-                            send_run(
-                                &device,
-                                active,
-                                &tun,
-                                &mut rng,
-                                now,
-                                &mut scratch,
-                                &mut tx_buffer,
-                                &mut batch_buffer,
-                                &mut batch,
-                                peer,
-                                &plaintexts[..pending],
-                                &mut rekey,
-                                &mut rx,
-                            );
-                        }
-                    }
-                }
-                Err(error) if is_tun_would_block(&error) => break,
-                Err(error) => {
-                    log::debug!("tun read failed: {error}");
-                    break;
-                }
-            }
-        }
+        let mut busy = pump_tun_tx(
+            &device,
+            active,
+            &mut tun,
+            &mut rng,
+            now,
+            &mut scratch,
+            &mut tx_buffer,
+            &mut batch_buffer,
+            &mut batch,
+            &mut rx,
+            &mut tun_slices,
+            &mut tun_sizes,
+            &mut rekey,
+        );
 
         if !batch.is_empty() {
             batch.flush(active, &batch_buffer);
@@ -563,11 +598,17 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
     let available = thread::available_parallelism()
         .map(|value| value.get())
         .unwrap_or(1);
-    let requested = env::var("UMBRAWG_THREADS").ok();
-    let workers = worker_count(requested.as_deref(), available);
 
     let device = Arc::new(Device::new(DeviceConfig::default())?);
     device.up();
+
+    if let Some(parallel) = parallel::ParallelConfig::from_env(available) {
+        log::info!("parallel rx enabled: {} crypto workers", parallel.workers);
+        return run_parallel(device, ifname, parallel);
+    }
+
+    let requested = env::var("UMBRAWG_THREADS").ok();
+    let workers = worker_count(requested.as_deref(), available);
 
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
@@ -600,12 +641,75 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         handles.push(handle);
     }
 
+    wait_for_shutdown(server)?;
+    for handle in handles {
+        let _ = handle.join();
+    }
+
+    Ok(())
+}
+
+fn wait_for_shutdown(server: ServerHandle) -> Result<(), Box<dyn std::error::Error>> {
     while !shutdown_requested() {
         thread::sleep(Duration::from_millis(100));
     }
-
+    let server = server;
     server.shutdown()?;
     server.join()?;
+    Ok(())
+}
+
+fn run_parallel(
+    device: Arc<Device>,
+    ifname: &str,
+    parallel: parallel::ParallelConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let workers = parallel.workers;
+    let config = TunConfig::new(ifname)
+        .with_multi_queue(workers > 1)
+        .with_offload(true)
+        .with_vnet_hdr_size(VirtioNetHdr::LEN)
+        .with_nonblocking(true)
+        .with_mtu(u32::from(device.mtu()));
+    let tun_set = match TunSet::open(&config, workers) {
+        Ok(set) => set,
+        Err(TunError::Unsupported(feature)) => {
+            log::warn!("tun offload is unavailable ({feature}); falling back to packet mode");
+            TunSet::open(&config.clone().with_offload(false), workers)?
+        }
+        Err(error) => return Err(error.into()),
+    };
+
+    let listener = UapiListener::bind(&socket_dir(), ifname)?;
+    let server = listener.spawn(Arc::clone(&device))?;
+    let shared = Arc::new(parallel::SharedRx::new(workers)?);
+
+    let rx_device = Arc::clone(&device);
+    let rx_shared = Arc::clone(&shared);
+    let rx_handle = thread::Builder::new()
+        .name("umbrawg-rx".to_owned())
+        .spawn(move || {
+            if let Err(error) = parallel::rx_loop(rx_device, rx_shared) {
+                log::error!("rx thread stopped: {error}");
+            }
+        })?;
+
+    let mut handles = Vec::with_capacity(workers);
+    for (index, tun) in tun_set.into_queues().into_iter().enumerate() {
+        let device = Arc::clone(&device);
+        let shared = Arc::clone(&shared);
+        let handle = thread::Builder::new()
+            .name(format!("umbrawg-crypto-{index}"))
+            .spawn(move || {
+                if let Err(error) = parallel::worker_loop(device, tun, shared, index) {
+                    log::error!("crypto worker stopped: {error}");
+                }
+            })?;
+        handles.push(handle);
+    }
+
+    wait_for_shutdown(server)?;
+    let _ = rx_handle.join();
     for handle in handles {
         let _ = handle.join();
     }

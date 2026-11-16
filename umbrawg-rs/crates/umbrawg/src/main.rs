@@ -44,6 +44,9 @@ fn print_help() {
     println!();
     println!("Переменные окружения:");
     println!("  UMBRAWG_THREADS       число рабочих потоков");
+    println!("  UMBRAWG_PARALLEL_RX   1 — параллельный приём (RX-поток + крипто-воркеры)");
+    println!("  UMBRAWG_RX_WORKERS    число крипто-воркеров параллельного приёма");
+    println!("  UMBRAWG_RX_STATS      1 — выводить счётчики приёма раз в 5 секунд");
     println!("  UMBRAWG_LOG_LEVEL     уровень логирования");
     println!("  UMBRAWG_RUNTIME_DIR   каталог сокетов управления");
 }
