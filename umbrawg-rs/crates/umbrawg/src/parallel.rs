@@ -5,9 +5,11 @@
 //! крипто-воркеров. Воркеры выполняют `keypair.open`, проверку повтора,
 //! обработку таймеров и запись в собственную очередь TUN (с GSO-склейкой).
 //!
-//! Порядок пакетов между разными воркерами не гарантируется; внутри одной
-//! дейтаграммы (в том числе GRO-суперпакета) порядок сохраняется, а отброшенный
-//! сегмент не переставляет соседние.
+//! По умолчанию воркер выбирается по пиру (`UMBRAWG_RX_SCHED=peer`): все
+//! транспортные сегменты одного пира попадают в один воркер, поэтому порядок
+//! внутри пира сохраняется, а разные пиры распределяются по воркерам. Режим
+//! `queue` раскладывает задания по наименее загруженной очереди и служит только
+//! для замеров: он переставляет пакеты одного потока между воркерами.
 
 use std::cell::UnsafeCell;
 use std::io;
@@ -39,10 +41,10 @@ use crate::{
 /// Максимальное число сегментов в одном задании.
 pub(crate) const MAX_SEGMENTS: usize = 64;
 
-/// Ёмкость очереди заданий и пула буферов на одного воркера.
-const QUEUE_CAPACITY: usize = 64;
+/// Ёмкость очереди заданий и пула буферов на одного воркера (16 МиБ).
+const QUEUE_CAPACITY: usize = 256;
 
-/// Верхняя граница числа крипто-воркеров: 8 потоков по 4 МиБ буферов.
+/// Верхняя граница числа крипто-воркеров: 8 потоков по 16 МиБ буферов.
 const MAX_WORKERS: usize = 8;
 
 /// Период вывода счётчиков при `UMBRAWG_RX_STATS=1`.
@@ -55,6 +57,8 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(5);
 pub(crate) struct ParallelConfig {
     /// Число крипто-воркеров (потоков расшифровки и записи в TUN).
     pub workers: usize,
+    /// Правило выбора воркера для дейтаграммы.
+    pub sched: RxSchedule,
 }
 
 impl ParallelConfig {
@@ -65,9 +69,38 @@ impl ParallelConfig {
             return None;
         }
         let requested = std::env::var("UMBRAWG_RX_WORKERS").ok();
+        let sched = RxSchedule::from_env(std::env::var("UMBRAWG_RX_SCHED").ok().as_deref());
         Some(Self {
             workers: crypto_worker_count(requested.as_deref(), available),
+            sched,
         })
+    }
+}
+
+/// Правило выбора воркера для задания.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum RxSchedule {
+    /// Привязка по пиру: порядок пакетов внутри пира сохраняется.
+    #[default]
+    Peer,
+    /// Наименее загруженная очередь: переставляет пакеты одного потока.
+    Queue,
+}
+
+impl RxSchedule {
+    /// Разбирает значение `UMBRAWG_RX_SCHED`; неизвестные значения дают `peer`.
+    pub(crate) fn from_env(value: Option<&str>) -> Self {
+        match value.map(str::trim) {
+            Some(value) if value.eq_ignore_ascii_case("queue") => Self::Queue,
+            _ => Self::Peer,
+        }
+    }
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Peer => "peer",
+            Self::Queue => "queue",
+        }
     }
 }
 
@@ -123,6 +156,8 @@ pub(crate) struct RxStats {
     pub segments: AtomicU64,
     pub gro_splits: AtomicU64,
     pub max_datagram_segments: AtomicU64,
+    /// Дейтаграмм, в которых встретились сегменты разных пиров.
+    pub mixed_peer_datagrams: AtomicU64,
 }
 
 /// Задание воркеру: одна дейтаграмма с подготовленными сегментами.
@@ -356,12 +391,13 @@ impl WorkerChannel {
 pub(crate) struct SharedRx {
     socket: RwLock<Option<Arc<Socket>>>,
     channels: Vec<WorkerChannel>,
+    sched: RxSchedule,
     stats: RxStats,
     failure: Mutex<Option<String>>,
 }
 
 impl SharedRx {
-    pub fn new(workers: usize) -> io::Result<Self> {
+    pub fn new(workers: usize, sched: RxSchedule) -> io::Result<Self> {
         let mut channels = Vec::with_capacity(workers);
         for _ in 0..workers {
             channels.push(WorkerChannel::new(MAX_PACKET)?);
@@ -369,6 +405,7 @@ impl SharedRx {
         Ok(Self {
             socket: RwLock::new(None),
             channels,
+            sched,
             stats: RxStats::default(),
             failure: Mutex::new(None),
         })
@@ -522,13 +559,15 @@ pub(crate) fn rx_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Result<
             stats_at = Instant::now();
             let counters = device.incoming_drop_counters();
             log::info!(
-                "rx stats: datagrams={} enqueued={} controls={} segments={} gro_splits={} max_datagram_segments={} housekeeping={} drops(detect={} prepared={} endpoint={} queue={} size={} open={} replay={} allowed={} tun={} tx={} pool={}) wakes={}",
+                "rx stats: sched={} datagrams={} enqueued={} controls={} segments={} gro_splits={} max_datagram_segments={} mixed_peers={} housekeeping={} drops(detect={} prepared={} endpoint={} queue={} size={} open={} replay={} allowed={} tun={} tx={} pool={}) wakes={}",
+                shared.sched.as_str(),
                 shared.stats.datagrams.load(Ordering::Relaxed),
                 shared.stats.enqueued.load(Ordering::Relaxed),
                 shared.stats.controls.load(Ordering::Relaxed),
                 shared.stats.segments.load(Ordering::Relaxed),
                 shared.stats.gro_splits.load(Ordering::Relaxed),
                 shared.stats.max_datagram_segments.load(Ordering::Relaxed),
+                shared.stats.mixed_peer_datagrams.load(Ordering::Relaxed),
                 shared.stats.housekeeping.load(Ordering::Relaxed),
                 shared.stats.drops_detect.load(Ordering::Relaxed),
                 shared.stats.drops_prepared.load(Ordering::Relaxed),
@@ -582,6 +621,22 @@ pub(crate) fn select_worker(pending: &[usize], start: usize) -> usize {
     best
 }
 
+/// Хеш FNV-1a: стабильный между запусками и независимый от порядка пиров.
+fn peer_hash(bytes: &[u8; 32]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+/// Привязывает пира к воркеру: `hash(public_key) % workers`.
+pub(crate) fn peer_worker(public_key: &[u8; 32], workers: usize) -> usize {
+    debug_assert!(workers > 0, "there is at least one worker");
+    (peer_hash(public_key) % workers as u64) as usize
+}
+
 struct GroChunks {
     offset: usize,
     len: usize,
@@ -622,27 +677,51 @@ fn publish_job(
     source: SocketAddr,
     gro_size: Option<usize>,
     prepared: [Option<PreparedTransport>; MAX_SEGMENTS],
+    pinned: Option<usize>,
 ) {
     let channels = shared.channels.len();
-    let start = *cursor % channels;
-    *cursor = cursor.wrapping_add(1);
-    let mut pending = [0usize; MAX_WORKERS];
-    for (slot, channel) in pending.iter_mut().zip(&shared.channels) {
-        *slot = channel.pending();
-    }
-    let mut target = select_worker(&pending[..channels], start);
-    let mut slot = None;
-    for attempt in 0..channels {
-        let candidate = (target + attempt) % channels;
-        if let Some(free) = shared.channels[candidate].allocate() {
-            target = candidate;
-            slot = Some(free);
-            break;
+    let (target, slot) = match shared.sched {
+        RxSchedule::Peer => {
+            let worker = match pinned {
+                Some(worker) => worker % channels,
+                None => {
+                    let worker = *cursor % channels;
+                    *cursor = cursor.wrapping_add(1);
+                    worker
+                }
+            };
+            match shared.channels[worker].allocate() {
+                Some(slot) => (worker, slot),
+                None => {
+                    shared.stats.drops_queue.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
         }
-    }
-    let Some(slot) = slot else {
-        shared.stats.drops_queue.fetch_add(1, Ordering::Relaxed);
-        return;
+        RxSchedule::Queue => {
+            let start = *cursor % channels;
+            *cursor = cursor.wrapping_add(1);
+            let mut pending = [0usize; MAX_WORKERS];
+            for (slot, channel) in pending.iter_mut().zip(&shared.channels) {
+                *slot = channel.pending();
+            }
+            let first = select_worker(&pending[..channels], start);
+            let mut chosen = None;
+            for attempt in 0..channels {
+                let candidate = (first + attempt) % channels;
+                if let Some(free) = shared.channels[candidate].allocate() {
+                    chosen = Some((candidate, free));
+                    break;
+                }
+            }
+            match chosen {
+                Some(pair) => pair,
+                None => {
+                    shared.stats.drops_queue.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
+        }
     };
     let channel = &shared.channels[target];
     debug_assert!(
@@ -699,6 +778,9 @@ fn enqueue_segments(
     }
     let mut total_segments = 0u64;
     let mut chunk_count = 0u64;
+    let mut pinned: Option<usize> = None;
+    let mut first_peer: Option<[u8; 32]> = None;
+    let mut mixed = false;
     for (start, end) in GroChunks::new(len, gro_size) {
         let mut prepared: [Option<PreparedTransport>; MAX_SEGMENTS] =
             [const { None }; MAX_SEGMENTS];
@@ -711,6 +793,23 @@ fn enqueue_segments(
             }
             match device.prepare_incoming(&mut data[offset..segment_end], snapshot, now) {
                 PreparedIncoming::Transport(entry) => {
+                    let key = entry.peer_public_key().to_bytes();
+                    match first_peer {
+                        None => {
+                            first_peer = Some(key);
+                            if shared.sched == RxSchedule::Peer {
+                                pinned = Some(peer_worker(&key, shared.channels.len()));
+                            }
+                        }
+                        Some(expected) if expected != key && !mixed => {
+                            mixed = true;
+                            shared
+                                .stats
+                                .mixed_peer_datagrams
+                                .fetch_add(1, Ordering::Relaxed);
+                        }
+                        Some(_) => {}
+                    }
                     prepared[ordinal] = Some(entry);
                 }
                 PreparedIncoming::Control(detected) => {
@@ -746,6 +845,7 @@ fn enqueue_segments(
             source,
             gro_size,
             prepared,
+            pinned,
         );
     }
     if total_segments > 0 {
@@ -1057,21 +1157,192 @@ mod tests {
     }
 
     #[test]
-    fn channel_distributes_jobs_across_workers() {
-        let shared = SharedRx::new(3).unwrap();
-        let mut cursor = 0usize;
-        let mut counts = [0usize; 3];
-        for _ in 0..30 {
-            let worker = cursor % shared.channels.len();
-            cursor = cursor.wrapping_add(1);
-            counts[worker] += 1;
+    fn rx_schedule_defaults_to_peer() {
+        assert_eq!(RxSchedule::from_env(None), RxSchedule::Peer);
+        assert_eq!(RxSchedule::from_env(Some("")), RxSchedule::Peer);
+        assert_eq!(RxSchedule::from_env(Some("peer")), RxSchedule::Peer);
+        assert_eq!(RxSchedule::from_env(Some(" PEER ")), RxSchedule::Peer);
+        assert_eq!(RxSchedule::from_env(Some("unknown")), RxSchedule::Peer);
+        assert_eq!(RxSchedule::from_env(Some("queue")), RxSchedule::Queue);
+        assert_eq!(RxSchedule::from_env(Some(" Queue ")), RxSchedule::Queue);
+        assert_eq!(RxSchedule::Peer.as_str(), "peer");
+        assert_eq!(RxSchedule::Queue.as_str(), "queue");
+        assert_eq!(RxSchedule::default(), RxSchedule::Peer);
+    }
+
+    fn peer_key(seed: u32) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        key[..4].copy_from_slice(&seed.to_le_bytes());
+        key[31] = 0x5a;
+        key
+    }
+
+    fn keys_by_worker(workers: usize) -> Vec<[u8; 32]> {
+        let mut keys: Vec<Option<[u8; 32]>> = vec![None; workers];
+        let mut found = 0;
+        for seed in 0..10_000u32 {
+            let key = peer_key(seed);
+            let worker = peer_worker(&key, workers);
+            if keys[worker].is_none() {
+                keys[worker] = Some(key);
+                found += 1;
+                if found == workers {
+                    break;
+                }
+            }
         }
-        assert_eq!(counts, [10, 10, 10]);
+        assert_eq!(found, workers, "each worker has a peer key");
+        keys.into_iter()
+            .map(|key| key.expect("key found"))
+            .collect()
+    }
+
+    fn publish(shared: &SharedRx, cursor: &mut usize, key: Option<[u8; 32]>, marker: u64) {
+        let pinned = key.map(|key| peer_worker(&key, shared.channels.len()));
+        let data = marker.to_le_bytes();
+        publish_job(
+            shared,
+            cursor,
+            &data,
+            "10.0.0.1:1000".parse().unwrap(),
+            None,
+            [const { None }; MAX_SEGMENTS],
+            pinned,
+        );
+    }
+
+    fn drain(shared: &SharedRx) -> Vec<Vec<u64>> {
+        shared
+            .channels
+            .iter()
+            .map(|channel| {
+                let mut markers = Vec::new();
+                while let Some(job) = channel.pop() {
+                    let len = job.len as usize;
+                    let data = channel.buffers().get(job.slot);
+                    let mut bytes = [0u8; 8];
+                    bytes[..len].copy_from_slice(&data[..len]);
+                    markers.push(u64::from_le_bytes(bytes));
+                    channel.release(job.slot);
+                }
+                markers
+            })
+            .collect()
+    }
+
+    #[test]
+    fn peer_worker_is_stable() {
+        for workers in 1..=MAX_WORKERS {
+            let key = peer_key(7);
+            let worker = peer_worker(&key, workers);
+            for _ in 0..100 {
+                assert_eq!(peer_worker(&key, workers), worker);
+            }
+            assert!(worker < workers);
+        }
+    }
+
+    #[test]
+    fn peer_worker_spreads_distinct_peers() {
+        for workers in 2..=MAX_WORKERS {
+            let keys = keys_by_worker(workers);
+            let mut used = vec![false; workers];
+            for (expected, key) in keys.iter().enumerate() {
+                let worker = peer_worker(key, workers);
+                assert_eq!(worker, expected);
+                used[worker] = true;
+            }
+            assert!(used.iter().all(|used| *used));
+        }
+    }
+
+    #[test]
+    fn peer_mode_keeps_one_worker_per_peer_in_order() {
+        let shared = SharedRx::new(4, RxSchedule::Peer).unwrap();
+        let mut cursor = 0usize;
+        let key = peer_key(11);
+        let worker = peer_worker(&key, shared.channels.len());
+        for marker in 0..25u64 {
+            publish(&shared, &mut cursor, Some(key), marker);
+        }
+        let drained = drain(&shared);
+        for (index, markers) in drained.iter().enumerate() {
+            if index == worker {
+                assert_eq!(*markers, (0..25u64).collect::<Vec<_>>());
+            } else {
+                assert!(markers.is_empty(), "worker {index} got foreign jobs");
+            }
+        }
+        assert_eq!(shared.stats.enqueued.load(Ordering::Relaxed), 25);
+        assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn peer_mode_spreads_peers_over_workers() {
+        let workers = 4;
+        let shared = SharedRx::new(workers, RxSchedule::Peer).unwrap();
+        let keys = keys_by_worker(workers);
+        let mut cursor = 0usize;
+        for round in 0..6u64 {
+            for key in &keys {
+                publish(&shared, &mut cursor, Some(*key), round);
+            }
+        }
+        let drained = drain(&shared);
+        assert_eq!(drained.len(), workers);
+        for (worker, markers) in drained.iter().enumerate() {
+            assert_eq!(*markers, (0..6u64).collect::<Vec<_>>(), "worker {worker}");
+        }
+    }
+
+    #[test]
+    fn queue_mode_distributes_jobs_across_workers() {
+        let shared = SharedRx::new(2, RxSchedule::Queue).unwrap();
+        let mut cursor = 0usize;
+        let key = peer_key(3);
+        for marker in 0..10u64 {
+            publish(&shared, &mut cursor, Some(key), marker);
+        }
+        let drained = drain(&shared);
+        assert!(drained.iter().all(|markers| !markers.is_empty()));
+        assert_eq!(drained.iter().map(Vec::len).sum::<usize>(), 10);
+    }
+
+    #[test]
+    fn peer_mode_drops_on_backpressure_without_moving() {
+        let workers = 3;
+        let shared = SharedRx::new(workers, RxSchedule::Peer).unwrap();
+        let keys = keys_by_worker(workers);
+        let mut cursor = 0usize;
+        let busy = 0usize;
+        let busy_key = keys[busy];
+        let other_key = keys[1];
+        for marker in 0..QUEUE_CAPACITY as u64 {
+            publish(&shared, &mut cursor, Some(busy_key), marker);
+        }
+        assert_eq!(shared.channels[busy].pending(), QUEUE_CAPACITY);
+        let before = shared.stats.enqueued.load(Ordering::Relaxed);
+        publish(&shared, &mut cursor, Some(busy_key), 9_999);
+        assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.stats.enqueued.load(Ordering::Relaxed), before);
+        assert_eq!(shared.channels[busy].pending(), QUEUE_CAPACITY);
+        assert_eq!(shared.channels[1].pending(), 0);
+        publish(&shared, &mut cursor, Some(other_key), 1_000);
+        assert_eq!(shared.channels[1].pending(), 1);
+        assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 1);
+        let drained = shared.channels[busy].pop().expect("job is queued");
+        shared.channels[busy].release(drained.slot);
+        publish(&shared, &mut cursor, Some(busy_key), 10_000);
+        assert_eq!(shared.channels[busy].pending(), QUEUE_CAPACITY);
+        assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 1);
+        let markers = drain(&shared)[busy].clone();
+        assert_eq!(markers.first(), Some(&1));
+        assert_eq!(markers.last(), Some(&10_000));
     }
 
     #[test]
     fn shared_channels_survive_concurrent_shutdown() {
-        let shared = Arc::new(SharedRx::new(2).unwrap());
+        let shared = Arc::new(SharedRx::new(2, RxSchedule::Peer).unwrap());
         let producers: Vec<_> = (0..2)
             .map(|worker| {
                 let shared = Arc::clone(&shared);
@@ -1293,7 +1564,7 @@ mod tests {
 
     #[test]
     fn failing_thread_requests_shutdown() {
-        let shared = SharedRx::new(1).unwrap();
+        let shared = SharedRx::new(1, RxSchedule::Peer).unwrap();
         assert!(shared.failure().is_none());
         shared.register_failure("rx stop".to_owned());
         assert_eq!(shared.failure().as_deref(), Some("rx stop"));

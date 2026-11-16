@@ -618,7 +618,11 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
     device.up();
 
     if let Some(parallel) = parallel::ParallelConfig::from_env(available) {
-        log::info!("parallel rx enabled: {} crypto workers", parallel.workers);
+        log::info!(
+            "parallel rx enabled: {} crypto workers, sched={}",
+            parallel.workers,
+            parallel.sched.as_str()
+        );
         return run_parallel(device, ifname, parallel);
     }
 
@@ -696,7 +700,7 @@ fn run_parallel(
 
     let listener = UapiListener::bind(&socket_dir(), ifname)?;
     let server = listener.spawn(Arc::clone(&device))?;
-    let shared = Arc::new(parallel::SharedRx::new(workers)?);
+    let shared = Arc::new(parallel::SharedRx::new(workers, parallel.sched)?);
 
     let rx_device = Arc::clone(&device);
     let rx_shared = Arc::clone(&shared);

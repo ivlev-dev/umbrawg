@@ -58,6 +58,20 @@ pub struct PreparedTransport {
     header_end: usize,
 }
 
+impl PreparedTransport {
+    /// Возвращает пира, которому принадлежит сегмент.
+    #[must_use]
+    pub fn peer(&self) -> &Peer {
+        &self.peer
+    }
+
+    /// Возвращает публичный ключ пира — стабильный идентификатор для раскладки по потокам.
+    #[must_use]
+    pub fn peer_public_key(&self) -> PublicKey {
+        self.peer.public_key()
+    }
+}
+
 /// Результат подготовки входящего сегмента к обработке.
 #[derive(Clone)]
 pub enum PreparedIncoming {
