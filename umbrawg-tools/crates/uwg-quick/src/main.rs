@@ -24,12 +24,13 @@ fn main() {
         std::process::exit(1);
     }
 
-    auto_su(&program, &argv0, &rest);
-
     let Some(subcommand) = rest[0].to_str() else {
         eprintln!("{program}: invalid subcommand");
         std::process::exit(1);
     };
+    if requires_root(subcommand) {
+        auto_su(&program, &argv0, &rest);
+    }
     let Some(config_argument) = rest[1].to_str() else {
         eprintln!("{program}: invalid configuration path");
         std::process::exit(1);
@@ -75,6 +76,10 @@ fn prepend_executable_directory() {
     }
 }
 
+fn requires_root(subcommand: &str) -> bool {
+    matches!(subcommand, "up" | "down" | "save")
+}
+
 fn auto_su(program: &str, argv0: &OsStr, rest: &[OsString]) {
     if unsafe { libc::getuid() } == 0 {
         return;
@@ -94,4 +99,27 @@ fn auto_su(program: &str, argv0: &OsStr, rest: &[OsString]) {
         .exec();
     eprintln!("{program}: sudo: {error}");
     std::process::exit(127);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::requires_root;
+
+    #[test]
+    fn strip_never_asks_for_root() {
+        assert!(!requires_root("strip"));
+    }
+
+    #[test]
+    fn link_commands_require_root() {
+        for subcommand in ["up", "down", "save"] {
+            assert!(requires_root(subcommand), "{subcommand}");
+        }
+    }
+
+    #[test]
+    fn unknown_subcommands_do_not_require_root() {
+        assert!(!requires_root("show"));
+        assert!(!requires_root(""));
+    }
 }
