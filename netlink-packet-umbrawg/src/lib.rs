@@ -30,9 +30,11 @@
 //!
 //! - `H1`..`H4` are `u64` values packing a `u32` range (`lo | hi << 32`) in the
 //!   UmbraWG 3.x module, a NUL-terminated string in genl family version 2, and
-//!   a bare `u32` in the original module. The parser normalizes all of them to
-//!   the string variants [`UmbrawgAttribute::H1`]..[`UmbrawgAttribute::H4`];
-//!   the `*Range` variants emit the packed 3.x format.
+//!   a bare `u32` in the original module. The parser keeps the wire
+//!   representation: strings become
+//!   [`UmbrawgAttribute::H1`]..[`UmbrawgAttribute::H4`], packed ranges become
+//!   the `*Range` variants, and 4-byte values become the `*Legacy` variants, so
+//!   a parsed message can be re-emitted byte for byte.
 //! - `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`,
 //!   `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts` and the
 //!   persistent keepalive interval are `u32` values packing a `u16` range (`lo

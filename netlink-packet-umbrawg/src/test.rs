@@ -436,10 +436,7 @@ fn test_parse_v3_magic_headers_and_keepalive() {
     let parsed = UmbrawgMessage::parse_with_param(&raw, header).unwrap();
     assert_eq!(
         parsed.attributes,
-        vec![
-            UmbrawgAttribute::H1("61220074-118999195".into()),
-            UmbrawgAttribute::H2("4".into()),
-        ]
+        vec![UmbrawgAttribute::H1Range(h1), UmbrawgAttribute::H2Range(h2),]
     );
 
     // Peer-level: keepalive as u32 (packed u16 range 25|25<<16).
@@ -492,11 +489,11 @@ fn test_parse_legacy_magic_header_u32() {
         version: 1,
     };
     let parsed = UmbrawgMessage::parse_with_param(&raw, header).unwrap();
-    assert_eq!(parsed.attributes, vec![UmbrawgAttribute::H1("123".into())]);
+    assert_eq!(parsed.attributes, vec![UmbrawgAttribute::H1Legacy(123)]);
 }
 
 /// Range variants emit the UmbraWG 3.0 u64 wire format; parsing them back
-/// yields the normalized string variants.
+/// keeps the range representation, so the bytes are unchanged.
 #[test]
 fn test_magic_header_range_emit() {
     use crate::range::u32_range_pack;
@@ -524,10 +521,72 @@ fn test_magic_header_range_emit() {
     assert_eq!(
         parsed.attributes,
         vec![
-            UmbrawgAttribute::H1("61220074-118999195".into()),
-            UmbrawgAttribute::H4("4".into()),
+            UmbrawgAttribute::H1Range(u32_range_pack(61220074, 118999195)),
+            UmbrawgAttribute::H4Range(u32_range_pack(4, 4)),
         ]
     );
+}
+
+#[test]
+fn test_magic_header_wire_formats_byte_roundtrip() {
+    use crate::range::u32_range_pack;
+
+    let cases = vec![
+        UmbrawgAttribute::H1("61220074-118999195".into()),
+        UmbrawgAttribute::H2("7".into()),
+        UmbrawgAttribute::H3("0".into()),
+        UmbrawgAttribute::H4("1234567".into()),
+        UmbrawgAttribute::H1Range(u32_range_pack(61220074, 118999195)),
+        UmbrawgAttribute::H2Range(u32_range_pack(7, 7)),
+        UmbrawgAttribute::H3Range(u32_range_pack(0, 0)),
+        UmbrawgAttribute::H4Range(u32_range_pack(1, 118999195)),
+        UmbrawgAttribute::H1Legacy(61220074),
+        UmbrawgAttribute::H2Legacy(7),
+        UmbrawgAttribute::H3Legacy(0),
+        UmbrawgAttribute::H4Legacy(u32::MAX),
+    ];
+
+    for attr in cases {
+        let msg = UmbrawgMessage {
+            cmd: UmbrawgCmd::SetDevice,
+            attributes: vec![attr.clone()],
+        };
+        let mut buffer = vec![0; msg.buffer_len()];
+        msg.emit(&mut buffer);
+
+        let parsed = roundtrip_msg(msg);
+        assert_eq!(parsed.attributes, vec![attr.clone()]);
+
+        let mut reemitted = vec![0; parsed.buffer_len()];
+        parsed.emit(&mut reemitted);
+        assert_eq!(reemitted, buffer);
+    }
+}
+
+#[test]
+fn test_magic_header_inverted_range_rejected() {
+    use crate::range::u32_range_pack;
+
+    let mut raw = Vec::new();
+    let len = (4 + 8) as u16;
+    raw.extend_from_slice(&len.to_le_bytes());
+    raw.extend_from_slice(&14u16.to_le_bytes());
+    raw.extend_from_slice(&u32_range_pack(10, 5).to_le_bytes());
+
+    let header = GenlHeader {
+        cmd: UmbrawgCmd::GetDevice.into(),
+        version: 3,
+    };
+    assert!(UmbrawgMessage::parse_with_param(&raw, header).is_err());
+}
+
+#[test]
+fn test_allowed_ip_empty_cidr_payload_is_rejected() {
+    use netlink_packet_core::NlaBuffer;
+
+    let raw = [4u8, 0, 3, 0];
+    let nla = NlaBuffer::new_checked(&raw[..]).unwrap();
+    assert!(UmbrawgAllowedIpAttr::parse(&nla).is_err());
 }
 
 #[test]

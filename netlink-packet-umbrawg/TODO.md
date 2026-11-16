@@ -47,8 +47,12 @@ cargo run --example set_umbrawg -- uwg0
    валидацией диапазонов.~~ Сделано: `UmbrawgDeviceConfig`,
    `UmbrawgPeerConfig`, `UmbrawgConfigError`, конверсии из сообщений и
    пиров, `UmbrawgAllowedIp::{new,remove,from_spec}`.
-3. Фаззинг: сборка целей в CI сделана; осталось починить найденные расхождения
-   (`Peer`-атрибут round-trip исправлен в 0.3.0, `H1Range..H4Range` — проверить).
+3. ~~Фаззинг: сборка целей в CI сделана; осталось починить найденные расхождения
+   (`Peer`-атрибут round-trip исправлен в 0.3.0, `H1Range..H4Range` — проверить).~~
+   Сделано: `cargo-fuzz` 0.13, `parse_message`/`parse_range` по 10 минут,
+   исправлена паника на пустом `UWGALLOWEDIP_A_CIDR_MASK`; парсер магических
+   заголовков сохраняет проводной формат (`H*`, `H*Range`, `H*Legacy`) и
+   отклоняет перевёрнутые диапазоны.
 4. Публикация 0.3.0 в crates.io (после проверки интеграции на сервере).
 5. Синхронизировать README с текущим API и CI.
 

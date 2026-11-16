@@ -3,7 +3,7 @@
 use std::{net::IpAddr, str::FromStr};
 
 use netlink_packet_core::{
-    emit_u16, emit_u32, parse_ip, parse_u16, parse_u32, DecodeError,
+    emit_u16, emit_u32, parse_ip, parse_u16, parse_u32, parse_u8, DecodeError,
     DefaultNla, Emitable, ErrorContext, Nla, NlaBuffer, NlasIterator,
     Parseable, NLA_F_NESTED,
 };
@@ -334,7 +334,10 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 parse_ip(payload)
                     .context("invalid UWGALLOWEDIP_A_IPADDR value")?,
             ),
-            UWGALLOWEDIP_A_CIDR_MASK => Self::Cidr(payload[0]),
+            UWGALLOWEDIP_A_CIDR_MASK => Self::Cidr(
+                parse_u8(payload)
+                    .context("invalid UWGALLOWEDIP_A_CIDR_MASK value")?,
+            ),
             UWGALLOWEDIP_A_FLAGS => Self::Flags(
                 parse_u32(payload)
                     .context("invalid UWGALLOWEDIP_A_FLAGS value")?,

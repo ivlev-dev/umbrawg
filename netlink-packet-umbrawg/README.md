@@ -137,8 +137,9 @@ In addition to standard WireGuard attributes (`PrivateKey`, `PublicKey`, `Peers`
 | `Jmin` | Junk packet minimum size |
 | `Jmax` | Junk packet maximum size |
 | `S1` … `S4` | Junk packet sizes (`u16`) |
-| `H1` … `H4` | Magic header specs (`String`, e.g. `"61220074"` or `"684141592-1751861769"`). Emitted as strings for kernel modules up to v1.0 (genl version 2); all wire formats are normalized into these variants when parsing |
-| `H1Range` … `H4Range` | Magic headers as packed `u64` ranges (`lo \| hi << 32`), the UmbraWG 3.0 wire format (genl version 3). Use `range::u32_range_from_string` to build them from spec strings |
+| `H1` … `H4` | Magic header specs (`String`, e.g. `"61220074"` or `"684141592-1751861769"`). Emitted as strings for kernel modules up to v1.0 (genl version 2); produced by parsing string payloads |
+| `H1Range` … `H4Range` | Magic headers as packed `u64` ranges (`lo \| hi << 32`), the UmbraWG 3.0 wire format (genl version 3). Use `range::u32_range_from_string` to build them from spec strings; produced by parsing 8-byte payloads |
+| `H1Legacy` … `H4Legacy` | Magic headers as bare `u32`, the original module format (genl version 1); produced by parsing 4-byte payloads |
 | `I1` … `I5` | Intermediate header descriptors (`String`)|
 | `HeaderProtectionKey` | UmbraWG 3.0 header protection key (32 bytes) |
 | `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts` | UmbraWG 3.0 tuning knobs (`u32`) |
