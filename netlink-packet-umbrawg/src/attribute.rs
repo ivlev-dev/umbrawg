@@ -9,7 +9,7 @@ use netlink_packet_core::{
 };
 
 use super::peer::UmbrawgPeers;
-use crate::{constants::UWG_KEY_LEN, range::u32_range_to_string, UmbrawgPeer};
+use crate::{constants::UWG_KEY_LEN, range::u32_range_unpack, UmbrawgPeer};
 
 const UWGDEVICE_A_IFINDEX: u16 = 1;
 const UWGDEVICE_A_IFNAME: u16 = 2;
@@ -52,41 +52,101 @@ const UWGDEVICE_A_DISABLE_COOKIES: u16 = 34;
 
 const HEADER_PROTECTION_KEY_LEN: usize = 32;
 
+/// Wire representation of a magic header attribute.
+enum MagicHeaderValue {
+    Spec(String),
+    Range(u64),
+    Legacy(u32),
+}
+
 /// Parses a magic header attribute (`UWGDEVICE_A_H1`..`UWGDEVICE_A_H4`).
 ///
 /// The wire format depends on the kernel module version:
 /// - UmbraWG 3.0 (genl version 3): `u64` packing a `u32` range (`lo | hi <<
-///   32`);
+///   32`), returned as [`MagicHeaderValue::Range`];
 /// - UmbraWG v1.0.20260725 (genl version 2): NUL-terminated decimal string,
-///   `"<v>"` or `"<lo>-<hi>"`;
-/// - original UmbraWG (genl version 1): bare `u32`.
+///   `"<v>"` or `"<lo>-<hi>"`, returned as [`MagicHeaderValue::Spec`];
+/// - original UmbraWG (genl version 1): bare `u32`, returned as
+///   [`MagicHeaderValue::Legacy`].
 ///
-/// All representations are normalized to the string form used by the v1.0
-/// module and by `uwg`(8) config files.
-fn parse_magic_header(payload: &[u8]) -> Result<String, DecodeError> {
+/// The representation is kept so that a parsed message can be re-emitted
+/// byte for byte, whatever module generation produced it.
+fn parse_magic_header(
+    kind: u16,
+    payload: &[u8],
+) -> Result<UmbrawgAttribute, DecodeError> {
     // A v1.0 string of exactly 7 digits plus NUL is also 8 bytes long, so
     // the string check must come first. Magic header specs only contain
-    // decimal digits and at most one '-', which a binary range practically
-    // never satisfies.
+    // decimal digits and at most one '-', which a valid binary range never
+    // satisfies.
     let is_string = payload.last() == Some(&0)
         && payload[..payload.len() - 1]
             .iter()
             .all(|b| b.is_ascii_digit() || *b == b'-');
-    if is_string {
-        return parse_string(payload).context("invalid magic header string");
-    }
-    match payload.len() {
-        8 => Ok(u32_range_to_string(
-            parse_u64(payload).context("invalid u64 magic header value")?,
-        )),
-        4 => Ok(parse_u32(payload)
-            .context("invalid u32 magic header value")?
-            .to_string()),
-        _ => Err(DecodeError::from(format!(
-            "invalid magic header payload length {}",
-            payload.len()
-        ))),
-    }
+    let value = if is_string {
+        MagicHeaderValue::Spec(
+            parse_string(payload).context("invalid magic header string")?,
+        )
+    } else {
+        match payload.len() {
+            8 => {
+                let range = parse_u64(payload)
+                    .context("invalid u64 magic header value")?;
+                let (lo, hi) = u32_range_unpack(range);
+                if lo > hi {
+                    return Err(DecodeError::from(format!(
+                        "invalid magic header range {lo}-{hi}: start exceeds \
+                         end"
+                    )));
+                }
+                MagicHeaderValue::Range(range)
+            }
+            4 => MagicHeaderValue::Legacy(
+                parse_u32(payload).context("invalid u32 magic header value")?,
+            ),
+            _ => {
+                return Err(DecodeError::from(format!(
+                    "invalid magic header payload length {}",
+                    payload.len()
+                )))
+            }
+        }
+    };
+    Ok(match (kind, value) {
+        (UWGDEVICE_A_H1, MagicHeaderValue::Spec(v)) => UmbrawgAttribute::H1(v),
+        (UWGDEVICE_A_H2, MagicHeaderValue::Spec(v)) => UmbrawgAttribute::H2(v),
+        (UWGDEVICE_A_H3, MagicHeaderValue::Spec(v)) => UmbrawgAttribute::H3(v),
+        (UWGDEVICE_A_H4, MagicHeaderValue::Spec(v)) => UmbrawgAttribute::H4(v),
+        (UWGDEVICE_A_H1, MagicHeaderValue::Range(v)) => {
+            UmbrawgAttribute::H1Range(v)
+        }
+        (UWGDEVICE_A_H2, MagicHeaderValue::Range(v)) => {
+            UmbrawgAttribute::H2Range(v)
+        }
+        (UWGDEVICE_A_H3, MagicHeaderValue::Range(v)) => {
+            UmbrawgAttribute::H3Range(v)
+        }
+        (UWGDEVICE_A_H4, MagicHeaderValue::Range(v)) => {
+            UmbrawgAttribute::H4Range(v)
+        }
+        (UWGDEVICE_A_H1, MagicHeaderValue::Legacy(v)) => {
+            UmbrawgAttribute::H1Legacy(v)
+        }
+        (UWGDEVICE_A_H2, MagicHeaderValue::Legacy(v)) => {
+            UmbrawgAttribute::H2Legacy(v)
+        }
+        (UWGDEVICE_A_H3, MagicHeaderValue::Legacy(v)) => {
+            UmbrawgAttribute::H3Legacy(v)
+        }
+        (UWGDEVICE_A_H4, MagicHeaderValue::Legacy(v)) => {
+            UmbrawgAttribute::H4Legacy(v)
+        }
+        (kind, _) => {
+            return Err(DecodeError::from(format!(
+                "invalid magic header attribute kind {kind}"
+            )))
+        }
+    })
 }
 
 /// One `UWGDEVICE_A_*` attribute of an
@@ -141,9 +201,8 @@ pub enum UmbrawgAttribute {
     /// Magic header spec, e.g. `"61220074"` or `"684141592-1751861769"`.
     ///
     /// Emitted as a NUL-terminated string, understood by kernel modules up
-    /// to genl family version 2 (v1.0.20260725). When parsing, all wire
-    /// formats (string, `u32`, packed `u64` range) are normalized into this
-    /// variant.
+    /// to genl family version 2 (v1.0.20260725). Produced by parsing string
+    /// payloads.
     H1(String),
     /// `UWGDEVICE_A_H2` magic header spec; see [`H1`](Self::H1).
     H2(String),
@@ -154,7 +213,7 @@ pub enum UmbrawgAttribute {
     /// Magic header as a packed `u64` range (`lo | hi << 32`), the wire
     /// format of the UmbraWG 3.0 kernel module (genl family version 3).
     /// Use [`crate::range::u32_range_from_string`] to build these from spec
-    /// strings. Never produced by parsing; see the `H1`..`H4` variants.
+    /// strings. Produced by parsing 8-byte payloads with `lo <= hi`.
     H1Range(u64),
     /// `UWGDEVICE_A_H2` as a packed `u64` range; see
     /// [`H1Range`](Self::H1Range).
@@ -165,6 +224,20 @@ pub enum UmbrawgAttribute {
     /// `UWGDEVICE_A_H4` as a packed `u64` range; see
     /// [`H1Range`](Self::H1Range).
     H4Range(u64),
+    /// Magic header as a bare `u32`, the wire format of the original
+    /// UmbraWG module (genl family version 1). Produced by parsing 4-byte
+    /// payloads and emitted unchanged, so replies from older modules keep
+    /// their format.
+    H1Legacy(u32),
+    /// `UWGDEVICE_A_H2` as a bare `u32`; see
+    /// [`H1Legacy`](Self::H1Legacy).
+    H2Legacy(u32),
+    /// `UWGDEVICE_A_H3` as a bare `u32`; see
+    /// [`H1Legacy`](Self::H1Legacy).
+    H3Legacy(u32),
+    /// `UWGDEVICE_A_H4` as a bare `u32`; see
+    /// [`H1Legacy`](Self::H1Legacy).
+    H4Legacy(u32),
     /// `UWGDEVICE_A_S3`: padding added to cookie reply messages (`u16`).
     S3(u16),
     /// `UWGDEVICE_A_S4`: padding added to transport data messages (`u16`).
@@ -234,6 +307,10 @@ impl Nla for UmbrawgAttribute {
             Self::Fwmark(_)
             | Self::IfIndex(_)
             | Self::Flags(_)
+            | Self::H1Legacy(_)
+            | Self::H2Legacy(_)
+            | Self::H3Legacy(_)
+            | Self::H4Legacy(_)
             | Self::ContentPaddingAddition(_)
             | Self::RekeyAfterTime(_)
             | Self::RekeyTimeout(_)
@@ -275,10 +352,18 @@ impl Nla for UmbrawgAttribute {
             Self::Jmax(_) => UWGDEVICE_A_JMAX,
             Self::S1(_) => UWGDEVICE_A_S1,
             Self::S2(_) => UWGDEVICE_A_S2,
-            Self::H1(_) | Self::H1Range(_) => UWGDEVICE_A_H1,
-            Self::H2(_) | Self::H2Range(_) => UWGDEVICE_A_H2,
-            Self::H3(_) | Self::H3Range(_) => UWGDEVICE_A_H3,
-            Self::H4(_) | Self::H4Range(_) => UWGDEVICE_A_H4,
+            Self::H1(_) | Self::H1Range(_) | Self::H1Legacy(_) => {
+                UWGDEVICE_A_H1
+            }
+            Self::H2(_) | Self::H2Range(_) | Self::H2Legacy(_) => {
+                UWGDEVICE_A_H2
+            }
+            Self::H3(_) | Self::H3Range(_) | Self::H3Legacy(_) => {
+                UWGDEVICE_A_H3
+            }
+            Self::H4(_) | Self::H4Range(_) | Self::H4Legacy(_) => {
+                UWGDEVICE_A_H4
+            }
             Self::S3(_) => UWGDEVICE_A_S3,
             Self::S4(_) => UWGDEVICE_A_S4,
             Self::I1(_) => UWGDEVICE_A_I1,
@@ -330,6 +415,10 @@ impl Nla for UmbrawgAttribute {
             | Self::H2Range(v)
             | Self::H3Range(v)
             | Self::H4Range(v) => emit_u64(buffer, *v).unwrap(),
+            Self::H1Legacy(v)
+            | Self::H2Legacy(v)
+            | Self::H3Legacy(v)
+            | Self::H4Legacy(v) => emit_u32(buffer, *v).unwrap(),
             Self::ContentPaddingAddition(v)
             | Self::RekeyAfterTime(v)
             | Self::RekeyTimeout(v)
@@ -410,22 +499,14 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             UWGDEVICE_A_S2 => Self::S2(
                 parse_u16(payload).context("invalid UWGDEVICE_A_S2 value")?,
             ),
-            UWGDEVICE_A_H1 => Self::H1(
-                parse_magic_header(payload)
-                    .context("invalid UWGDEVICE_A_H1 value")?,
-            ),
-            UWGDEVICE_A_H2 => Self::H2(
-                parse_magic_header(payload)
-                    .context("invalid UWGDEVICE_A_H2 value")?,
-            ),
-            UWGDEVICE_A_H3 => Self::H3(
-                parse_magic_header(payload)
-                    .context("invalid UWGDEVICE_A_H3 value")?,
-            ),
-            UWGDEVICE_A_H4 => Self::H4(
-                parse_magic_header(payload)
-                    .context("invalid UWGDEVICE_A_H4 value")?,
-            ),
+            UWGDEVICE_A_H1 => parse_magic_header(UWGDEVICE_A_H1, payload)
+                .context("invalid UWGDEVICE_A_H1 value")?,
+            UWGDEVICE_A_H2 => parse_magic_header(UWGDEVICE_A_H2, payload)
+                .context("invalid UWGDEVICE_A_H2 value")?,
+            UWGDEVICE_A_H3 => parse_magic_header(UWGDEVICE_A_H3, payload)
+                .context("invalid UWGDEVICE_A_H3 value")?,
+            UWGDEVICE_A_H4 => parse_magic_header(UWGDEVICE_A_H4, payload)
+                .context("invalid UWGDEVICE_A_H4 value")?,
             UWGDEVICE_A_S3 => Self::S3(
                 parse_u16(payload).context("invalid UWGDEVICE_A_S3 value")?,
             ),

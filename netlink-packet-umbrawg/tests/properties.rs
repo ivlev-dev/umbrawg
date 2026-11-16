@@ -8,7 +8,11 @@ use netlink_packet_core::{Emitable, ParseableParametrized};
 use netlink_packet_generic::GenlHeader;
 use netlink_packet_umbrawg::{
     constants::{UWGALLOWEDIP_F_REMOVE_ME, UWGPEER_F_HAS_ADVANCED_SECURITY},
-    range::{u32_range_from_string, u32_range_pack, u32_range_unpack},
+    range::{
+        u16_range_from_string, u16_range_pack, u16_range_to_string,
+        u16_range_unpack, u32_range_from_string, u32_range_pack,
+        u32_range_unpack,
+    },
     UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
     UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
     UmbrawgPeerAttribute, UmbrawgTimeSpec,
@@ -102,6 +106,28 @@ fn magic_header_string() -> impl Strategy<Value = String> {
     ]
 }
 
+fn magic_header_range() -> impl Strategy<Value = u64> {
+    (any::<u32>(), any::<u32>())
+        .prop_map(|(a, b)| u32_range_pack(a.min(b), a.max(b)))
+}
+
+fn magic_header_attr() -> impl Strategy<Value = UmbrawgAttribute> {
+    prop_oneof![
+        magic_header_string().prop_map(UmbrawgAttribute::H1),
+        magic_header_string().prop_map(UmbrawgAttribute::H2),
+        magic_header_string().prop_map(UmbrawgAttribute::H3),
+        magic_header_string().prop_map(UmbrawgAttribute::H4),
+        magic_header_range().prop_map(UmbrawgAttribute::H1Range),
+        magic_header_range().prop_map(UmbrawgAttribute::H2Range),
+        magic_header_range().prop_map(UmbrawgAttribute::H3Range),
+        magic_header_range().prop_map(UmbrawgAttribute::H4Range),
+        any::<u32>().prop_map(UmbrawgAttribute::H1Legacy),
+        any::<u32>().prop_map(UmbrawgAttribute::H2Legacy),
+        any::<u32>().prop_map(UmbrawgAttribute::H3Legacy),
+        any::<u32>().prop_map(UmbrawgAttribute::H4Legacy),
+    ]
+}
+
 fn arb_peer_attr() -> impl Strategy<Value = UmbrawgPeerAttribute> {
     prop_oneof![
         arb_bytes32().prop_map(UmbrawgPeerAttribute::PublicKey),
@@ -144,6 +170,7 @@ fn arb_attr() -> impl Strategy<Value = UmbrawgAttribute> {
         magic_header_string().prop_map(UmbrawgAttribute::H2),
         magic_header_string().prop_map(UmbrawgAttribute::H3),
         magic_header_string().prop_map(UmbrawgAttribute::H4),
+        magic_header_attr(),
         any::<u16>().prop_map(UmbrawgAttribute::S3),
         any::<u16>().prop_map(UmbrawgAttribute::S4),
         // I1-I5 as generic (possibly empty) strings; parse_string must accept.
@@ -321,6 +348,125 @@ proptest! {
 
         prop_assert_eq!(u8::from(UmbrawgCmd::from(cmd)), cmd);
         prop_assert_eq!(roundtrip_msg(msg.clone()), msg);
+    }
+
+    #[test]
+    fn prop_magic_header_wire_roundtrip(attr in magic_header_attr()) {
+        let msg = UmbrawgMessage {
+            cmd: UmbrawgCmd::SetDevice,
+            attributes: vec![attr],
+        };
+        let header = GenlHeader { cmd: msg.cmd.into(), version: 2 };
+        let hl = header.buffer_len();
+        let mut b1 = vec![0u8; msg.buffer_len() + hl];
+        header.emit(&mut b1);
+        msg.emit(&mut b1[hl..]);
+
+        let parsed = UmbrawgMessage::parse_with_param(&b1[hl..], header).unwrap();
+        prop_assert_eq!(parsed.clone(), msg);
+
+        let mut b2 = vec![0u8; parsed.buffer_len() + hl];
+        header.emit(&mut b2);
+        parsed.emit(&mut b2[hl..]);
+        prop_assert_eq!(b1, b2);
+    }
+
+    #[test]
+    fn prop_magic_header_u64_payload_roundtrip(
+        value in any::<u64>(),
+        header in 0u16..4,
+    ) {
+        let kind = 14 + header;
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&12u16.to_le_bytes());
+        raw.extend_from_slice(&kind.to_le_bytes());
+        raw.extend_from_slice(&value.to_le_bytes());
+
+        let genl = GenlHeader { cmd: 0, version: 3 };
+        match UmbrawgMessage::parse_with_param(&raw, genl) {
+            Ok(parsed) => {
+                let mut out = vec![0u8; parsed.buffer_len()];
+                parsed.emit(&mut out);
+                prop_assert_eq!(out, raw);
+            }
+            Err(_) => {
+                let (lo, hi) = u32_range_unpack(value);
+                prop_assert!(lo > hi, "rejected valid range {lo}-{hi}");
+            }
+        }
+    }
+
+    #[test]
+    fn prop_magic_header_u32_payload_roundtrip(
+        value in any::<u32>(),
+        header in 0u16..4,
+    ) {
+        let kind = 14 + header;
+        let mut raw = Vec::new();
+        raw.extend_from_slice(&8u16.to_le_bytes());
+        raw.extend_from_slice(&kind.to_le_bytes());
+        raw.extend_from_slice(&value.to_le_bytes());
+
+        let genl = GenlHeader { cmd: 0, version: 1 };
+        let parsed = UmbrawgMessage::parse_with_param(&raw, genl).unwrap();
+        let mut out = vec![0u8; parsed.buffer_len()];
+        parsed.emit(&mut out);
+        prop_assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn prop_magic_header_string_payload_roundtrip(
+        spec in magic_header_string(),
+    ) {
+        let mut raw = Vec::new();
+        let payload_len = spec.len() + 1;
+        raw.extend_from_slice(&(4 + payload_len as u16).to_le_bytes());
+        raw.extend_from_slice(&14u16.to_le_bytes());
+        raw.extend_from_slice(spec.as_bytes());
+        raw.push(0);
+        while raw.len() % 4 != 0 {
+            raw.push(0);
+        }
+
+        let genl = GenlHeader { cmd: 0, version: 2 };
+        let parsed = UmbrawgMessage::parse_with_param(&raw, genl).unwrap();
+        prop_assert_eq!(
+            parsed.attributes.clone(),
+            vec![UmbrawgAttribute::H1(spec.clone())]
+        );
+        let mut out = vec![0u8; parsed.buffer_len()];
+        parsed.emit(&mut out);
+        prop_assert_eq!(out, raw);
+    }
+
+    #[test]
+    fn prop_u16_range_roundtrip(lo in any::<u16>(), hi in any::<u16>()) {
+        let (lo, hi) = (lo.min(hi), lo.max(hi));
+        let packed = u16_range_pack(lo, hi);
+        prop_assert_eq!(u16_range_unpack(packed), (lo, hi));
+
+        let spec = u16_range_to_string(packed);
+        prop_assert_eq!(u16_range_from_string(&spec), Some(packed));
+
+        let msg = UmbrawgMessage {
+            cmd: UmbrawgCmd::SetDevice,
+            attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PersistentKeepaliveRange(packed),
+            ])])],
+        };
+        let header = GenlHeader { cmd: msg.cmd.into(), version: 2 };
+        let hl = header.buffer_len();
+        let mut b1 = vec![0u8; msg.buffer_len() + hl];
+        header.emit(&mut b1);
+        msg.emit(&mut b1[hl..]);
+
+        let parsed = UmbrawgMessage::parse_with_param(&b1[hl..], header).unwrap();
+        prop_assert_eq!(parsed.clone(), msg);
+
+        let mut b2 = vec![0u8; parsed.buffer_len() + hl];
+        header.emit(&mut b2);
+        parsed.emit(&mut b2[hl..]);
+        prop_assert_eq!(b1, b2);
     }
 }
 

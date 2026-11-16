@@ -1,5 +1,16 @@
 # Changelog
 ## [Unreleased]
+### Fixes
+ - Fuzzing (`cargo-fuzz` 0.13, 10 minutes per target) found a panic in
+   `UmbrawgAllowedIpAttr::parse`: an empty `UWGALLOWEDIP_A_CIDR_MASK` payload
+   indexed out of bounds. It now returns `DecodeError`.
+ - Magic header parsing keeps the wire representation instead of normalizing
+   it to a string: 8-byte payloads become `H1Range`..`H4Range`, 4-byte payloads
+   become `H1Legacy`..`H4Legacy`, so a parsed message re-emits byte for byte.
+   Inverted `u64` ranges are rejected with `DecodeError`.
+ - `fuzz/Cargo.toml` carries the `cargo-fuzz` metadata, so the declared targets
+   build and run with `cargo fuzz`.
+
 ### New features
  - Full rustdoc coverage: every public type, variant, field and constant is
    documented, examples cover device, peer, allowed IP and range helpers;

@@ -719,6 +719,18 @@ impl UmbrawgDeviceConfig {
                 UmbrawgAttribute::H4Range(range) => {
                     config.magic_headers[3] = Some(u32_range_unpack(*range))
                 }
+                UmbrawgAttribute::H1Legacy(value) => {
+                    config.magic_headers[0] = Some((*value, *value))
+                }
+                UmbrawgAttribute::H2Legacy(value) => {
+                    config.magic_headers[1] = Some((*value, *value))
+                }
+                UmbrawgAttribute::H3Legacy(value) => {
+                    config.magic_headers[2] = Some((*value, *value))
+                }
+                UmbrawgAttribute::H4Legacy(value) => {
+                    config.magic_headers[3] = Some((*value, *value))
+                }
                 UmbrawgAttribute::I1(spec) => {
                     config.intermediates[0] = Some(spec.clone())
                 }
