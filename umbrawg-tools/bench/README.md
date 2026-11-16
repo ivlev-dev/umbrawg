@@ -196,6 +196,22 @@ busy ≥80%) и суммарную busy% машины, плюс вердикт:
 `conns>=10`: если там `hot≥2`/`busy≥130%`, а скорость растёт — параллелизм
 есть; если и там `single-core bound` — предел в одном ядре.
 
+## Графики и отчёт
+
+`bench-plot.py` строит самодостаточный HTML-файл с инлайн-SVG столбчатыми
+графиками (без внешних зависимостей, только стандартная библиотека Python):
+
+```bash
+python3 bench/bench-plot.py results.csv -o report.html --title "UmbraWG bench"
+python3 bench/bench-plot.py results.csv -o report.html   # заголовок по умолчанию
+```
+
+Отчёт группирует данные по `proto`, `obf`, `conns`, `mode`, сравнивает
+реализации по медиане `mbit` (медиана по `repeat`), показывает таблицу
+`реализация × ячейка` (медиана, min–max, потери `extra`, CPU-вердикт) и
+предупреждения о ячейках с потерями UDP > 1%. При отсутствии данных скрипт
+завершается с кодом 1. Тесты: `python3 -m unittest discover -s bench/tests`.
+
 ## Ограничения стенда
 
 - **veth не даёт очередей сам по себе.** `ip link add ... numtxqueues N
