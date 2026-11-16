@@ -15,6 +15,28 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ivlev-dev/netlink-packet-umbrawg
+          path: netlink-packet-umbrawg
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: tools/Cargo.toml
+          command: check
+          arguments: --all-features
+
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
