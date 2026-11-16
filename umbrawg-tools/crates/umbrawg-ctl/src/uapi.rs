@@ -469,6 +469,7 @@ fn parse_u32_range(key: &str, value: &str) -> Result<U32Range, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ConfigApplication;
     use crate::model::TimeSpec;
     use std::time::{SystemTime, UNIX_EPOCH};
     use tokio::io::AsyncReadExt;
@@ -634,6 +635,57 @@ errno=0
         );
         assert!(request.contains(&peer_line));
         assert!(!request.contains("preshared_key="));
+    }
+
+    #[test]
+    fn append_request_keeps_peers_and_replaces_allowed_ips() {
+        let mut config = umbrawg_config::Config::default();
+        config.peers.push(umbrawg_config::PeerConfig {
+            public_key: Key::from_hex(
+                "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f",
+            )
+            .expect("valid"),
+            preshared_key: None,
+            allowed_ips: None,
+            endpoint: None,
+            persistent_keepalive: None,
+            remove: false,
+        });
+        let set = SetDevice::from_config_file("test0", &config, ConfigApplication::Append);
+        let request = build_set_request(&set).expect("valid");
+        assert!(!request.contains("replace_peers=true\n"));
+        assert!(request.contains("replace_allowed_ips=true\n"));
+        assert!(!request.contains("allowed_ip="));
+    }
+
+    #[test]
+    fn sync_request_removes_peers_missing_from_the_file() {
+        let mut config = umbrawg_config::Config::default();
+        config.peers.push(umbrawg_config::PeerConfig {
+            public_key: Key::from_bytes([1u8; 32]),
+            preshared_key: None,
+            allowed_ips: Some(vec!["10.0.0.0/8".parse().expect("valid")]),
+            endpoint: None,
+            persistent_keepalive: None,
+            remove: false,
+        });
+        let mut runtime = Device::new("test0");
+        runtime.peers.push(Peer {
+            public_key: Key::from_bytes([1u8; 32]),
+            ..Peer::default()
+        });
+        runtime.peers.push(Peer {
+            public_key: Key::from_bytes([2u8; 32]),
+            ..Peer::default()
+        });
+        let set = SetDevice::synced_from("test0", &config, &runtime);
+        let request = build_set_request(&set).expect("valid");
+        assert!(!request.contains("replace_peers=true\n"));
+        assert!(request.contains("allowed_ip=10.0.0.0/8\n"));
+        assert!(request.contains(&format!(
+            "public_key={}\nremove=true\n",
+            Key::from_bytes([2u8; 32]).to_hex()
+        )));
     }
 
     #[test]

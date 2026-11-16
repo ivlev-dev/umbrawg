@@ -37,6 +37,7 @@ pub struct Peer {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub allowed_ips: Vec<AllowedIp>,
+    pub advanced_security: Option<bool>,
 }
 
 impl Default for Peer {
@@ -50,6 +51,7 @@ impl Default for Peer {
             rx_bytes: 0,
             tx_bytes: 0,
             allowed_ips: Vec::new(),
+            advanced_security: None,
         }
     }
 }
@@ -119,6 +121,15 @@ pub struct SetDevice {
     pub peers: Vec<PeerConfig>,
 }
 
+/// How a configuration file is applied to an interface.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfigApplication {
+    /// `uwg setconf`: the file replaces the whole peer list.
+    Replace,
+    /// `uwg addconf`: the file appends peers to the running configuration.
+    Append,
+}
+
 impl SetDevice {
     pub fn from_config(name: impl Into<String>, config: &Config) -> Self {
         let mut device = config.device.clone();
@@ -130,6 +141,61 @@ impl SetDevice {
             device,
             peers: config.peers.clone(),
         }
+    }
+
+    /// Applies a configuration file the way `uwg setconf`/`uwg addconf` do.
+    ///
+    /// Both commands replace the allowed IP list of every peer they mention,
+    /// even when the `[Peer]` section has no `AllowedIPs` key, which mirrors
+    /// the legacy `awg` parser. `setconf` additionally resets the private key
+    /// and the fwmark when the file does not set them; `addconf` leaves the
+    /// running values alone.
+    pub fn from_config_file(
+        name: impl Into<String>,
+        config: &Config,
+        application: ConfigApplication,
+    ) -> Self {
+        let mut set = Self::from_config(name, config);
+        set.replace_peers = application == ConfigApplication::Replace;
+        if application == ConfigApplication::Append {
+            set.device.private_key = config.device.private_key.clone();
+            set.device.fwmark = config.device.fwmark;
+        }
+        for peer in &mut set.peers {
+            if peer.remove {
+                continue;
+            }
+            peer.allowed_ips = Some(peer.allowed_ips.clone().unwrap_or_default());
+        }
+        set
+    }
+
+    /// Plans `uwg syncconf`: peers missing from the file are removed, peers
+    /// shared with the running configuration stay connected.
+    ///
+    /// This follows the legacy `awg syncconf`, which turns off
+    /// `UWGDEVICE_F_REPLACE_PEERS` and sends explicit peer removals instead.
+    pub fn synced_from(name: impl Into<String>, config: &Config, runtime: &Device) -> Self {
+        let mut set = Self::from_config_file(name, config, ConfigApplication::Replace);
+        if config.peers.is_empty() || runtime.peers.is_empty() {
+            return set;
+        }
+        set.replace_peers = false;
+        let configured: Vec<&Key> = config.peers.iter().map(|peer| &peer.public_key).collect();
+        for peer in &runtime.peers {
+            if configured.contains(&&peer.public_key) {
+                continue;
+            }
+            set.peers.push(PeerConfig {
+                public_key: peer.public_key.clone(),
+                preshared_key: None,
+                allowed_ips: None,
+                endpoint: None,
+                persistent_keepalive: None,
+                remove: true,
+            });
+        }
+        set
     }
 
     pub fn for_interface(name: impl Into<String>, device: DeviceConfig) -> Self {
@@ -156,6 +222,7 @@ mod tests {
             rx_bytes: 10,
             tx_bytes: 20,
             allowed_ips: vec!["10.0.0.0/8".parse().expect("valid")],
+            advanced_security: Some(true),
         }
     }
 
@@ -217,5 +284,118 @@ mod tests {
         let config = device.to_config();
         assert!(config.peers[0].allowed_ips.is_none());
         assert!(config.peers[0].persistent_keepalive.is_none());
+    }
+
+    fn config_with_peers(keys: &[[u8; 32]]) -> Config {
+        let mut config = Config::default();
+        for key in keys {
+            config.peers.push(PeerConfig {
+                public_key: Key::from_bytes(*key),
+                preshared_key: None,
+                allowed_ips: None,
+                endpoint: None,
+                persistent_keepalive: None,
+                remove: false,
+            });
+        }
+        config
+    }
+
+    #[test]
+    fn addconf_appends_and_replaces_allowed_ips() {
+        let config = config_with_peers(&[[1u8; 32]]);
+        let set = SetDevice::from_config_file("uwg0", &config, ConfigApplication::Append);
+        assert!(!set.replace_peers);
+        assert_eq!(set.peers.len(), 1);
+        assert_eq!(set.peers[0].allowed_ips, Some(Vec::new()));
+        assert!(!set.peers[0].remove);
+    }
+
+    #[test]
+    fn setconf_file_replaces_peers_and_allowed_ips() {
+        let mut config = config_with_peers(&[[1u8; 32]]);
+        config.peers[0].allowed_ips = Some(vec!["10.0.0.0/8".parse().expect("valid")]);
+        let set = SetDevice::from_config_file("uwg0", &config, ConfigApplication::Replace);
+        assert!(set.replace_peers);
+        assert_eq!(
+            set.peers[0].allowed_ips,
+            Some(vec!["10.0.0.0/8".parse().expect("valid")])
+        );
+    }
+
+    #[test]
+    fn addconf_keeps_removed_peers_untouched() {
+        let mut config = config_with_peers(&[[1u8; 32]]);
+        config.peers[0].remove = true;
+        let set = SetDevice::from_config_file("uwg0", &config, ConfigApplication::Append);
+        assert!(set.peers[0].allowed_ips.is_none());
+        assert!(set.peers[0].remove);
+    }
+
+    #[test]
+    fn addconf_does_not_reset_unset_device_keys() {
+        let config = config_with_peers(&[[1u8; 32]]);
+        let set = SetDevice::from_config_file("uwg0", &config, ConfigApplication::Append);
+        assert!(set.device.private_key.is_none());
+        assert!(set.device.fwmark.is_none());
+        assert!(set.device.listen_port.is_none());
+        let set = SetDevice::from_config_file("uwg0", &config, ConfigApplication::Replace);
+        assert_eq!(set.device.private_key.as_ref(), Some(&Key::zero()));
+        assert_eq!(set.device.fwmark, Some(0));
+    }
+
+    #[test]
+    fn addconf_keeps_device_keys_from_the_file() {
+        let mut config = config_with_peers(&[[1u8; 32]]);
+        config.device.private_key = Some(Key::from_bytes([3u8; 32]));
+        config.device.fwmark = Some(0x42);
+        config.device.listen_port = Some(51820);
+        let set = SetDevice::from_config_file("uwg0", &config, ConfigApplication::Append);
+        assert_eq!(set.device.private_key, Some(Key::from_bytes([3u8; 32])));
+        assert_eq!(set.device.fwmark, Some(0x42));
+        assert_eq!(set.device.listen_port, Some(51820));
+    }
+
+    #[test]
+    fn syncconf_without_runtime_peers_replaces_all() {
+        let config = config_with_peers(&[[1u8; 32]]);
+        let runtime = Device::new("uwg0");
+        let set = SetDevice::synced_from("uwg0", &config, &runtime);
+        assert!(set.replace_peers);
+        assert_eq!(set.peers.len(), 1);
+    }
+
+    #[test]
+    fn syncconf_removes_peers_missing_from_the_file() {
+        let config = config_with_peers(&[[1u8; 32]]);
+        let mut runtime = Device::new("uwg0");
+        runtime.peers.push(Peer {
+            public_key: Key::from_bytes([1u8; 32]),
+            ..Peer::default()
+        });
+        runtime.peers.push(Peer {
+            public_key: Key::from_bytes([9u8; 32]),
+            ..Peer::default()
+        });
+        let set = SetDevice::synced_from("uwg0", &config, &runtime);
+        assert!(!set.replace_peers);
+        assert_eq!(set.peers.len(), 2);
+        assert!(!set.peers[0].remove);
+        assert_eq!(set.peers[0].allowed_ips, Some(Vec::new()));
+        assert_eq!(set.peers[1].public_key, Key::from_bytes([9u8; 32]));
+        assert!(set.peers[1].remove);
+    }
+
+    #[test]
+    fn syncconf_with_empty_file_removes_every_peer() {
+        let config = Config::default();
+        let mut runtime = Device::new("uwg0");
+        runtime.peers.push(Peer {
+            public_key: Key::from_bytes([9u8; 32]),
+            ..Peer::default()
+        });
+        let set = SetDevice::synced_from("uwg0", &config, &runtime);
+        assert!(set.replace_peers);
+        assert!(set.peers.is_empty());
     }
 }
