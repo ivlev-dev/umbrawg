@@ -320,10 +320,10 @@ setup_topology() {
         echo "VETH_QUEUES_FAILED: $NS1/$V1 ethtool -L rx=$VETH_RX_Q tx=$VETH_TX_Q" >> "$DIAG"
     fi
     if [ "$RPS_MASK" != "off" ]; then
-        veth_set_rps "$V0" "$RPS_MASK"
-        veth_set_rps "$V1" "$RPS_MASK"
+        veth_set_rps "$NS0" "$V0" "$RPS_MASK"
+        veth_set_rps "$NS1" "$V1" "$RPS_MASK"
     fi
-    echo "QUEUES: $(veth_queue_report "$V0") | $(veth_queue_report "$V1")" >> "$DIAG"
+    echo "QUEUES: $(veth_queue_report "$NS0" "$V0") | $(veth_queue_report "$NS1" "$V1")" >> "$DIAG"
 }
 
 set_loss() {

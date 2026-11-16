@@ -136,14 +136,26 @@ udp_stream_rate() {
 }
 
 veth_rx_queue_count() {
-    local dev=$1 n
-    n=$(ls -d "/sys/class/net/$dev/queues"/rx-* 2>/dev/null | wc -l || true)
+    local ns="" dev
+    if [ $# -ge 2 ]; then ns=$1; dev=$2; else dev=${1:-}; fi
+    local n
+    if [ -n "$ns" ]; then
+        n=$(ip netns exec "$ns" sh -c 'ls -d /sys/class/net/"$1"/queues/rx-* 2>/dev/null | wc -l' sh "$dev" || true)
+    else
+        n=$(ls -d "/sys/class/net/$dev/queues"/rx-* 2>/dev/null | wc -l || true)
+    fi
     printf '%s' "${n:-0}"
 }
 
 veth_tx_queue_count() {
-    local dev=$1 n
-    n=$(ls -d "/sys/class/net/$dev/queues"/tx-* 2>/dev/null | wc -l || true)
+    local ns="" dev
+    if [ $# -ge 2 ]; then ns=$1; dev=$2; else dev=${1:-}; fi
+    local n
+    if [ -n "$ns" ]; then
+        n=$(ip netns exec "$ns" sh -c 'ls -d /sys/class/net/"$1"/queues/tx-* 2>/dev/null | wc -l' sh "$dev" || true)
+    else
+        n=$(ls -d "/sys/class/net/$dev/queues"/tx-* 2>/dev/null | wc -l || true)
+    fi
     printf '%s' "${n:-0}"
 }
 
@@ -156,7 +168,20 @@ veth_enable_queues() {
 }
 
 veth_queue_report() {
-    local dev=$1 f rps="" xps=""
+    local ns="" dev
+    if [ $# -ge 2 ]; then ns=$1; dev=$2; else dev=${1:-}; fi
+    if [ -n "$ns" ]; then
+        ip netns exec "$ns" sh -c '
+            dev=$1
+            rxq=$(ls -d /sys/class/net/"$dev"/queues/rx-* 2>/dev/null | wc -l)
+            txq=$(ls -d /sys/class/net/"$dev"/queues/tx-* 2>/dev/null | wc -l)
+            rps=$(cat /sys/class/net/"$dev"/queues/rx-*/rps_cpus 2>/dev/null | tr "\n" "," )
+            xps=$(cat /sys/class/net/"$dev"/queues/tx-*/xps_cpus 2>/dev/null | tr "\n" "," )
+            printf "dev=%s rxq=%s txq=%s rps=%s xps=%s" "$dev" "${rxq:-0}" "${txq:-0}" "${rps:-none}" "${xps:-none}"
+        ' sh "$dev"
+        return 0
+    fi
+    local f rps="" xps=""
     for f in /sys/class/net/"$dev"/queues/rx-*/rps_cpus; do
         [ -f "$f" ] || continue
         rps="$rps${rps:+,}$(cat "$f" 2>/dev/null)"
@@ -172,7 +197,20 @@ veth_queue_report() {
 }
 
 veth_set_rps() {
-    local dev=$1 mask=$2 f
+    local ns="" dev mask=""
+    if [ $# -ge 3 ]; then ns=$1; dev=$2; mask=$3; else dev=$1; mask=$2; fi
+    if [ -n "$ns" ]; then
+        ip netns exec "$ns" sh -c '
+            dev=$1
+            mask=$2
+            for f in /sys/class/net/"$dev"/queues/rx-*/rps_cpus; do
+                [ -f "$f" ] || continue
+                printf "%s" "$mask" > "$f" 2>/dev/null || true
+            done
+        ' sh "$dev" "$mask"
+        return 0
+    fi
+    local f
     for f in /sys/class/net/"$dev"/queues/rx-*/rps_cpus; do
         [ -f "$f" ] || continue
         printf '%s' "$mask" > "$f" 2>/dev/null || true
