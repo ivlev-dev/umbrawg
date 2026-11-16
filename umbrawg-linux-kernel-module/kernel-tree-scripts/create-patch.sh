@@ -5,11 +5,11 @@
 
 shopt -s globstar
 
-WG="$(readlink -f "$(dirname "$(readlink -f "$0")")/../src/")"
+UWG="$(readlink -f "$(dirname "$(readlink -f "$0")")/../src/")"
 
-for i in "$WG"/**/{*.c,*.h,*.S,*.pl,*.include} "$WG/Kbuild" "$WG/Kconfig"; do
-	[[ $i == "$WG/tests/"* ]] && continue
-	diff -u /dev/null "$i" | sed "s:${WG}:b/net/wireguard:;s:Kbuild:Makefile:"
+for i in "$UWG"/**/{*.c,*.h,*.S,*.pl,*.include} "$UWG/Kbuild" "$UWG/Kconfig"; do
+	[[ $i == "$UWG/tests/"* ]] && continue
+	diff -u /dev/null "$i" | sed "s:${UWG}:b/net/wireguard:;s:Kbuild:Makefile:"
 done
 
 cat <<_EOF

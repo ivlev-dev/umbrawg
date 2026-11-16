@@ -16,9 +16,9 @@ MAYBE_DEBUG :=
 endif
 
 insert: debug
-	-modinfo -F depends wireguard.ko | tr ',' '\n' | sudo xargs -n 1 modprobe
-	-sudo rmmod wireguard
-	-sudo insmod wireguard.ko
+	-modinfo -F depends umbrawg.ko | tr ',' '\n' | sudo xargs -n 1 modprobe
+	-sudo rmmod umbrawg
+	-sudo insmod umbrawg.ko
 
 test: insert
 	sudo PATH="$$PATH:/usr/sbin:/sbin:/usr/bin:/bin:/usr/local/sbin:/usr/local/bin" ./tests/netns.sh
@@ -28,45 +28,45 @@ test-qemu:
 
 remote-test:
 	ssh $(SSH_OPTS1) -Nf $(REMOTE_HOST1)
-	rsync --rsh="ssh $(SSH_OPTS1)" $(RSYNC_OPTS) . $(REMOTE_HOST1):wireguard-build/
-	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'make -C wireguard-build test -j$$(nproc)'
+	rsync --rsh="ssh $(SSH_OPTS1)" $(RSYNC_OPTS) . $(REMOTE_HOST1):umbrawg-build/
+	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'make -C umbrawg-build test -j$$(nproc)'
 	ssh $(SSH_OPTS1) -O exit $(REMOTE_HOST1)
 
 remote-run-1:
 	ssh $(SSH_OPTS1) -Nf $(REMOTE_HOST1)
-	rsync --rsh="ssh $(SSH_OPTS1)" $(RSYNC_OPTS) . $(REMOTE_HOST1):wireguard-build/
-	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip l d wg0; rmmod wireguard; cd wireguard-build && make -j$$(nproc) $(MAYBE_DEBUG) && make install'
-	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip l a wg0 type wireguard'
+	rsync --rsh="ssh $(SSH_OPTS1)" $(RSYNC_OPTS) . $(REMOTE_HOST1):umbrawg-build/
+	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip l d uwg0; rmmod umbrawg; cd umbrawg-build && make -j$$(nproc) $(MAYBE_DEBUG) && make install'
+	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip l a uwg0 type umbrawg'
 	printf '[Interface]\nListenPort=12912\nPrivateKey=4IoHwlfTyKb9Z9W1YPmBmZvSiU6qcs0oa4xnjAEm/3U=\n$(PEER2)$(PEER3)' | ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'cat > config.conf'
-	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'wg setconf wg0 config.conf'
-	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip l set up dev wg0'
-	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip a a 192.168.2.1/24 dev wg0'
-	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip a a abcd::1/120 dev wg0'
+	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'uwg setconf uwg0 config.conf'
+	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip l set up dev uwg0'
+	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip a a 192.168.2.1/24 dev uwg0'
+	ssh $(SSH_OPTS1) $(REMOTE_HOST1) 'ip a a abcd::1/120 dev uwg0'
 	ssh $(SSH_OPTS1) -O exit $(REMOTE_HOST1)
 
 
 remote-run-2:
 	ssh $(SSH_OPTS2) -Nf $(REMOTE_HOST2)
-	rsync --rsh="ssh $(SSH_OPTS2)" $(RSYNC_OPTS) . $(REMOTE_HOST2):wireguard-build/
-	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip l d wg0; rmmod wireguard; cd wireguard-build && make -j$$(nproc) $(MAYBE_DEBUG) && make install'
-	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip l a wg0 type wireguard'
+	rsync --rsh="ssh $(SSH_OPTS2)" $(RSYNC_OPTS) . $(REMOTE_HOST2):umbrawg-build/
+	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip l d uwg0; rmmod umbrawg; cd umbrawg-build && make -j$$(nproc) $(MAYBE_DEBUG) && make install'
+	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip l a uwg0 type umbrawg'
 	printf '[Interface]\nListenPort=21281\nPrivateKey=kEKL+m4h5xTn2cYKU6NTEv32kuXHAkuqrjdT9VtsnX8=\n$(PEER1)$(PEER3)' | ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'cat > config.conf'
-	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'wg setconf wg0 config.conf'
-	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip l set up dev wg0'
-	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip a a 192.168.2.2/24 dev wg0'
-	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip a a abcd::2/120 dev wg0'
+	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'uwg setconf uwg0 config.conf'
+	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip l set up dev uwg0'
+	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip a a 192.168.2.2/24 dev uwg0'
+	ssh $(SSH_OPTS2) $(REMOTE_HOST2) 'ip a a abcd::2/120 dev uwg0'
 	ssh $(SSH_OPTS2) -O exit $(REMOTE_HOST2)
 
 remote-run-3:
 	ssh $(SSH_OPTS3) -Nf $(REMOTE_HOST3)
-	rsync --rsh="ssh $(SSH_OPTS3)" $(RSYNC_OPTS) . $(REMOTE_HOST3):wireguard-build/
-	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip l d wg0; rmmod wireguard; cd wireguard-build && make -j$$(nproc) $(MAYBE_DEBUG) && make install'
-	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip l a wg0 type wireguard'
+	rsync --rsh="ssh $(SSH_OPTS3)" $(RSYNC_OPTS) . $(REMOTE_HOST3):umbrawg-build/
+	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip l d uwg0; rmmod umbrawg; cd umbrawg-build && make -j$$(nproc) $(MAYBE_DEBUG) && make install'
+	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip l a uwg0 type umbrawg'
 	printf '[Interface]\nListenPort=54812\nPrivateKey=qFunvj5kgENrtWn754hNBLrk5mMA+8+evVtnI2YqWkk=\n$(PEER1)$(PEER2)' | ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'cat > config.conf'
-	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'wg setconf wg0 config.conf'
-	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip l set up dev wg0'
-	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip a a 192.168.2.3/24 dev wg0'
-	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip a a abcd::3/120 dev wg0'
+	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'uwg setconf uwg0 config.conf'
+	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip l set up dev uwg0'
+	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip a a 192.168.2.3/24 dev uwg0'
+	ssh $(SSH_OPTS3) $(REMOTE_HOST3) 'ip a a abcd::3/120 dev uwg0'
 	ssh $(SSH_OPTS3) -O exit $(REMOTE_HOST3)
 
 remote-run:

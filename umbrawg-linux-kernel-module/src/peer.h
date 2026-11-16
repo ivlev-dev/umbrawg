@@ -3,8 +3,8 @@
  * Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
  */
 
-#ifndef _WG_PEER_H
-#define _WG_PEER_H
+#ifndef _UWG_PEER_H
+#define _UWG_PEER_H
 
 #include "device.h"
 #include "messages.h"
@@ -18,7 +18,7 @@
 #include <linux/kref.h>
 #include <net/dst_cache.h>
 
-struct wg_device;
+struct uwg_device;
 
 struct endpoint {
 	union {
@@ -36,8 +36,8 @@ struct endpoint {
 	};
 };
 
-struct wg_peer {
-	struct wg_device *device;
+struct uwg_peer {
+	struct uwg_device *device;
 	struct prev_queue tx_queue, rx_queue;
 	struct sk_buff_head staged_packet_queue;
 	int serial_work_cpu;
@@ -71,44 +71,44 @@ struct wg_peer {
 	unsigned int udp_window;
 };
 
-struct wg_peer *wg_peer_create(struct wg_device *wg,
+struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
 			       const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN]);
 
-struct wg_peer *__must_check wg_peer_get_maybe_zero(struct wg_peer *peer);
-static inline struct wg_peer *wg_peer_get(struct wg_peer *peer)
+struct uwg_peer *__must_check uwg_peer_get_maybe_zero(struct uwg_peer *peer);
+static inline struct uwg_peer *uwg_peer_get(struct uwg_peer *peer)
 {
 	kref_get(&peer->refcount);
 	return peer;
 }
-void wg_peer_put(struct wg_peer *peer);
-void wg_peer_remove(struct wg_peer *peer);
-void wg_peer_remove_all(struct wg_device *wg);
+void uwg_peer_put(struct uwg_peer *peer);
+void uwg_peer_remove(struct uwg_peer *peer);
+void uwg_peer_remove_all(struct uwg_device *uwg);
 
-int wg_peer_init(void);
-void wg_peer_uninit(void);
+int uwg_peer_init(void);
+void uwg_peer_uninit(void);
 
-static inline void wg_peer_reset_last_sent_handshake(struct wg_peer *peer)
+static inline void uwg_peer_reset_last_sent_handshake(struct uwg_peer *peer)
 {
 	u16 timeout = !u16_range_is_zero(peer->device->rekey_timeout) ? u16_range_lo(peer->device->rekey_timeout) : REKEY_TIMEOUT;
 	atomic64_set(&peer->last_sent_handshake, ktime_get_coarse_boottime_ns() -
 				       (u64)(timeout + 1) * NSEC_PER_SEC);
 }
 
-static inline unsigned int wg_peer_skb_random_trailer(struct wg_peer *peer,
-									struct wg_device *wg, unsigned int size)
+static inline unsigned int uwg_peer_skb_random_trailer(struct uwg_peer *peer,
+									struct uwg_device *uwg, unsigned int size)
 {
 	unsigned int udp_window = peer
 		? READ_ONCE(peer->udp_window)
 		: DEFAULT_UDP_WINDOW;
 
-	return wg->random_trailers && udp_window > size
+	return uwg->random_trailers && udp_window > size
 		? get_random_u32_below(udp_window - size)
 		: 0;
 }
 
-static inline unsigned int wg_peer_skb_randomize_padding_addition(struct wg_peer *peer,
-									  			struct wg_device *wg, unsigned int size)
+static inline unsigned int uwg_peer_skb_randomize_padding_addition(struct uwg_peer *peer,
+									  			struct uwg_device *uwg, unsigned int size)
 {
 	unsigned int udp_window = peer
 		? READ_ONCE(peer->udp_window)
@@ -118,9 +118,9 @@ static inline unsigned int wg_peer_skb_randomize_padding_addition(struct wg_peer
 	if (udp_window < size)
 		return 0;
 
-	add = u16_range_pick_one(wg->content_padding_addition);
+	add = u16_range_pick_one(uwg->content_padding_addition);
 	space = udp_window - size;
 	return min(add, space);
 }
 
-#endif /* _WG_PEER_H */
+#endif /* _UWG_PEER_H */

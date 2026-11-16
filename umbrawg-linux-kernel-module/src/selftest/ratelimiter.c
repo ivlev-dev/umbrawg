@@ -37,7 +37,7 @@ static __init int timings_test(struct sk_buff *skb4, struct iphdr *hdr4,
 	unsigned long loop_start_time;
 	int i;
 
-	wg_ratelimiter_gc_entries(NULL);
+	uwg_ratelimiter_gc_entries(NULL);
 	rcu_barrier();
 	loop_start_time = jiffies;
 
@@ -48,7 +48,7 @@ static __init int timings_test(struct sk_buff *skb4, struct iphdr *hdr4,
 		if (time_is_before_jiffies(loop_start_time +
 					   maximum_jiffies_at_index(i)))
 			return -ETIMEDOUT;
-		if (wg_ratelimiter_allow(skb4, &init_net) !=
+		if (uwg_ratelimiter_allow(skb4, &init_net) !=
 					expected_results[i].result)
 			return -EXFULL;
 		++(*test);
@@ -57,7 +57,7 @@ static __init int timings_test(struct sk_buff *skb4, struct iphdr *hdr4,
 		if (time_is_before_jiffies(loop_start_time +
 					   maximum_jiffies_at_index(i)))
 			return -ETIMEDOUT;
-		if (!wg_ratelimiter_allow(skb4, &init_net))
+		if (!uwg_ratelimiter_allow(skb4, &init_net))
 			return -EXFULL;
 		++(*test);
 
@@ -69,7 +69,7 @@ static __init int timings_test(struct sk_buff *skb4, struct iphdr *hdr4,
 		if (time_is_before_jiffies(loop_start_time +
 					   maximum_jiffies_at_index(i)))
 			return -ETIMEDOUT;
-		if (wg_ratelimiter_allow(skb6, &init_net) !=
+		if (uwg_ratelimiter_allow(skb6, &init_net) !=
 					expected_results[i].result)
 			return -EXFULL;
 		++(*test);
@@ -79,7 +79,7 @@ static __init int timings_test(struct sk_buff *skb4, struct iphdr *hdr4,
 		if (time_is_before_jiffies(loop_start_time +
 					   maximum_jiffies_at_index(i)))
 			return -ETIMEDOUT;
-		if (!wg_ratelimiter_allow(skb6, &init_net))
+		if (!uwg_ratelimiter_allow(skb6, &init_net))
 			return -EXFULL;
 		++(*test);
 
@@ -99,7 +99,7 @@ static __init int capacity_test(struct sk_buff *skb4, struct iphdr *hdr4,
 {
 	int i;
 
-	wg_ratelimiter_gc_entries(NULL);
+	uwg_ratelimiter_gc_entries(NULL);
 	rcu_barrier();
 
 	if (atomic_read(&total_entries))
@@ -108,14 +108,14 @@ static __init int capacity_test(struct sk_buff *skb4, struct iphdr *hdr4,
 
 	for (i = 0; i <= max_entries; ++i) {
 		hdr4->saddr = htonl(i);
-		if (wg_ratelimiter_allow(skb4, &init_net) != (i != max_entries))
+		if (uwg_ratelimiter_allow(skb4, &init_net) != (i != max_entries))
 			return -EXFULL;
 		++(*test);
 	}
 	return 0;
 }
 
-bool __init wg_ratelimiter_selftest(void)
+bool __init uwg_ratelimiter_selftest(void)
 {
 	enum { TRIALS_BEFORE_GIVING_UP = 5000 };
 	bool success = false;
@@ -129,17 +129,17 @@ bool __init wg_ratelimiter_selftest(void)
 
 	BUILD_BUG_ON(MSEC_PER_SEC % PACKETS_PER_SECOND != 0);
 
-	if (wg_ratelimiter_init())
+	if (uwg_ratelimiter_init())
 		goto out;
 	++test;
-	if (wg_ratelimiter_init()) {
-		wg_ratelimiter_uninit();
+	if (uwg_ratelimiter_init()) {
+		uwg_ratelimiter_uninit();
 		goto out;
 	}
 	++test;
-	if (wg_ratelimiter_init()) {
-		wg_ratelimiter_uninit();
-		wg_ratelimiter_uninit();
+	if (uwg_ratelimiter_init()) {
+		uwg_ratelimiter_uninit();
+		uwg_ratelimiter_uninit();
 		goto out;
 	}
 	++test;
@@ -210,11 +210,11 @@ err:
 	kfree_skb(skb6);
 #endif
 err_nofree:
-	wg_ratelimiter_uninit();
-	wg_ratelimiter_uninit();
-	wg_ratelimiter_uninit();
+	uwg_ratelimiter_uninit();
+	uwg_ratelimiter_uninit();
+	uwg_ratelimiter_uninit();
 	/* Uninit one extra time to check underflow detection. */
-	wg_ratelimiter_uninit();
+	uwg_ratelimiter_uninit();
 out:
 	if (success)
 		pr_info("ratelimiter self-tests: pass\n");

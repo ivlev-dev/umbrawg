@@ -1,4 +1,4 @@
-# AmneziaWG kernel module
+# UmbraWG kernel module
 
 ## Table of contents
 
@@ -24,7 +24,7 @@ After kernel upgrade reboot is required.
 at least one line starting with `deb-src` is present and uncommented.
 3. Install pre-requisites - run `sudo apt install -y software-properties-common python3-launchpadlib gnupg2 linux-headers-$(uname -r)`.
 4. Run `sudo add-apt-repository ppa:amnezia/ppa`.
-5. Finally execute `sudo apt-get install -y amneziawg`.
+5. Finally execute `sudo apt-get install -y umbrawg`.
 
 ### Debian
 
@@ -41,7 +41,7 @@ sudo apt-key adv --keyserver keyserver.ubuntu.com --recv-keys 57290828
 echo "deb https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" | sudo tee -a /etc/apt/sources.list
 echo "deb-src https://ppa.launchpadcontent.net/amnezia/ppa/ubuntu focal main" | sudo tee -a /etc/apt/sources.list
 sudo apt-get update
-sudo apt-get install -y amneziawg
+sudo apt-get install -y umbrawg
 ```
 
 ### Linux Mint
@@ -53,7 +53,7 @@ Proceed to `PPAs` section and add `ppa:amnezia/ppa` PPA repository, after that s
 After that, open `Terminal` and run:
 
 ```shell
-sudo apt-get install -y amneziawg
+sudo apt-get install -y umbrawg
 ```
 
 ### RHEL/CentOS/SUSE/Fedora Core
@@ -64,7 +64,7 @@ Open `Terminal` and run:
 
 ```shell
 sudo dnf copr enable amneziavpn/amneziawg
-sudo dnf install amneziawg-dkms amneziawg-tools
+sudo dnf install umbrawg-dkms umbrawg-tools
 ```
 
 Before installation it is strictly recommended to upgrade your system kernel to the latest available version and perform
@@ -77,7 +77,7 @@ You may need to install kernel headers and/or build essentials packages before r
 1. In Terminal:
     ```shell
     git clone https://github.com/amnezia-vpn/amneziawg-linux-kernel-module.git
-    cd amneziawg-linux-kernel-module/src
+    cd umbrawg-linux-kernel-module/src
     ```
 
 2. Now, if you run modern Linux with kernel version 5.6+, you need to download your kernel's source from anywhere possible
@@ -98,9 +98,9 @@ and link resulting tree to `kernel` symlink:
     Or on a capable system you may want to use DKMS for this:
     ```shell
     sudo make dkms-install
-    sudo dkms add -m amneziawg -v 1.0.0
-    sudo dkms build -m amneziawg -v 1.0.0
-    sudo dkms install -m amneziawg -v 1.0.0
+    sudo dkms add -m umbrawg -v 1.0.0
+    sudo dkms build -m umbrawg -v 1.0.0
+    sudo dkms install -m umbrawg -v 1.0.0
     ```
 
 ## Configuration
@@ -127,7 +127,7 @@ and link resulting tree to `kernel` symlink:
 To get more details, you can enable the dynamic debug feature for the module:
 
 ```shell
-echo "module amneziawg +p" | sudo tee /sys/kernel/debug/dynamic_debug/control
+echo "module umbrawg +p" | sudo tee /sys/kernel/debug/dynamic_debug/control
 ```
 
 This will log messages to dmesg, which can be watched live with:
@@ -140,11 +140,11 @@ dmesg -wT
 Most installation instructions above assume that you have enough space in system's `/tmp` partition (as setup script needs 
 to manipulate with kernel's sourcetree which is pretty huge).
 
-If you can not afford enough space in your `/tmp`, you may override temporary dir by setting `AWG_TEMP_DIR` environment variable
+If you can not afford enough space in your `/tmp`, you may override temporary dir by setting `UWG_TEMP_DIR` environment variable
 before the installation:
 
 ```shell
-export AWG_TEMP_DIR="/home/ubuntu/tmp"
+export UWG_TEMP_DIR="/home/ubuntu/tmp"
 ```
 
 This setting should persist for future and will not require repeating.
@@ -155,7 +155,7 @@ In some rare cases, setup script may not find your kernel's sourcetree automatic
 then and link them to DKMS module sources, e.g.
 
 ```shell
-ln -s /path/to/your/kernel/sources /usr/src/amneziawg-1.0.0/kernel
+ln -s /path/to/your/kernel/sources /usr/src/umbrawg-1.0.0/kernel
 ```
 
 Reinstall the package thereafter and you should get everything working.

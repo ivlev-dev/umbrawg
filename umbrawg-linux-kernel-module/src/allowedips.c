@@ -124,13 +124,13 @@ static struct allowedips_node *find_node(struct allowedips_node *trie, u8 bits,
 }
 
 /* Returns a strong reference to a peer */
-static struct wg_peer *lookup(struct allowedips_node __rcu *root, u8 bits,
+static struct uwg_peer *lookup(struct allowedips_node __rcu *root, u8 bits,
 			      const void *be_ip)
 {
 	/* Aligned so it can be passed to fls/fls64 */
 	u8 ip[16] __aligned(__alignof(u64));
 	struct allowedips_node *node;
-	struct wg_peer *peer = NULL;
+	struct uwg_peer *peer = NULL;
 
 	swap_endian(ip, be_ip, bits);
 
@@ -138,7 +138,7 @@ static struct wg_peer *lookup(struct allowedips_node __rcu *root, u8 bits,
 retry:
 	node = find_node(rcu_dereference_bh(root), bits, ip);
 	if (node) {
-		peer = wg_peer_get_maybe_zero(rcu_dereference_bh(node->peer));
+		peer = uwg_peer_get_maybe_zero(rcu_dereference_bh(node->peer));
 		if (!peer)
 			goto retry;
 	}
@@ -179,7 +179,7 @@ static inline void choose_and_connect_node(struct allowedips_node *parent, struc
 }
 
 static int add(struct allowedips_node __rcu **trie, u8 bits, const u8 *key,
-	       u8 cidr, struct wg_peer *peer, struct mutex *lock)
+	       u8 cidr, struct uwg_peer *peer, struct mutex *lock)
 {
 	struct allowedips_node *node, *parent, *down, *newnode;
 
@@ -281,7 +281,7 @@ static void remove_node(struct allowedips_node *node, struct mutex *lock)
 }
 
 static int remove(struct allowedips_node __rcu **trie, u8 bits, const u8 *key,
-		  u8 cidr, struct wg_peer *peer, struct mutex *lock)
+		  u8 cidr, struct uwg_peer *peer, struct mutex *lock)
 {
 	struct allowedips_node *node;
 
@@ -295,13 +295,13 @@ static int remove(struct allowedips_node __rcu **trie, u8 bits, const u8 *key,
 	return 0;
 }
 
-void wg_allowedips_init(struct allowedips *table)
+void uwg_allowedips_init(struct allowedips *table)
 {
 	table->root4 = table->root6 = NULL;
 	table->seq = 1;
 }
 
-void wg_allowedips_free(struct allowedips *table, struct mutex *lock)
+void uwg_allowedips_free(struct allowedips *table, struct mutex *lock)
 {
 	struct allowedips_node __rcu *old4 = table->root4, *old6 = table->root6;
 
@@ -324,8 +324,8 @@ void wg_allowedips_free(struct allowedips *table, struct mutex *lock)
 	}
 }
 
-int wg_allowedips_insert_v4(struct allowedips *table, const struct in_addr *ip,
-			    u8 cidr, struct wg_peer *peer, struct mutex *lock)
+int uwg_allowedips_insert_v4(struct allowedips *table, const struct in_addr *ip,
+			    u8 cidr, struct uwg_peer *peer, struct mutex *lock)
 {
 	/* Aligned so it can be passed to fls */
 	u8 key[4] __aligned(__alignof(u32));
@@ -335,8 +335,8 @@ int wg_allowedips_insert_v4(struct allowedips *table, const struct in_addr *ip,
 	return add(&table->root4, 32, key, cidr, peer, lock);
 }
 
-int wg_allowedips_insert_v6(struct allowedips *table, const struct in6_addr *ip,
-			    u8 cidr, struct wg_peer *peer, struct mutex *lock)
+int uwg_allowedips_insert_v6(struct allowedips *table, const struct in6_addr *ip,
+			    u8 cidr, struct uwg_peer *peer, struct mutex *lock)
 {
 	/* Aligned so it can be passed to fls64 */
 	u8 key[16] __aligned(__alignof(u64));
@@ -346,8 +346,8 @@ int wg_allowedips_insert_v6(struct allowedips *table, const struct in6_addr *ip,
 	return add(&table->root6, 128, key, cidr, peer, lock);
 }
 
-int wg_allowedips_remove_v4(struct allowedips *table, const struct in_addr *ip,
-			    u8 cidr, struct wg_peer *peer, struct mutex *lock)
+int uwg_allowedips_remove_v4(struct allowedips *table, const struct in_addr *ip,
+			    u8 cidr, struct uwg_peer *peer, struct mutex *lock)
 {
 	/* Aligned so it can be passed to fls */
 	u8 key[4] __aligned(__alignof(u32));
@@ -357,8 +357,8 @@ int wg_allowedips_remove_v4(struct allowedips *table, const struct in_addr *ip,
 	return remove(&table->root4, 32, key, cidr, peer, lock);
 }
 
-int wg_allowedips_remove_v6(struct allowedips *table, const struct in6_addr *ip,
-			    u8 cidr, struct wg_peer *peer, struct mutex *lock)
+int uwg_allowedips_remove_v6(struct allowedips *table, const struct in6_addr *ip,
+			    u8 cidr, struct uwg_peer *peer, struct mutex *lock)
 {
 	/* Aligned so it can be passed to fls64 */
 	u8 key[16] __aligned(__alignof(u64));
@@ -368,8 +368,8 @@ int wg_allowedips_remove_v6(struct allowedips *table, const struct in6_addr *ip,
 	return remove(&table->root6, 128, key, cidr, peer, lock);
 }
 
-void wg_allowedips_remove_by_peer(struct allowedips *table,
-				  struct wg_peer *peer, struct mutex *lock)
+void uwg_allowedips_remove_by_peer(struct allowedips *table,
+				  struct uwg_peer *peer, struct mutex *lock)
 {
 	struct allowedips_node *node, *tmp;
 
@@ -380,7 +380,7 @@ void wg_allowedips_remove_by_peer(struct allowedips *table,
 		remove_node(node, lock);
 }
 
-int wg_allowedips_read_node(struct allowedips_node *node, u8 ip[16], u8 *cidr)
+int uwg_allowedips_read_node(struct allowedips_node *node, u8 ip[16], u8 *cidr)
 {
 	const unsigned int cidr_bytes = DIV_ROUND_UP(node->cidr, 8U);
 	swap_endian(ip, node->bits, node->bitlen);
@@ -393,7 +393,7 @@ int wg_allowedips_read_node(struct allowedips_node *node, u8 ip[16], u8 *cidr)
 }
 
 /* Returns a strong reference to a peer */
-struct wg_peer *wg_allowedips_lookup_dst(struct allowedips *table,
+struct uwg_peer *uwg_allowedips_lookup_dst(struct allowedips *table,
 					 struct sk_buff *skb)
 {
 	if (skb->protocol == htons(ETH_P_IP))
@@ -404,7 +404,7 @@ struct wg_peer *wg_allowedips_lookup_dst(struct allowedips *table,
 }
 
 /* Returns a strong reference to a peer */
-struct wg_peer *wg_allowedips_lookup_src(struct allowedips *table,
+struct uwg_peer *uwg_allowedips_lookup_src(struct allowedips *table,
 					 struct sk_buff *skb)
 {
 	if (skb->protocol == htons(ETH_P_IP))
@@ -414,13 +414,13 @@ struct wg_peer *wg_allowedips_lookup_src(struct allowedips *table,
 	return NULL;
 }
 
-int __init wg_allowedips_slab_init(void)
+int __init uwg_allowedips_slab_init(void)
 {
 	node_cache = KMEM_CACHE(allowedips_node, 0);
 	return node_cache ? 0 : -ENOMEM;
 }
 
-void wg_allowedips_slab_uninit(void)
+void uwg_allowedips_slab_uninit(void)
 {
 	rcu_barrier();
 	kmem_cache_destroy(node_cache);

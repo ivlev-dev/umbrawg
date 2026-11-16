@@ -28,8 +28,8 @@ static DEFINE_MUTEX(init_lock);
 static u64 init_refcnt; /* Protected by init_lock, hence not atomic. */
 static atomic_t total_entries = ATOMIC_INIT(0);
 static unsigned int max_entries, table_size;
-static void wg_ratelimiter_gc_entries(struct work_struct *);
-static DECLARE_DEFERRABLE_WORK(gc_work, wg_ratelimiter_gc_entries);
+static void uwg_ratelimiter_gc_entries(struct work_struct *);
+static DECLARE_DEFERRABLE_WORK(gc_work, uwg_ratelimiter_gc_entries);
 static struct hlist_head *table_v4;
 #if IS_ENABLED(CONFIG_IPV6)
 static struct hlist_head *table_v6;
@@ -64,7 +64,7 @@ static void entry_uninit(struct ratelimiter_entry *entry)
 }
 
 /* Calling this function with a NULL work uninits all entries. */
-static void wg_ratelimiter_gc_entries(struct work_struct *work)
+static void uwg_ratelimiter_gc_entries(struct work_struct *work)
 {
 	const u64 now = ktime_get_coarse_boottime_ns();
 	struct ratelimiter_entry *entry;
@@ -93,7 +93,7 @@ static void wg_ratelimiter_gc_entries(struct work_struct *work)
 		queue_delayed_work(system_power_efficient_wq, &gc_work, HZ);
 }
 
-bool wg_ratelimiter_allow(struct sk_buff *skb, struct net *net)
+bool uwg_ratelimiter_allow(struct sk_buff *skb, struct net *net)
 {
 	/* We only take the bottom half of the net pointer, so that we can hash
 	 * 3 words in the end. This way, siphash's len param fits into the final
@@ -167,7 +167,7 @@ err_oom:
 	return false;
 }
 
-int wg_ratelimiter_init(void)
+int uwg_ratelimiter_init(void)
 {
 	mutex_lock(&init_lock);
 	if (++init_refcnt != 1)
@@ -214,14 +214,14 @@ err:
 	return -ENOMEM;
 }
 
-void wg_ratelimiter_uninit(void)
+void uwg_ratelimiter_uninit(void)
 {
 	mutex_lock(&init_lock);
 	if (!init_refcnt || --init_refcnt)
 		goto out;
 
 	cancel_delayed_work_sync(&gc_work);
-	wg_ratelimiter_gc_entries(NULL);
+	uwg_ratelimiter_gc_entries(NULL);
 	rcu_barrier();
 	kvfree(table_v4);
 #if IS_ENABLED(CONFIG_IPV6)

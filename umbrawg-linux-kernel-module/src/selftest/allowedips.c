@@ -45,14 +45,14 @@ static __init void print_node(struct allowedips_node *node, u8 bits)
 			hsiphash_1u32(0xabad1dea, &key) % 200;
 		style = "bold";
 	}
-	wg_allowedips_read_node(node, ip1, &cidr1);
+	uwg_allowedips_read_node(node, ip1, &cidr1);
 	printk(fmt_declaration, ip1, cidr1, style, color);
 	if (node->bit[0]) {
-		wg_allowedips_read_node(rcu_dereference_raw(node->bit[0]), ip2, &cidr2);
+		uwg_allowedips_read_node(rcu_dereference_raw(node->bit[0]), ip2, &cidr2);
 		printk(fmt_connection, ip1, cidr1, ip2, cidr2);
 	}
 	if (node->bit[1]) {
-		wg_allowedips_read_node(rcu_dereference_raw(node->bit[1]), ip2, &cidr2);
+		uwg_allowedips_read_node(rcu_dereference_raw(node->bit[1]), ip2, &cidr2);
 		printk(fmt_connection, ip1, cidr1, ip2, cidr2);
 	}
 	if (node->bit[0])
@@ -255,7 +255,7 @@ static __init bool randomized_test(void)
 {
 	unsigned int i, j, k, mutate_amount, cidr;
 	u8 ip[16], mutate_mask[16], mutated[16];
-	struct wg_peer **peers, *peer;
+	struct uwg_peer **peers, *peer;
 	struct horrible_allowedips h;
 	DEFINE_MUTEX(mutex);
 	struct allowedips t;
@@ -263,7 +263,7 @@ static __init bool randomized_test(void)
 
 	mutex_init(&mutex);
 
-	wg_allowedips_init(&t);
+	uwg_allowedips_init(&t);
 	horrible_allowedips_init(&h);
 
 	peers = kcalloc(NUM_PEERS, sizeof(*peers), GFP_KERNEL);
@@ -287,7 +287,7 @@ static __init bool randomized_test(void)
 		prandom_bytes(ip, 4);
 		cidr = prandom_u32_max(32) + 1;
 		peer = peers[prandom_u32_max(NUM_PEERS)];
-		if (wg_allowedips_insert_v4(&t, (struct in_addr *)ip, cidr,
+		if (uwg_allowedips_insert_v4(&t, (struct in_addr *)ip, cidr,
 					    peer, &mutex) < 0) {
 			pr_err("allowedips random self-test malloc: FAIL\n");
 			goto free_locked;
@@ -313,7 +313,7 @@ static __init bool randomized_test(void)
 					      prandom_u32_max(256));
 			cidr = prandom_u32_max(32) + 1;
 			peer = peers[prandom_u32_max(NUM_PEERS)];
-			if (wg_allowedips_insert_v4(&t,
+			if (uwg_allowedips_insert_v4(&t,
 						    (struct in_addr *)mutated,
 						    cidr, peer, &mutex) < 0) {
 				pr_err("allowedips random self-test malloc: FAIL\n");
@@ -331,7 +331,7 @@ static __init bool randomized_test(void)
 		prandom_bytes(ip, 16);
 		cidr = prandom_u32_max(128) + 1;
 		peer = peers[prandom_u32_max(NUM_PEERS)];
-		if (wg_allowedips_insert_v6(&t, (struct in6_addr *)ip, cidr,
+		if (uwg_allowedips_insert_v6(&t, (struct in6_addr *)ip, cidr,
 					    peer, &mutex) < 0) {
 			pr_err("allowedips random self-test malloc: FAIL\n");
 			goto free_locked;
@@ -357,7 +357,7 @@ static __init bool randomized_test(void)
 					      prandom_u32_max(256));
 			cidr = prandom_u32_max(128) + 1;
 			peer = peers[prandom_u32_max(NUM_PEERS)];
-			if (wg_allowedips_insert_v6(&t,
+			if (uwg_allowedips_insert_v6(&t,
 						    (struct in6_addr *)mutated,
 						    cidr, peer, &mutex) < 0) {
 				pr_err("allowedips random self-test malloc: FAIL\n");
@@ -396,7 +396,7 @@ static __init bool randomized_test(void)
 		if (j >= NUM_PEERS)
 			break;
 		mutex_lock(&mutex);
-		wg_allowedips_remove_by_peer(&t, peers[j], &mutex);
+		uwg_allowedips_remove_by_peer(&t, peers[j], &mutex);
 		mutex_unlock(&mutex);
 		horrible_allowedips_remove_by_value(&h, peers[j]);
 	}
@@ -411,7 +411,7 @@ static __init bool randomized_test(void)
 free:
 	mutex_lock(&mutex);
 free_locked:
-	wg_allowedips_free(&t, &mutex);
+	uwg_allowedips_free(&t, &mutex);
 	mutex_unlock(&mutex);
 	horrible_allowedips_free(&h);
 	if (peers) {
@@ -446,9 +446,9 @@ static __init inline struct in6_addr *ip6(u32 a, u32 b, u32 c, u32 d)
 	return &ip;
 }
 
-static __init struct wg_peer *init_peer(void)
+static __init struct uwg_peer *init_peer(void)
 {
-	struct wg_peer *peer = kzalloc(sizeof(*peer), GFP_KERNEL);
+	struct uwg_peer *peer = kzalloc(sizeof(*peer), GFP_KERNEL);
 
 	if (!peer)
 		return NULL;
@@ -458,7 +458,7 @@ static __init struct wg_peer *init_peer(void)
 }
 
 #define insert(version, mem, ipa, ipb, ipc, ipd, cidr)                       \
-	wg_allowedips_insert_v##version(&t, ip##version(ipa, ipb, ipc, ipd), \
+	uwg_allowedips_insert_v##version(&t, ip##version(ipa, ipb, ipc, ipd), \
 					cidr, mem, &mutex)
 
 #define maybe_fail() do {                                               \
@@ -486,11 +486,11 @@ static __init struct wg_peer *init_peer(void)
 		maybe_fail();     \
 	} while (0)
 
-bool __init wg_allowedips_selftest(void)
+bool __init uwg_allowedips_selftest(void)
 {
 	bool found_a = false, found_b = false, found_c = false, found_d = false,
 	     found_e = false, found_other = false;
-	struct wg_peer *a = init_peer(), *b = init_peer(), *c = init_peer(),
+	struct uwg_peer *a = init_peer(), *b = init_peer(), *c = init_peer(),
 		       *d = init_peer(), *e = init_peer(), *f = init_peer(),
 		       *g = init_peer(), *h = init_peer();
 	struct allowedips_node *iter_node;
@@ -503,7 +503,7 @@ bool __init wg_allowedips_selftest(void)
 
 	mutex_init(&mutex);
 	mutex_lock(&mutex);
-	wg_allowedips_init(&t);
+	uwg_allowedips_init(&t);
 
 	if (!a || !b || !c || !d || !e || !f || !g || !h) {
 		pr_err("allowedips self-test malloc: FAIL\n");
@@ -579,18 +579,18 @@ bool __init wg_allowedips_selftest(void)
 	insert(4, a, 128, 0, 0, 0, 32);
 	insert(4, a, 192, 0, 0, 0, 32);
 	insert(4, a, 255, 0, 0, 0, 32);
-	wg_allowedips_remove_by_peer(&t, a, &mutex);
+	uwg_allowedips_remove_by_peer(&t, a, &mutex);
 	test_negative(4, a, 1, 0, 0, 0);
 	test_negative(4, a, 64, 0, 0, 0);
 	test_negative(4, a, 128, 0, 0, 0);
 	test_negative(4, a, 192, 0, 0, 0);
 	test_negative(4, a, 255, 0, 0, 0);
 
-	wg_allowedips_free(&t, &mutex);
-	wg_allowedips_init(&t);
+	uwg_allowedips_free(&t, &mutex);
+	uwg_allowedips_init(&t);
 	insert(4, a, 192, 168, 0, 0, 16);
 	insert(4, a, 192, 168, 0, 0, 24);
-	wg_allowedips_remove_by_peer(&t, a, &mutex);
+	uwg_allowedips_remove_by_peer(&t, a, &mutex);
 	test_negative(4, a, 192, 168, 0, 1);
 
 	/* These will hit the WARN_ON(len >= 128) in free_node if something
@@ -600,12 +600,12 @@ bool __init wg_allowedips_selftest(void)
 		part = cpu_to_be64(~(1LLU << (i % 64)));
 		memset(&ip, 0xff, 16);
 		memcpy((u8 *)&ip + (i < 64) * 8, &part, 8);
-		wg_allowedips_insert_v6(&t, &ip, 128, a, &mutex);
+		uwg_allowedips_insert_v6(&t, &ip, 128, a, &mutex);
 	}
 
-	wg_allowedips_free(&t, &mutex);
+	uwg_allowedips_free(&t, &mutex);
 
-	wg_allowedips_init(&t);
+	uwg_allowedips_init(&t);
 	insert(4, a, 192, 95, 5, 93, 27);
 	insert(6, a, 0x26075300, 0x60006b00, 0, 0xc05f0543, 128);
 	insert(4, a, 10, 1, 0, 20, 29);
@@ -613,7 +613,7 @@ bool __init wg_allowedips_selftest(void)
 	insert(6, a, 0x26075300, 0x6d8a6bf8, 0xdab1f1df, 0xc05f1523, 21);
 	list_for_each_entry(iter_node, &a->allowedips_list, peer_list) {
 		u8 cidr, ip[16] __aligned(__alignof(u64));
-		int family = wg_allowedips_read_node(iter_node, ip, &cidr);
+		int family = uwg_allowedips_read_node(iter_node, ip, &cidr);
 
 		count++;
 
@@ -653,7 +653,7 @@ bool __init wg_allowedips_selftest(void)
 		pr_info("allowedips self-tests: pass\n");
 
 free:
-	wg_allowedips_free(&t, &mutex);
+	uwg_allowedips_free(&t, &mutex);
 	kfree(a);
 	kfree(b);
 	kfree(c);

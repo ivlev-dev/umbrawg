@@ -3,8 +3,8 @@
  * Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
  */
 
-#ifndef _WG_MESSAGES_H
-#define _WG_MESSAGES_H
+#ifndef _UWG_MESSAGES_H
+#define _UWG_MESSAGES_H
 
 #include <crypto/curve25519.h>
 #include <crypto/chacha20poly1305.h>
@@ -128,4 +128,4 @@ enum message_alignments {
 
 enum { HANDSHAKE_DSCP = 0x88 /* AF41, plus 00 ECN */ };
 
-#endif /* _WG_MESSAGES_H */
+#endif /* _UWG_MESSAGES_H */

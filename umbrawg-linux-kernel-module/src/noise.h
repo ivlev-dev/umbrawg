@@ -2,8 +2,8 @@
 /*
  * Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
  */
-#ifndef _WG_NOISE_H
-#define _WG_NOISE_H
+#ifndef _UWG_NOISE_H
+#define _UWG_NOISE_H
 
 #include "messages.h"
 #include "peerlookup.h"
@@ -89,42 +89,42 @@ struct noise_handshake {
 	struct rw_semaphore lock;
 };
 
-struct wg_device;
+struct uwg_device;
 
-void wg_noise_init(void);
-void wg_noise_handshake_init(struct noise_handshake *handshake,
+void uwg_noise_init(void);
+void uwg_noise_handshake_init(struct noise_handshake *handshake,
 			     struct noise_static_identity *static_identity,
 			     const u8 peer_public_key[NOISE_PUBLIC_KEY_LEN],
 			     const u8 peer_preshared_key[NOISE_SYMMETRIC_KEY_LEN],
-			     struct wg_peer *peer);
-void wg_noise_handshake_clear(struct noise_handshake *handshake);
+			     struct uwg_peer *peer);
+void uwg_noise_handshake_clear(struct noise_handshake *handshake);
 
-void wg_noise_keypair_put(struct noise_keypair *keypair, bool unreference_now);
-struct noise_keypair *wg_noise_keypair_get(struct noise_keypair *keypair);
-void wg_noise_keypairs_clear(struct noise_keypairs *keypairs);
-bool wg_noise_received_with_keypair(struct noise_keypairs *keypairs,
+void uwg_noise_keypair_put(struct noise_keypair *keypair, bool unreference_now);
+struct noise_keypair *uwg_noise_keypair_get(struct noise_keypair *keypair);
+void uwg_noise_keypairs_clear(struct noise_keypairs *keypairs);
+bool uwg_noise_received_with_keypair(struct noise_keypairs *keypairs,
 				    struct noise_keypair *received_keypair);
-void wg_noise_expire_current_peer_keypairs(struct wg_peer *peer);
+void uwg_noise_expire_current_peer_keypairs(struct uwg_peer *peer);
 
-void wg_noise_set_static_identity_private_key(
+void uwg_noise_set_static_identity_private_key(
 	struct noise_static_identity *static_identity,
 	const u8 private_key[NOISE_PUBLIC_KEY_LEN]);
-void wg_noise_precompute_static_static(struct wg_peer *peer);
+void uwg_noise_precompute_static_static(struct uwg_peer *peer);
 
 bool
-wg_noise_handshake_create_initiation(struct message_handshake_initiation *dst,
+uwg_noise_handshake_create_initiation(struct message_handshake_initiation *dst,
 				     struct noise_handshake *handshake, u32 message_type);
-struct wg_peer *
-wg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
-				      struct wg_device *wg, struct sk_buff *skb);
+struct uwg_peer *
+uwg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
+				      struct uwg_device *uwg, struct sk_buff *skb);
 
-bool wg_noise_handshake_create_response(struct message_handshake_response *dst,
+bool uwg_noise_handshake_create_response(struct message_handshake_response *dst,
 					struct noise_handshake *handshake, u32 message_type);
-struct wg_peer *
-wg_noise_handshake_consume_response(struct message_handshake_response *src,
-				    struct wg_device *wg);
+struct uwg_peer *
+uwg_noise_handshake_consume_response(struct message_handshake_response *src,
+				    struct uwg_device *uwg);
 
-bool wg_noise_handshake_begin_session(struct noise_handshake *handshake,
+bool uwg_noise_handshake_begin_session(struct noise_handshake *handshake,
 				      struct noise_keypairs *keypairs);
 
-#endif /* _WG_NOISE_H */
+#endif /* _UWG_NOISE_H */

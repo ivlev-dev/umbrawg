@@ -1,5 +1,5 @@
-#ifndef _WG_TYPE
-#define _WG_TYPE
+#ifndef _UWG_TYPE
+#define _UWG_TYPE
 
 #include <linux/types.h>
 #include <linux/random.h>
@@ -64,4 +64,4 @@ static inline u16 u16_range_pick_one(u16_range_t range) {
     return get_random_u32_inclusive(u16_range_lo(range), u16_range_hi(range));
 }
 
-#endif // _WG_TYPE
+#endif // _UWG_TYPE

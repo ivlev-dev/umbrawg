@@ -57,7 +57,7 @@ error:
     return err;
 }
 
-static void pkt_counter_modifier(char* buf, int len, struct wg_peer *peer) {
+static void pkt_counter_modifier(char* buf, int len, struct uwg_peer *peer) {
     int val = atomic_read(&peer->jp_packet_counter);
     val = htonl(val);
     memcpy(buf, &val, sizeof(val));
@@ -80,7 +80,7 @@ static int parse_c_tag(char* val, struct list_head* head) {
     return 0;
 }
 
-static void unix_time_modifier(char* buf, int len, struct wg_peer *peer) {
+static void unix_time_modifier(char* buf, int len, struct uwg_peer *peer) {
     u32 time = (u32)ktime_get_real_seconds();
     time = htonl(time);
     memcpy(buf, &time, sizeof(time));
@@ -103,7 +103,7 @@ static int parse_t_tag(char* val, struct list_head* head) {
     return 0;
 }
 
-static void random_byte_modifier(char* buf, int len, struct wg_peer *peer) {
+static void random_byte_modifier(char* buf, int len, struct uwg_peer *peer) {
     get_random_bytes(buf, len);
 }
 
@@ -128,7 +128,7 @@ static int parse_r_tag(char* val, struct list_head* head) {
 #define ALPHABET_LEN 26
 #define LETTER_LEN (ALPHABET_LEN * 2)
 
-static void random_char_modifier(char* buf, int len, struct wg_peer *peer) {
+static void random_char_modifier(char* buf, int len, struct uwg_peer *peer) {
     int i;
     u32 byte;
 
@@ -158,7 +158,7 @@ static int parse_rc_tag(char* val, struct list_head* head) {
 
 #define DIGIT_LEN 10
 
-static void random_digit_modifier(char* buf, int len, struct wg_peer *peer) {
+static void random_digit_modifier(char* buf, int len, struct uwg_peer *peer) {
     int i;
 
     for (i = 0; i < len; ++i)
@@ -341,7 +341,7 @@ error:
     return err;
 }
 
-void jp_spec_applymods(struct jp_spec* spec, struct wg_peer* peer) {
+void jp_spec_applymods(struct jp_spec* spec, struct uwg_peer* peer) {
     int i;
     struct jp_modifier* mod;
 

@@ -7,7 +7,7 @@
 #include <linux/skb_array.h>
 
 struct multicore_worker __percpu *
-wg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr)
+uwg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr)
 {
 	int cpu;
 	struct multicore_worker __percpu *worker = alloc_percpu(struct multicore_worker);
@@ -22,7 +22,7 @@ wg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr)
 	return worker;
 }
 
-int wg_packet_queue_init(struct crypt_queue *queue, work_func_t function,
+int uwg_packet_queue_init(struct crypt_queue *queue, work_func_t function,
 			 unsigned int len)
 {
 	int ret;
@@ -32,7 +32,7 @@ int wg_packet_queue_init(struct crypt_queue *queue, work_func_t function,
 	ret = ptr_ring_init(&queue->ring, len, GFP_KERNEL);
 	if (ret)
 		return ret;
-	queue->worker = wg_packet_percpu_multicore_worker_alloc(function, queue);
+	queue->worker = uwg_packet_percpu_multicore_worker_alloc(function, queue);
 	if (!queue->worker) {
 		ptr_ring_cleanup(&queue->ring, NULL);
 		return -ENOMEM;
@@ -40,7 +40,7 @@ int wg_packet_queue_init(struct crypt_queue *queue, work_func_t function,
 	return 0;
 }
 
-void wg_packet_queue_free(struct crypt_queue *queue, bool purge)
+void uwg_packet_queue_free(struct crypt_queue *queue, bool purge)
 {
 	free_percpu(queue->worker);
 	WARN_ON(!purge && !__ptr_ring_empty(&queue->ring));
@@ -50,7 +50,7 @@ void wg_packet_queue_free(struct crypt_queue *queue, bool purge)
 #define NEXT(skb) ((skb)->prev)
 #define STUB(queue) ((struct sk_buff *)&queue->empty)
 
-void wg_prev_queue_init(struct prev_queue *queue)
+void uwg_prev_queue_init(struct prev_queue *queue)
 {
 	NEXT(STUB(queue)) = NULL;
 	queue->head = queue->tail = STUB(queue);
@@ -69,7 +69,7 @@ static void __wg_prev_queue_enqueue(struct prev_queue *queue, struct sk_buff *sk
 	WRITE_ONCE(NEXT(xchg_release(&queue->head, skb)), skb);
 }
 
-bool wg_prev_queue_enqueue(struct prev_queue *queue, struct sk_buff *skb)
+bool uwg_prev_queue_enqueue(struct prev_queue *queue, struct sk_buff *skb)
 {
 	if (!atomic_add_unless(&queue->count, 1, MAX_QUEUED_PACKETS))
 		return false;
@@ -77,7 +77,7 @@ bool wg_prev_queue_enqueue(struct prev_queue *queue, struct sk_buff *skb)
 	return true;
 }
 
-struct sk_buff *wg_prev_queue_dequeue(struct prev_queue *queue)
+struct sk_buff *uwg_prev_queue_dequeue(struct prev_queue *queue)
 {
 	struct sk_buff *tail = queue->tail, *next = smp_load_acquire(&NEXT(tail));
 

@@ -25,10 +25,10 @@
 #include <net/udp.h>
 #include <net/sock.h>
 
-static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
+static void uwg_packet_send_handshake_initiation(struct uwg_peer *peer)
 {
 	struct message_handshake_initiation packet;
-	struct wg_device *wg = peer->device;
+	struct uwg_device *uwg = peer->device;
 	void *buffer;
 	u8 ds;
 	u16 junk_packet_count, junk_packet_size;
@@ -37,7 +37,7 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 	u16 min_timeout = !u16_range_is_zero(peer->device->rekey_timeout) ?
 		u16_range_lo(peer->device->rekey_timeout) : REKEY_TIMEOUT;
 
-	if (!wg_birthdate_has_expired(atomic64_read(&peer->last_sent_handshake),
+	if (!uwg_birthdate_has_expired(atomic64_read(&peer->last_sent_handshake),
 				      min_timeout))
 		return; /* This function is rate limited. */
 
@@ -47,60 +47,60 @@ static void wg_packet_send_handshake_initiation(struct wg_peer *peer)
 			    &peer->endpoint.addr);
 
 	atomic_set(&peer->jp_packet_counter, get_random_u32());
-	for (i = 0; i < ARRAY_SIZE(wg->ispecs); ++i)
+	for (i = 0; i < ARRAY_SIZE(uwg->ispecs); ++i)
 	{
-		spec = &wg->ispecs[i];
+		spec = &uwg->ispecs[i];
 		if (spec->pkt_size > 0) {
 			mutex_lock(&spec->lock);
 			jp_spec_applymods(spec, peer);
-			wg_socket_send_buffer_to_peer(peer, spec->pkt, spec->pkt_size, 0, 0, false);
+			uwg_socket_send_buffer_to_peer(peer, spec->pkt, spec->pkt_size, 0, 0, false);
 			atomic_inc(&peer->jp_packet_counter);
 			mutex_unlock(&spec->lock);
 		}
 	}
 	
-	if (wg->jc && wg->jmax) {
+	if (uwg->jc && uwg->jmax) {
 		net_dbg_ratelimited("%s: Sending dummy junk packets to %llu (%pISpfsc)\n",
 			    peer->device->dev->name, peer->internal_id,
 			    &peer->endpoint.addr);
 
-		junk_packet_count = wg->jc;
-		buffer = kzalloc(wg->jmax, GFP_KERNEL);
+		junk_packet_count = uwg->jc;
+		buffer = kzalloc(uwg->jmax, GFP_KERNEL);
 
 		while (junk_packet_count-- > 0) {
-			junk_packet_size = (u16) get_random_u32_inclusive(wg->jmin, wg->jmax);
+			junk_packet_size = (u16) get_random_u32_inclusive(uwg->jmin, uwg->jmax);
 
 			get_random_bytes(buffer, junk_packet_size);
 			get_random_bytes(&ds, 1);
-			wg_socket_send_buffer_to_peer(peer, buffer, junk_packet_size, ds, 0, false);
+			uwg_socket_send_buffer_to_peer(peer, buffer, junk_packet_size, ds, 0, false);
 		}
 
 		kfree(buffer);
 	}
 
-	if (wg_noise_handshake_create_initiation(&packet, &peer->handshake,
-			u32_range_pick_one(wg->init_header))) {
-		wg_cookie_add_mac_to_packet(&packet, sizeof(packet), peer);
-		wg_timers_any_authenticated_packet_traversal(peer);
-		wg_timers_any_authenticated_packet_sent(peer);
+	if (uwg_noise_handshake_create_initiation(&packet, &peer->handshake,
+			u32_range_pick_one(uwg->init_header))) {
+		uwg_cookie_add_mac_to_packet(&packet, sizeof(packet), peer);
+		uwg_timers_any_authenticated_packet_traversal(peer);
+		uwg_timers_any_authenticated_packet_sent(peer);
 		atomic64_set(&peer->last_sent_handshake,
 			     ktime_get_coarse_boottime_ns());
-		wg_socket_send_buffer_to_peer(peer, &packet, sizeof(packet),
-					      HANDSHAKE_DSCP, wg->init_padding, true);
-		wg_timers_handshake_initiated(peer);
+		uwg_socket_send_buffer_to_peer(peer, &packet, sizeof(packet),
+					      HANDSHAKE_DSCP, uwg->init_padding, true);
+		uwg_timers_handshake_initiated(peer);
 	}
 }
 
-void wg_packet_handshake_send_worker(struct work_struct *work)
+void uwg_packet_handshake_send_worker(struct work_struct *work)
 {
-	struct wg_peer *peer = container_of(work, struct wg_peer,
+	struct uwg_peer *peer = container_of(work, struct uwg_peer,
 					    transmit_handshake_work);
 
-	wg_packet_send_handshake_initiation(peer);
-	wg_peer_put(peer);
+	uwg_packet_send_handshake_initiation(peer);
+	uwg_peer_put(peer);
 }
 
-void wg_packet_send_queued_handshake_initiation(struct wg_peer *peer,
+void uwg_packet_send_queued_handshake_initiation(struct uwg_peer *peer,
 						bool is_retry)
 {
 	u16 min_timeout = !u16_range_is_zero(peer->device->rekey_timeout) ?
@@ -116,12 +116,12 @@ void wg_packet_send_queued_handshake_initiation(struct wg_peer *peer,
 	 * we're queueing up, so that we don't queue things if not strictly
 	 * necessary:
 	 */
-	if (!wg_birthdate_has_expired(atomic64_read(&peer->last_sent_handshake),
+	if (!uwg_birthdate_has_expired(atomic64_read(&peer->last_sent_handshake),
 				      min_timeout) ||
 			unlikely(READ_ONCE(peer->is_dead)))
 		goto out;
 
-	wg_peer_get(peer);
+	uwg_peer_get(peer);
 	/* Queues up calling packet_send_queued_handshakes(peer), where we do a
 	 * peer_put(peer) after:
 	 */
@@ -130,61 +130,61 @@ void wg_packet_send_queued_handshake_initiation(struct wg_peer *peer,
 		/* If the work was already queued, we want to drop the
 		 * extra reference:
 		 */
-		wg_peer_put(peer);
+		uwg_peer_put(peer);
 out:
 	rcu_read_unlock_bh();
 }
 
-void wg_packet_send_handshake_response(struct wg_peer *peer)
+void uwg_packet_send_handshake_response(struct uwg_peer *peer)
 {
 	struct message_handshake_response packet;
-	struct wg_device *wg = peer->device;
+	struct uwg_device *uwg = peer->device;
 
 	atomic64_set(&peer->last_sent_handshake, ktime_get_coarse_boottime_ns());
 	net_dbg_ratelimited("%s: Sending handshake response to peer %llu (%pISpfsc)\n",
 			    peer->device->dev->name, peer->internal_id,
 			    &peer->endpoint.addr);
 
-	if (wg_noise_handshake_create_response(&packet, &peer->handshake,
-			u32_range_pick_one(wg->resp_header))) {
-		wg_cookie_add_mac_to_packet(&packet, sizeof(packet), peer);
-		if (wg_noise_handshake_begin_session(&peer->handshake,
+	if (uwg_noise_handshake_create_response(&packet, &peer->handshake,
+			u32_range_pick_one(uwg->resp_header))) {
+		uwg_cookie_add_mac_to_packet(&packet, sizeof(packet), peer);
+		if (uwg_noise_handshake_begin_session(&peer->handshake,
 						     &peer->keypairs)) {
-			wg_timers_session_derived(peer);
-			wg_timers_any_authenticated_packet_traversal(peer);
-			wg_timers_any_authenticated_packet_sent(peer);
+			uwg_timers_session_derived(peer);
+			uwg_timers_any_authenticated_packet_traversal(peer);
+			uwg_timers_any_authenticated_packet_sent(peer);
 			atomic64_set(&peer->last_sent_handshake,
 				     ktime_get_coarse_boottime_ns());
-			wg_socket_send_buffer_to_peer(peer, &packet,
+			uwg_socket_send_buffer_to_peer(peer, &packet,
 						      sizeof(packet),
 						      HANDSHAKE_DSCP,
-							  wg->resp_padding, true);
+							  uwg->resp_padding, true);
 		}
 	}
 }
 
-void wg_packet_send_handshake_cookie(struct wg_device *wg,
+void uwg_packet_send_handshake_cookie(struct uwg_device *uwg,
 				     struct sk_buff *initiating_skb,
 				     __le32 sender_index)
 {
 	struct message_handshake_cookie packet;
 
 	net_dbg_skb_ratelimited("%s: Sending cookie response for denied handshake message for %pISpfsc\n",
-				wg->dev->name, initiating_skb);
-	wg_cookie_message_create(&packet, initiating_skb, sender_index,
-				 &wg->cookie_checker,
-				 u32_range_pick_one(wg->cookie_header));
-	wg_socket_send_buffer_as_reply_to_skb(wg, initiating_skb, &packet,
+				uwg->dev->name, initiating_skb);
+	uwg_cookie_message_create(&packet, initiating_skb, sender_index,
+				 &uwg->cookie_checker,
+				 u32_range_pick_one(uwg->cookie_header));
+	uwg_socket_send_buffer_as_reply_to_skb(uwg, initiating_skb, &packet,
 					      sizeof(packet),
-						  wg->cookie_padding);
+						  uwg->cookie_padding);
 }
 
-static int key_fresh_timeout(struct wg_peer *peer)
+static int key_fresh_timeout(struct uwg_peer *peer)
 {
 	return !u16_range_is_zero(peer->device->rekey_after_time) ? u16_range_pick_one(peer->device->rekey_after_time) : REKEY_AFTER_TIME;
 }
 
-static void keep_key_fresh(struct wg_peer *peer)
+static void keep_key_fresh(struct uwg_peer *peer)
 {
 	struct noise_keypair *keypair;
 	bool send;
@@ -194,11 +194,11 @@ static void keep_key_fresh(struct wg_peer *peer)
 	send = keypair && READ_ONCE(keypair->sending.is_valid) &&
 	       (atomic64_read(&keypair->sending_counter) > REKEY_AFTER_MESSAGES ||
 		(keypair->i_am_the_initiator &&
-		 wg_birthdate_has_expired(keypair->sending.birthdate, key_fresh_timeout(peer))));
+		 uwg_birthdate_has_expired(keypair->sending.birthdate, key_fresh_timeout(peer))));
 	rcu_read_unlock_bh();
 
 	if (unlikely(send))
-		wg_packet_send_queued_handshake_initiation(peer, false);
+		uwg_packet_send_queued_handshake_initiation(peer, false);
 }
 
 static unsigned int calculate_skb_padding(struct sk_buff *skb)
@@ -225,7 +225,7 @@ static unsigned int calculate_skb_padding(struct sk_buff *skb)
 static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 	COMPAT_MAYBE_SIMD_CONTEXT(simd_context_t *simd_context))
 {
-	struct wg_peer *peer = keypair->entry.peer;
+	struct uwg_peer *peer = keypair->entry.peer;
 	unsigned int padding_len, plaintext_len, trailer_len, packet_len;
 	struct scatterlist sg[MAX_SKB_FRAGS + 8];
 	struct chacha_state state;
@@ -252,9 +252,9 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 	/* Calculate lengths. */
 	packet_len = skb->len + MESSAGE_MINIMUM_LENGTH + padding;
 	if (!u16_range_is_zero(content_padding_addition)) {
-		padding_len = wg_peer_skb_randomize_padding_addition(peer, peer->device, packet_len);
+		padding_len = uwg_peer_skb_randomize_padding_addition(peer, peer->device, packet_len);
 	} else if (peer->device->random_trailers) {
-		padding_len = wg_peer_skb_random_trailer(peer, peer->device, packet_len);
+		padding_len = uwg_peer_skb_random_trailer(peer, peer->device, packet_len);
 	} else {
 		padding_len = calculate_skb_padding(skb);
 	}
@@ -297,7 +297,7 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 	crypto = skb_push(skb, padding);
 	get_random_bytes(crypto, padding);
 
-	if (awg_header_protection_init(&state, peer->device, crypto))
+	if (uwg_header_protection_init(&state, peer->device, crypto))
 		chacha20_crypt(&state, (u8*)header, (u8*)header, sizeof(*header));
 
 	/* Now we can encrypt the scattergather segments */
@@ -311,7 +311,7 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 							COMPAT_MAYBE_SIMD_CONTEXT(simd_context));
 }
 
-void wg_packet_send_keepalive(struct wg_peer *peer)
+void uwg_packet_send_keepalive(struct uwg_peer *peer)
 {
 	struct sk_buff *skb;
 
@@ -330,56 +330,56 @@ void wg_packet_send_keepalive(struct wg_peer *peer)
 				    &peer->endpoint.addr);
 	}
 
-	wg_packet_send_staged_packets(peer);
+	uwg_packet_send_staged_packets(peer);
 }
 
-static void wg_packet_create_data_done(struct wg_peer *peer, struct sk_buff *first)
+static void uwg_packet_create_data_done(struct uwg_peer *peer, struct sk_buff *first)
 {
 	struct sk_buff *skb, *next;
 	bool data_sent = false;
 
-	wg_timers_any_authenticated_packet_traversal(peer);
-	wg_timers_any_authenticated_packet_sent(peer);
+	uwg_timers_any_authenticated_packet_traversal(peer);
+	uwg_timers_any_authenticated_packet_sent(peer);
 	skb_list_walk_safe(first, skb, next) {
 		bool is_keepalive = PACKET_CB(skb)->is_keepalive;
 
-		if (likely(!wg_socket_send_skb_to_peer(peer, skb,
+		if (likely(!uwg_socket_send_skb_to_peer(peer, skb,
 				PACKET_CB(skb)->ds) && !is_keepalive))
 			data_sent = true;
 	}
 
 	if (likely(data_sent))
-		wg_timers_data_sent(peer);
+		uwg_timers_data_sent(peer);
 
 	keep_key_fresh(peer);
 }
 
-void wg_packet_tx_worker(struct work_struct *work)
+void uwg_packet_tx_worker(struct work_struct *work)
 {
-	struct wg_peer *peer = container_of(work, struct wg_peer, transmit_packet_work);
+	struct uwg_peer *peer = container_of(work, struct uwg_peer, transmit_packet_work);
 	struct noise_keypair *keypair;
 	enum packet_state state;
 	struct sk_buff *first;
 
-	while ((first = wg_prev_queue_peek(&peer->tx_queue)) != NULL &&
+	while ((first = uwg_prev_queue_peek(&peer->tx_queue)) != NULL &&
 	       (state = atomic_read_acquire(&PACKET_CB(first)->state)) !=
 		       PACKET_STATE_UNCRYPTED) {
-		wg_prev_queue_drop_peeked(&peer->tx_queue);
+		uwg_prev_queue_drop_peeked(&peer->tx_queue);
 		keypair = PACKET_CB(first)->keypair;
 
 		if (likely(state == PACKET_STATE_CRYPTED))
-			wg_packet_create_data_done(peer, first);
+			uwg_packet_create_data_done(peer, first);
 		else
 			kfree_skb_list(first);
 
-		wg_noise_keypair_put(keypair, false);
-		wg_peer_put(peer);
+		uwg_noise_keypair_put(keypair, false);
+		uwg_peer_put(peer);
 		if (need_resched())
 			cond_resched();
 	}
 }
 
-void wg_packet_encrypt_worker(struct work_struct *work)
+void uwg_packet_encrypt_worker(struct work_struct *work)
 {
 	struct crypt_queue *queue = container_of(work, struct multicore_worker,
 						 work)->ptr;
@@ -397,13 +397,13 @@ void wg_packet_encrypt_worker(struct work_struct *work)
 						  skb,
 						  PACKET_CB(first)->keypair
 						  COMPAT_MAYBE_SIMD_CONTEXT(&simd_context)))) {
-				wg_reset_packet(skb, true);
+				uwg_reset_packet(skb, true);
 			} else {
 				state = PACKET_STATE_DEAD;
 				break;
 			}
 		}
-		wg_queue_enqueue_per_peer_tx(first, state);
+		uwg_queue_enqueue_per_peer_tx(first, state);
 
 #ifdef COMPAT_CRYPTO_IS_ZINC
 		simd_relax(&simd_context);
@@ -416,29 +416,29 @@ void wg_packet_encrypt_worker(struct work_struct *work)
 #endif
 }
 
-static void wg_packet_create_data(struct wg_peer *peer, struct sk_buff *first)
+static void uwg_packet_create_data(struct uwg_peer *peer, struct sk_buff *first)
 {
-	struct wg_device *wg = peer->device;
+	struct uwg_device *uwg = peer->device;
 	int ret = -EINVAL;
 
 	rcu_read_lock_bh();
 	if (unlikely(READ_ONCE(peer->is_dead)))
 		goto err;
 
-	ret = wg_queue_enqueue_per_device_and_peer(&wg->encrypt_queue, &peer->tx_queue, first,
-						   wg->packet_crypt_wq);
+	ret = uwg_queue_enqueue_per_device_and_peer(&uwg->encrypt_queue, &peer->tx_queue, first,
+						   uwg->packet_crypt_wq);
 	if (unlikely(ret == -EPIPE))
-		wg_queue_enqueue_per_peer_tx(first, PACKET_STATE_DEAD);
+		uwg_queue_enqueue_per_peer_tx(first, PACKET_STATE_DEAD);
 err:
 	rcu_read_unlock_bh();
 	if (likely(!ret || ret == -EPIPE))
 		return;
-	wg_noise_keypair_put(PACKET_CB(first)->keypair, false);
-	wg_peer_put(peer);
+	uwg_noise_keypair_put(PACKET_CB(first)->keypair, false);
+	uwg_peer_put(peer);
 	kfree_skb_list(first);
 }
 
-void wg_packet_purge_staged_packets(struct wg_peer *peer)
+void uwg_packet_purge_staged_packets(struct uwg_peer *peer)
 {
 	spin_lock_bh(&peer->staged_packet_queue.lock);
 	DEV_STATS_ADD(peer->device->dev, tx_dropped,
@@ -447,7 +447,7 @@ void wg_packet_purge_staged_packets(struct wg_peer *peer)
 	spin_unlock_bh(&peer->staged_packet_queue.lock);
 }
 
-void wg_packet_send_staged_packets(struct wg_peer *peer)
+void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 {
 	struct noise_keypair *keypair;
 	struct sk_buff_head packets;
@@ -463,14 +463,14 @@ void wg_packet_send_staged_packets(struct wg_peer *peer)
 
 	/* First we make sure we have a valid reference to a valid key. */
 	rcu_read_lock_bh();
-	keypair = wg_noise_keypair_get(
+	keypair = uwg_noise_keypair_get(
 		rcu_dereference_bh(peer->keypairs.current_keypair));
 	rcu_read_unlock_bh();
 	if (unlikely(!keypair))
 		goto out_nokey;
 	if (unlikely(!READ_ONCE(keypair->sending.is_valid)))
 		goto out_nokey;
-	if (unlikely(wg_birthdate_has_expired(keypair->sending.birthdate,
+	if (unlikely(uwg_birthdate_has_expired(keypair->sending.birthdate,
 					      REJECT_AFTER_TIME)))
 		goto out_invalid;
 
@@ -491,15 +491,15 @@ void wg_packet_send_staged_packets(struct wg_peer *peer)
 	}
 
 	packets.prev->next = NULL;
-	wg_peer_get(keypair->entry.peer);
+	uwg_peer_get(keypair->entry.peer);
 	PACKET_CB(packets.next)->keypair = keypair;
-	wg_packet_create_data(peer, packets.next);
+	uwg_packet_create_data(peer, packets.next);
 	return;
 
 out_invalid:
 	WRITE_ONCE(keypair->sending.is_valid, false);
 out_nokey:
-	wg_noise_keypair_put(keypair, false);
+	uwg_noise_keypair_put(keypair, false);
 
 	/* We orphan the packets if we're waiting on a handshake, so that they
 	 * don't block a socket's pool.
@@ -518,5 +518,5 @@ out_nokey:
 	/* If we're exiting because there's something wrong with the key, it
 	 * means we should initiate a new handshake.
 	 */
-	wg_packet_send_queued_handshake_initiation(peer, false);
+	uwg_packet_send_queued_handshake_initiation(peer, false);
 }

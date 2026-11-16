@@ -3,8 +3,8 @@
  * Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
  */
 
-#ifndef _WG_DEVICE_H
-#define _WG_DEVICE_H
+#ifndef _UWG_DEVICE_H
+#define _UWG_DEVICE_H
 
 #include "junk.h"
 #include "noise.h"
@@ -21,7 +21,7 @@
 #include <linux/net.h>
 #include <linux/ptr_ring.h>
 
-struct wg_device;
+struct uwg_device;
 
 struct multicore_worker {
 	void *ptr;
@@ -40,7 +40,7 @@ struct prev_queue {
 	atomic_t count;
 };
 
-struct wg_device {
+struct uwg_device {
 	struct net_device *dev;
 	struct crypt_queue encrypt_queue, decrypt_queue, handshake_queue;
 	struct sock __rcu *sock4, *sock6;
@@ -67,7 +67,7 @@ struct wg_device {
 	bool random_trailers, disable_cookies;
 };
 
-int wg_device_init(void);
-void wg_device_uninit(void);
+int uwg_device_init(void);
+void uwg_device_uninit(void);
 
-#endif /* _WG_DEVICE_H */
+#endif /* _UWG_DEVICE_H */

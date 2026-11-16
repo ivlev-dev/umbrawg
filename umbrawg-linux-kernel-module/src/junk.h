@@ -1,12 +1,12 @@
-#ifndef _AWG_JUNK_H
-#define _AWG_JUNK_H
+#ifndef _UWG_JUNK_H
+#define _UWG_JUNK_H
 
 #include <linux/list.h>
 #include <linux/mutex.h>
 
-struct wg_peer;
+struct uwg_peer;
 
-typedef void(*jp_modifier_func)(char*, int, struct wg_peer*);
+typedef void(*jp_modifier_func)(char*, int, struct uwg_peer*);
 
 struct jp_tag
 {
@@ -38,6 +38,6 @@ struct jp_spec
 
 void jp_spec_free(struct jp_spec* spec);
 int jp_spec_setup(struct jp_spec* spec, const char* desc);
-void jp_spec_applymods(struct jp_spec* spec, struct wg_peer* peer);
+void jp_spec_applymods(struct jp_spec* spec, struct uwg_peer* peer);
 
 #endif
