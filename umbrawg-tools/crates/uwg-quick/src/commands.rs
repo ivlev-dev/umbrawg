@@ -172,7 +172,7 @@ fn add_if_with_module(
                 return Err(QuickError::command(IP_PROGRAM, status));
             }
             eprintln!(
-                "[!] Missing WireGuard (Amnezia VPN) kernel module. Falling back to slow userspace implementation."
+                "[!] Missing WireGuard (UmbraWG) kernel module. Falling back to slow userspace implementation."
             );
             let fallback = echo_command(implementation, vec![config.interface.clone()]);
             runner.run_checked(&fallback)

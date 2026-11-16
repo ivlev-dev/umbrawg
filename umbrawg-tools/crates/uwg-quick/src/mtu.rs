@@ -1,4 +1,4 @@
-/// WireGuard/AmneziaWG overhead subtracted from the discovered link MTU.
+/// WireGuard/UmbraWG overhead subtracted from the discovered link MTU.
 pub const TUNNEL_OVERHEAD: u32 = 80;
 
 /// Link MTU assumed when the routing table does not report one.
