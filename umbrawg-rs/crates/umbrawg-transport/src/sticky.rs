@@ -94,10 +94,7 @@ pub(crate) fn write_pktinfo(writer: &mut CmsgWriter<'_>, source: SourceAddr) -> 
 /// Parses the first `IP_PKTINFO`/`IPV6_PKTINFO` message of `control`.
 ///
 /// Returns `Ok(None)` when the kernel did not attach packet information.
-pub(crate) fn parse_pktinfo(
-    control: &[u8],
-    _family: AddressFamily,
-) -> Result<Option<SourceAddr>> {
+pub(crate) fn parse_pktinfo(control: &[u8], _family: AddressFamily) -> Result<Option<SourceAddr>> {
     for message in ControlMessages::new(control) {
         let message = message?;
         match (message.level, message.ty) {
@@ -192,9 +189,6 @@ mod tests {
         assert_eq!(source.to_string(), "127.0.0.1%1");
         let source = SourceAddr::new("127.0.0.1".parse().unwrap(), 0);
         assert_eq!(source.to_string(), "127.0.0.1");
-        assert_eq!(
-            source.with_ip("192.0.2.1".parse().unwrap()).ifindex(),
-            0
-        );
+        assert_eq!(source.with_ip("192.0.2.1".parse().unwrap()).ifindex(), 0);
     }
 }

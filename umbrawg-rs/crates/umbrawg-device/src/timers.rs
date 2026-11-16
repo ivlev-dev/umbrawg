@@ -104,19 +104,11 @@ impl Timings {
     }
 
     fn seconds_hi(range: Range16, default: u16) -> u64 {
-        u64::from(if range.is_zero() {
-            default
-        } else {
-            range.hi()
-        })
+        u64::from(if range.is_zero() { default } else { range.hi() })
     }
 
     fn seconds_lo(range: Range16, default: u16) -> u64 {
-        u64::from(if range.is_zero() {
-            default
-        } else {
-            range.lo()
-        })
+        u64::from(if range.is_zero() { default } else { range.lo() })
     }
 
     #[must_use]
@@ -371,13 +363,13 @@ mod tests {
         timers.arm(TimerKind::SendKeepalive, now + Duration::from_secs(1));
         timers.arm(TimerKind::RetransmitHandshake, now);
         timers.arm(TimerKind::ZeroKeyMaterial, now + Duration::from_secs(10));
-        assert_eq!(
-            timers.next_deadline(),
-            Some(now)
-        );
+        assert_eq!(timers.next_deadline(), Some(now));
         let mut expired = [TimerKind::SendKeepalive; 5];
         let count = timers.expire(now + Duration::from_secs(2), &mut expired);
-        assert_eq!(&expired[..count], &[TimerKind::RetransmitHandshake, TimerKind::SendKeepalive]);
+        assert_eq!(
+            &expired[..count],
+            &[TimerKind::RetransmitHandshake, TimerKind::SendKeepalive]
+        );
         assert_eq!(timers.deadline(TimerKind::RetransmitHandshake), None);
         let count = timers.expire(now + Duration::from_secs(2), &mut expired);
         assert_eq!(count, 0);

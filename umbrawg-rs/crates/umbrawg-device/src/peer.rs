@@ -124,16 +124,11 @@ pub struct Peer {
 }
 
 impl Peer {
-    pub(crate) fn new(
-        id: PeerId,
-        config: PeerConfig,
-        identity: Option<&StaticIdentity>,
-    ) -> Self {
+    pub(crate) fn new(id: PeerId, config: PeerConfig, identity: Option<&StaticIdentity>) -> Self {
         let public_key = config.public_key;
         let preshared_key = config.preshared_key.clone();
-        let noise = identity.map(|identity| {
-            Handshake::new(identity, public_key, preshared_key.clone())
-        });
+        let noise =
+            identity.map(|identity| Handshake::new(identity, public_key, preshared_key.clone()));
         let persistent_keepalive = config
             .persistent_keepalive
             .filter(|value| *value != 0)
@@ -336,9 +331,7 @@ impl Peer {
         if let Some(noise) = handshake.noise.as_ref() {
             removed.push(noise.local_index());
         }
-        handshake.noise = identity.map(|identity| {
-            Handshake::new(identity, self.public_key, psk)
-        });
+        handshake.noise = identity.map(|identity| Handshake::new(identity, self.public_key, psk));
         handshake.last_sent = None;
         handshake.last_initiation_consumed = None;
         removed

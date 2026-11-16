@@ -14,13 +14,13 @@ use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::addr::{AddressFamily, Endpoint, address_for_socket, normalize_ipv4_mapped};
+use crate::addr::{address_for_socket, normalize_ipv4_mapped, AddressFamily, Endpoint};
 use crate::batch::{Outgoing, RecvQueue, SendQueue};
 use crate::cmsg::{self, ControlBuffer};
 use crate::consts::{
     IP_PMTUDISC_DO, IP_PMTUDISC_DONT, IP_PMTUDISC_OMIT, IP_PMTUDISC_PROBE, IP_PMTUDISC_WANT,
 };
-use crate::gso::{DEFAULT_MTU, GsoLayout, GsoLimits, GsoSize};
+use crate::gso::{GsoLayout, GsoLimits, GsoSize, DEFAULT_MTU};
 use crate::sticky::{self, SourceAddr};
 use crate::sys;
 use crate::{Result, TransportError};
@@ -368,11 +368,7 @@ impl Socket {
     /// [`RecvQueue::len`]; metadata for each datagram is read with
     /// [`RecvQueue::meta`]. A full batch means the caller should loop; an empty
     /// socket reports [`TransportError::WouldBlock`].
-    pub fn recv_batch(
-        &self,
-        queue: &mut RecvQueue,
-        buffers: &mut [&mut [u8]],
-    ) -> Result<usize> {
+    pub fn recv_batch(&self, queue: &mut RecvQueue, buffers: &mut [&mut [u8]]) -> Result<usize> {
         if buffers.len() > queue.capacity() {
             return Err(TransportError::BatchTooLarge {
                 count: buffers.len(),
@@ -410,17 +406,12 @@ impl Socket {
             Err(error)
                 if use_gso
                     && error.should_disable_gso()
-                    && datagrams.iter().any(|datagram| datagram.gso_size().is_some()) =>
+                    && datagrams
+                        .iter()
+                        .any(|datagram| datagram.gso_size().is_some()) =>
             {
                 self.gso_enabled.store(false, Ordering::Relaxed);
-                queue.send(
-                    self.fd(),
-                    peer,
-                    endpoint.source(),
-                    family,
-                    datagrams,
-                    false,
-                )
+                queue.send(self.fd(), peer, endpoint.source(), family, datagrams, false)
             }
             Err(error) => Err(error),
         }
@@ -485,9 +476,9 @@ impl Socket {
                 sticky::parse_pktinfo(control, self.family)?,
             )
         };
-        let endpoint = received.peer.map(|dst| {
-            Endpoint::with_optional_source(normalize_ipv4_mapped(dst), source)
-        });
+        let endpoint = received
+            .peer
+            .map(|dst| Endpoint::with_optional_source(normalize_ipv4_mapped(dst), source));
         Ok(Incoming {
             size: received.len,
             endpoint,

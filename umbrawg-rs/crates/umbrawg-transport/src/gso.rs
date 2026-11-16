@@ -88,9 +88,7 @@ impl GsoLimits {
     /// Creates explicit limits, validating both values.
     pub fn new(max_gso_size: usize, max_segments: usize) -> Result<Self> {
         if max_gso_size == 0 || max_gso_size > usize::from(u16::MAX) {
-            return Err(TransportError::InvalidSegmentSize {
-                size: max_gso_size,
-            });
+            return Err(TransportError::InvalidSegmentSize { size: max_gso_size });
         }
         if max_segments == 0 {
             return Err(TransportError::TooManySegments {
@@ -119,7 +117,9 @@ impl GsoLimits {
     pub fn from_mtu(mtu: u32, family: AddressFamily) -> Self {
         let overhead = family.udp_overhead();
         let usable = (mtu as usize).saturating_sub(overhead).max(1);
-        let max_gso_size = usable.min(family.max_udp_payload()).min(usize::from(u16::MAX));
+        let max_gso_size = usable
+            .min(family.max_udp_payload())
+            .min(usize::from(u16::MAX));
         let max_segments = (family.max_udp_payload() / max_gso_size).clamp(1, MAX_SEGMENTS);
         Self {
             max_gso_size,
@@ -212,11 +212,7 @@ impl GsoLayout {
         Self::from_lengths(first, parts.len(), |index| parts[index].len())
     }
 
-    fn from_lengths(
-        first: usize,
-        count: usize,
-        size_at: impl Fn(usize) -> usize,
-    ) -> Result<Self> {
+    fn from_lengths(first: usize, count: usize, size_at: impl Fn(usize) -> usize) -> Result<Self> {
         let gso_size = GsoSize::from_usize(first)?;
         if count > MAX_SEGMENTS {
             return Err(TransportError::TooManySegments {
@@ -504,7 +500,10 @@ mod tests {
     fn split_into_segments_copies_payload() {
         let payload: Vec<u8> = (0..350).map(|value| value as u8).collect();
         let mut destinations = vec![vec![0u8; 100]; 4];
-        let mut out: Vec<&mut [u8]> = destinations.iter_mut().map(|buf| buf.as_mut_slice()).collect();
+        let mut out: Vec<&mut [u8]> = destinations
+            .iter_mut()
+            .map(|buf| buf.as_mut_slice())
+            .collect();
 
         let count = split_into_segments(&payload, size(100), &mut out).unwrap();
         assert_eq!(count, 4);
@@ -517,7 +516,10 @@ mod tests {
     fn split_into_segments_validates_capacity() {
         let payload = [0u8; 250];
         let mut destinations = vec![vec![0u8; 100]; 2];
-        let mut out: Vec<&mut [u8]> = destinations.iter_mut().map(|buf| buf.as_mut_slice()).collect();
+        let mut out: Vec<&mut [u8]> = destinations
+            .iter_mut()
+            .map(|buf| buf.as_mut_slice())
+            .collect();
         assert!(matches!(
             split_into_segments(&payload, size(100), &mut out),
             Err(TransportError::BufferTooSmall { .. })
@@ -536,7 +538,10 @@ mod tests {
     fn coalesce_into_round_trips_split() {
         let payload: Vec<u8> = (0..250).map(|value| value as u8).collect();
         let mut destinations = vec![vec![0u8; 100]; 3];
-        let mut out: Vec<&mut [u8]> = destinations.iter_mut().map(|buf| buf.as_mut_slice()).collect();
+        let mut out: Vec<&mut [u8]> = destinations
+            .iter_mut()
+            .map(|buf| buf.as_mut_slice())
+            .collect();
         let count = split_into_segments(&payload, size(100), &mut out).unwrap();
         assert_eq!(count, 3);
 

@@ -48,16 +48,16 @@ mod socket;
 mod sticky;
 mod sys;
 
-pub use addr::{AddressFamily, Endpoint, normalize_ipv4_mapped};
+pub use addr::{normalize_ipv4_mapped, AddressFamily, Endpoint};
 pub use batch::{Outgoing, RecvMeta, RecvQueue, SendQueue};
-pub use cmsg::{CmsgWriter, ControlBuffer, ControlMessage, ControlMessages, gro_size, gso_size};
+pub use cmsg::{gro_size, gso_size, CmsgWriter, ControlBuffer, ControlMessage, ControlMessages};
 pub use error::{Result, TransportError};
 pub use gso::{
-    DEFAULT_MTU, GsoLayout, GsoLimits, GsoSize, IPV4_HEADER_LEN, IPV6_HEADER_LEN, MAX_SEGMENTS,
-    MAX_UDP_PAYLOAD_V4, MAX_UDP_PAYLOAD_V6, UDP_HEADER_LEN, coalesce_into, segment_count,
-    split_into_segments,
+    coalesce_into, segment_count, split_into_segments, GsoLayout, GsoLimits, GsoSize, DEFAULT_MTU,
+    IPV4_HEADER_LEN, IPV6_HEADER_LEN, MAX_SEGMENTS, MAX_UDP_PAYLOAD_V4, MAX_UDP_PAYLOAD_V6,
+    UDP_HEADER_LEN,
 };
-pub use socket::{Features, Incoming, MtuDiscover, OpenOptions, Socket, interface_mtu};
+pub use socket::{interface_mtu, Features, Incoming, MtuDiscover, OpenOptions, Socket};
 pub use sticky::SourceAddr;
 
 /// Maximum number of datagrams handled by one batch call.

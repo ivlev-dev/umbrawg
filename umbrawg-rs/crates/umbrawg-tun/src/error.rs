@@ -51,8 +51,7 @@ impl TunError {
 
     /// Returns the OS error code, if the error originates from the kernel.
     pub fn raw_os_error(&self) -> Option<i32> {
-        self.as_io_error()
-            .and_then(io::Error::raw_os_error)
+        self.as_io_error().and_then(io::Error::raw_os_error)
     }
 
     /// Returns the I/O error kind, if the error originates from the OS.

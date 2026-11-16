@@ -7,8 +7,8 @@
 use std::net::SocketAddr;
 
 use umbrawg_transport::{
-    AddressFamily, Endpoint, GsoLimits, GsoSize, MAX_UDP_PAYLOAD_V4, MtuDiscover, OpenOptions,
-    Outgoing, RecvQueue, SendQueue, Socket, TransportError, interface_mtu,
+    interface_mtu, AddressFamily, Endpoint, GsoLimits, GsoSize, MtuDiscover, OpenOptions, Outgoing,
+    RecvQueue, SendQueue, Socket, TransportError, MAX_UDP_PAYLOAD_V4,
 };
 
 fn open(family: AddressFamily) -> Socket {
@@ -23,8 +23,10 @@ fn receive(
     storage: &mut [Vec<u8>],
 ) -> Result<Vec<ReceivedMeta>, TransportError> {
     let count = {
-        let mut buffers: Vec<&mut [u8]> =
-            storage.iter_mut().map(|buffer| buffer.as_mut_slice()).collect();
+        let mut buffers: Vec<&mut [u8]> = storage
+            .iter_mut()
+            .map(|buffer| buffer.as_mut_slice())
+            .collect();
         socket.recv_batch(queue, &mut buffers)?
     };
     Ok((0..count)
@@ -65,11 +67,18 @@ fn plain_batch_round_trip() {
     let receiver = open(AddressFamily::Ipv4);
     let sender = open(AddressFamily::Ipv4);
     let payloads: [&[u8]; 3] = [b"alpha", b"beta", b"gamma"];
-    let outgoing: Vec<Outgoing<'_>> = payloads.iter().map(|payload| Outgoing::new(payload)).collect();
+    let outgoing: Vec<Outgoing<'_>> = payloads
+        .iter()
+        .map(|payload| Outgoing::new(payload))
+        .collect();
 
     let mut send_queue = SendQueue::new(4).unwrap();
     let sent = sender
-        .send_batch(&mut send_queue, Endpoint::new(receiver.local_addr()), &outgoing)
+        .send_batch(
+            &mut send_queue,
+            Endpoint::new(receiver.local_addr()),
+            &outgoing,
+        )
         .unwrap();
     assert_eq!(sent, 3);
 
@@ -175,7 +184,10 @@ fn send_batch_rejects_oversized_batch() {
     let sender = open(AddressFamily::Ipv4);
     let mut queue = SendQueue::new(2).unwrap();
     let payloads: [&[u8]; 3] = [b"a", b"b", b"c"];
-    let outgoing: Vec<Outgoing<'_>> = payloads.iter().map(|payload| Outgoing::new(payload)).collect();
+    let outgoing: Vec<Outgoing<'_>> = payloads
+        .iter()
+        .map(|payload| Outgoing::new(payload))
+        .collect();
     assert!(matches!(
         sender.send_batch(&mut queue, Endpoint::new(receiver.local_addr()), &outgoing),
         Err(TransportError::BatchTooLarge { .. })
@@ -195,7 +207,11 @@ fn batch_receives_partial_results() {
     let mut send_queue = SendQueue::new(10).unwrap();
     assert_eq!(
         sender
-            .send_batch(&mut send_queue, Endpoint::new(receiver.local_addr()), &outgoing)
+            .send_batch(
+                &mut send_queue,
+                Endpoint::new(receiver.local_addr()),
+                &outgoing
+            )
             .unwrap(),
         10
     );
@@ -314,7 +330,11 @@ fn gro_receive_reports_segment_size() {
     let mut send_queue = SendQueue::new(4).unwrap();
     assert_eq!(
         sender
-            .send_batch(&mut send_queue, Endpoint::new(receiver.local_addr()), &outgoing)
+            .send_batch(
+                &mut send_queue,
+                Endpoint::new(receiver.local_addr()),
+                &outgoing
+            )
             .unwrap(),
         4
     );

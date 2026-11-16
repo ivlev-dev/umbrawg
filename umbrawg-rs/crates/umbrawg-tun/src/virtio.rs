@@ -316,12 +316,11 @@ mod tests {
             csum_offset: u16::MAX,
             num_buffers: u16::MAX,
         };
+        assert_eq!(VirtioNetHdr::decode(&header.to_bytes_v1()).unwrap(), header);
         assert_eq!(
-            VirtioNetHdr::decode(&header.to_bytes_v1()).unwrap(),
-            header
-        );
-        assert_eq!(
-            VirtioNetHdr::decode(&header.to_bytes()).unwrap().num_buffers,
+            VirtioNetHdr::decode(&header.to_bytes())
+                .unwrap()
+                .num_buffers,
             0
         );
     }
@@ -420,7 +419,10 @@ mod tests {
             Err(TunError::InvalidConfig(_))
         ));
         assert!(matches!(
-            VirtioNetHdr::decode_sized(&bytes[..VirtioNetHdr::LEN], VirtioNetHdr::LEN_WITH_NUM_BUFFERS),
+            VirtioNetHdr::decode_sized(
+                &bytes[..VirtioNetHdr::LEN],
+                VirtioNetHdr::LEN_WITH_NUM_BUFFERS
+            ),
             Err(TunError::ShortVirtioHeader {
                 expected: VirtioNetHdr::LEN_WITH_NUM_BUFFERS,
                 actual: VirtioNetHdr::LEN,

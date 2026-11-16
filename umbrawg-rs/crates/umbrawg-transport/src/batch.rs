@@ -8,7 +8,7 @@
 use std::net::SocketAddr;
 use std::os::fd::RawFd;
 
-use crate::addr::{AddressFamily, Endpoint, normalize_ipv4_mapped};
+use crate::addr::{normalize_ipv4_mapped, AddressFamily, Endpoint};
 use crate::cmsg;
 use crate::gso::{GsoLayout, GsoSize};
 use crate::sticky::{self, SourceAddr};
@@ -299,7 +299,11 @@ impl SendQueue {
                 GsoLayout::for_payload(datagram.len(), gso_size)?;
             }
         }
-        if !use_gso && datagrams.iter().any(|datagram| datagram.gso_size().is_some()) {
+        if !use_gso
+            && datagrams
+                .iter()
+                .any(|datagram| datagram.gso_size().is_some())
+        {
             return self.send_split(fd, peer, source, datagrams);
         }
         self.raw.send(fd, peer, source, datagrams)
@@ -396,14 +400,8 @@ mod tests {
 
     #[test]
     fn capacity_is_validated() {
-        assert!(matches!(
-            RecvQueue::new(0),
-            Err(TransportError::EmptyBatch)
-        ));
-        assert!(matches!(
-            SendQueue::new(0),
-            Err(TransportError::EmptyBatch)
-        ));
+        assert!(matches!(RecvQueue::new(0), Err(TransportError::EmptyBatch)));
+        assert!(matches!(SendQueue::new(0), Err(TransportError::EmptyBatch)));
         assert!(matches!(
             RecvQueue::new(MAX_BATCH_SIZE + 1),
             Err(TransportError::BatchTooLarge { .. })

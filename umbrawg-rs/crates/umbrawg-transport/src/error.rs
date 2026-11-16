@@ -162,10 +162,7 @@ mod tests {
 
     #[test]
     fn would_block_is_not_an_io_error() {
-        let error = TransportError::from_io(
-            "recvmmsg",
-            io::Error::from(io::ErrorKind::WouldBlock),
-        );
+        let error = TransportError::from_io("recvmmsg", io::Error::from(io::ErrorKind::WouldBlock));
         assert!(error.is_would_block());
         assert!(!error.is_interrupted());
     }

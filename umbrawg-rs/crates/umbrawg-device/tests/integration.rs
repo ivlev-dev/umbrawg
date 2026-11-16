@@ -255,20 +255,17 @@ fn handshake_establishes_sessions_on_both_devices() {
     let mut pair = pair(ObfParams::default());
     let now = Instant::now();
     complete_handshake(&mut pair, now);
-    assert_eq!(
-        pair.a.peer_state(&pair.peer_b, now),
-        PeerState::Established
-    );
-    assert_eq!(
-        pair.b.peer_state(&pair.peer_a, now),
-        PeerState::Established
-    );
+    assert_eq!(pair.a.peer_state(&pair.peer_b, now), PeerState::Established);
+    assert_eq!(pair.b.peer_state(&pair.peer_a, now), PeerState::Established);
     assert!(pair.peer_a.current_keypair().is_some());
     assert!(pair.peer_b.current_keypair().is_some());
     assert_eq!(pair.a.peer_count(), 1);
     assert_eq!(pair.b.peer_count(), 1);
     assert_eq!(
-        pair.a.route("10.0.0.2".parse().unwrap()).unwrap().public_key(),
+        pair.a
+            .route("10.0.0.2".parse().unwrap())
+            .unwrap()
+            .public_key(),
         pair.b.public_key().unwrap()
     );
 }
@@ -450,10 +447,7 @@ fn obfuscation_headers_junk_and_trailers_are_applied() {
         now,
         &mut pair.scratch,
     );
-    assert_eq!(
-        pair.a.peer_state(&pair.peer_b, now),
-        PeerState::Established
-    );
+    assert_eq!(pair.a.peer_state(&pair.peer_b, now), PeerState::Established);
 
     let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"obfuscated payload");
     let mut output = vec![0u8; 65_535];
@@ -657,12 +651,7 @@ fn timers_retransmit_keepalive_rekey_and_reject() {
     rekey.io_a.sent.clear();
     {
         let later = now + Duration::from_secs(121);
-        let mut ctx = IoContext::new(
-            &mut rekey.rng,
-            later,
-            &mut rekey.scratch,
-            &mut rekey.io_a,
-        );
+        let mut ctx = IoContext::new(&mut rekey.rng, later, &mut rekey.scratch, &mut rekey.io_a);
         rekey
             .a
             .send_data(&rekey.peer_b, &packet, &mut output, &mut ctx)
@@ -683,12 +672,7 @@ fn timers_retransmit_keepalive_rekey_and_reject() {
     complete_handshake(&mut zero, now);
     {
         let later = now + Duration::from_secs(541);
-        let mut ctx = IoContext::new(
-            &mut zero.rng,
-            later,
-            &mut zero.scratch,
-            &mut zero.io_b,
-        );
+        let mut ctx = IoContext::new(&mut zero.rng, later, &mut zero.scratch, &mut zero.io_b);
         zero.b.tick(&mut ctx).unwrap();
     }
     assert!(zero.peer_a.current_keypair().is_none());
@@ -722,7 +706,9 @@ fn uapi_snapshot_and_apply_patch_the_device() {
     let new_prefix = UapiAllowedIp::new("192.168.0.0".parse().unwrap(), 16).unwrap();
     let mut peer_request = PeerRequest::new(pair.b.public_key().unwrap());
     peer_request.replace_allowed_ips = true;
-    peer_request.allowed_ips.push(AllowedIpChange::Add(new_prefix));
+    peer_request
+        .allowed_ips
+        .push(AllowedIpChange::Add(new_prefix));
     let mut request = SetRequest::default();
     request.peers.push(peer_request);
     pair.a.apply(request).unwrap();
@@ -749,10 +735,7 @@ fn uapi_snapshot_and_apply_patch_the_device() {
     pair.a.apply(request).unwrap();
 
     let snapshot = pair.a.snapshot();
-    assert_eq!(
-        snapshot.obfuscation.i1.as_deref(),
-        Some("<b 0x01><r 4>")
-    );
+    assert_eq!(snapshot.obfuscation.i1.as_deref(), Some("<b 0x01><r 4>"));
     assert!(snapshot.obfuscation.random_trailers);
     assert_eq!(snapshot.timings.keepalive_timeout.lo(), 4);
     assert_eq!(snapshot.timings.keepalive_timeout.hi(), 6);

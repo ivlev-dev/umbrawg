@@ -129,9 +129,7 @@ mod tests {
     #[test]
     fn rejects_small_padding_with_header_protection() {
         let key = "aa".repeat(32);
-        let request = format!(
-            "set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=11\n\n"
-        );
+        let request = format!("set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=11\n\n");
         assert_eq!(serve(request.as_bytes()), "errno=-22\n\n");
     }
 
@@ -154,10 +152,7 @@ mod tests {
     }
 
     impl<'a> Duplex<'a> {
-        fn new(
-            input: &'a mut std::io::Cursor<Vec<u8>>,
-            output: &'a mut Vec<u8>,
-        ) -> Self {
+        fn new(input: &'a mut std::io::Cursor<Vec<u8>>, output: &'a mut Vec<u8>) -> Self {
             Self { input, output }
         }
     }

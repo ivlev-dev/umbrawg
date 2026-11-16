@@ -145,9 +145,7 @@ fn opens_multiple_queues_with_one_interface_name() {
 
 #[test]
 fn opens_queue_without_offload() {
-    let config = TunConfig::new("umbrawg%d")
-        .with_offload(false)
-        .with_mtu(0);
+    let config = TunConfig::new("umbrawg%d").with_offload(false).with_mtu(0);
     let Some(mut tun) = open_single(&config) else {
         return;
     };

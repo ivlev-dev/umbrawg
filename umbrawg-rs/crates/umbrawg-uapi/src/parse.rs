@@ -89,9 +89,9 @@ fn parse_line(
     current: &mut Option<PeerRequest>,
     line: &str,
 ) -> Result<(), UapiError> {
-    let (key, value) = line.split_once('=').ok_or_else(|| {
-        UapiError::Protocol(format!("invalid UAPI line without `=`: `{line}`"))
-    })?;
+    let (key, value) = line
+        .split_once('=')
+        .ok_or_else(|| UapiError::Protocol(format!("invalid UAPI line without `=`: `{line}`")))?;
 
     if key == "public_key" {
         if let Some(peer) = current.take() {
@@ -107,11 +107,7 @@ fn parse_line(
     }
 }
 
-fn apply_device_line(
-    request: &mut SetRequest,
-    key: &str,
-    value: &str,
-) -> Result<(), UapiError> {
+fn apply_device_line(request: &mut SetRequest, key: &str, value: &str) -> Result<(), UapiError> {
     match key {
         "private_key" => request.private_key = Some(parse_key(key, value)?),
         "listen_port" => request.listen_port = Some(parse_u16(key, value)?),
@@ -140,8 +136,7 @@ fn apply_device_line(
             request.obfuscation.header_protection_key = Some(parse_key(key, value)?);
         }
         "content_padding_addition" => {
-            request.obfuscation.content_padding_addition =
-                Some(parse_u16_range(key, value)?);
+            request.obfuscation.content_padding_addition = Some(parse_u16_range(key, value)?);
         }
         "rekey_after_time" => request.timings.rekey_after_time = Some(parse_u16_range(key, value)?),
         "rekey_timeout" => request.timings.rekey_timeout = Some(parse_u16_range(key, value)?),
@@ -192,7 +187,9 @@ fn apply_peer_line(peer: &mut PeerRequest, key: &str, value: &str) -> Result<(),
             if !spec.contains('/') {
                 return Err(invalid_value(key, value));
             }
-            let prefix = spec.parse::<AllowedIp>().map_err(|_| invalid_value(key, value))?;
+            let prefix = spec
+                .parse::<AllowedIp>()
+                .map_err(|_| invalid_value(key, value))?;
             peer.allowed_ips.push(if remove {
                 AllowedIpChange::Remove(prefix)
             } else {
@@ -343,7 +340,10 @@ allowed_ip=fd00::/64
         assert_eq!(obfuscation.s3, Some(44));
         assert_eq!(obfuscation.s4, Some(9));
         assert_eq!(obfuscation.h1, Some(U32Range::new(61_220_074, 118_999_195)));
-        assert_eq!(obfuscation.h4, Some(U32Range::new(1_951_993_942, 1_997_499_713)));
+        assert_eq!(
+            obfuscation.h4,
+            Some(U32Range::new(1_951_993_942, 1_997_499_713))
+        );
         assert_eq!(
             obfuscation.i1,
             SpecialPacketUpdate::Set("<b 0x01><c>".to_owned())
@@ -357,10 +357,19 @@ allowed_ip=fd00::/64
         assert_eq!(obfuscation.random_trailers, Some(true));
         assert_eq!(obfuscation.disable_cookies, Some(false));
 
-        assert_eq!(request.timings.rekey_after_time, Some(U16Range::new(120, 180)));
+        assert_eq!(
+            request.timings.rekey_after_time,
+            Some(U16Range::new(120, 180))
+        );
         assert_eq!(request.timings.rekey_timeout, Some(U16Range::single(5)));
-        assert_eq!(request.timings.reject_after_time, Some(U16Range::single(180)));
-        assert_eq!(request.timings.keepalive_timeout, Some(U16Range::single(10)));
+        assert_eq!(
+            request.timings.reject_after_time,
+            Some(U16Range::single(180))
+        );
+        assert_eq!(
+            request.timings.keepalive_timeout,
+            Some(U16Range::single(10))
+        );
         assert_eq!(
             request.timings.max_handshake_attempts,
             Some(U16Range::single(7))
@@ -369,7 +378,10 @@ allowed_ip=fd00::/64
         assert_eq!(request.peers.len(), 1);
         let peer = &request.peers[0];
         assert!(peer.preshared_key.is_some());
-        assert_eq!(peer.endpoint, Some("192.0.2.1:51820".parse().expect("valid")));
+        assert_eq!(
+            peer.endpoint,
+            Some("192.0.2.1:51820".parse().expect("valid"))
+        );
         assert_eq!(
             peer.persistent_keepalive_interval,
             Some(U16Range::single(25))

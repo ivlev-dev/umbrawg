@@ -132,7 +132,8 @@ impl<'a> Iterator for ControlMessages<'a> {
         }
         // SAFETY: at least `size_of::<cmsghdr>()` bytes are available and
         // `read_unaligned` does not require any alignment of the source.
-        let header = unsafe { ptr::read_unaligned(self.remaining.as_ptr().cast::<libc::cmsghdr>()) };
+        let header =
+            unsafe { ptr::read_unaligned(self.remaining.as_ptr().cast::<libc::cmsghdr>()) };
         let total = header.cmsg_len;
         if total < header_len() || total > self.remaining.len() {
             self.remaining = &[];
@@ -224,7 +225,11 @@ impl<'a> CmsgWriter<'a> {
     }
 }
 
-fn segment_size(message: &ControlMessage<'_>, ty: libc::c_int, name: &'static str) -> Result<GsoSize> {
+fn segment_size(
+    message: &ControlMessage<'_>,
+    ty: libc::c_int,
+    name: &'static str,
+) -> Result<GsoSize> {
     if message.ty != ty {
         return Err(TransportError::InvalidControlMessage { reason: name });
     }
@@ -233,10 +238,8 @@ fn segment_size(message: &ControlMessage<'_>, ty: libc::c_int, name: &'static st
     }
     let mut raw = [0u8; SEGMENT_DATA_LEN];
     raw.copy_from_slice(&message.data[..SEGMENT_DATA_LEN]);
-    GsoSize::new(u16::from_ne_bytes(raw)).map_err(|_| {
-        TransportError::InvalidControlMessage {
-            reason: "segment size is zero",
-        }
+    GsoSize::new(u16::from_ne_bytes(raw)).map_err(|_| TransportError::InvalidControlMessage {
+        reason: "segment size is zero",
     })
 }
 
@@ -273,7 +276,9 @@ mod tests {
     fn control_of(message: ControlMessage<'_>) -> ControlBuffer {
         let mut buffer = ControlBuffer::new();
         let mut writer = CmsgWriter::new(&mut buffer);
-        writer.push(message.level, message.ty, message.data).unwrap();
+        writer
+            .push(message.level, message.ty, message.data)
+            .unwrap();
         buffer
     }
 
@@ -309,8 +314,12 @@ mod tests {
     fn messages_are_aligned_and_parsed_in_order() {
         let mut buffer = ControlBuffer::new();
         let mut writer = CmsgWriter::new(&mut buffer);
-        writer.push(libc::IPPROTO_IP, libc::IP_PKTINFO, &[1u8; 12]).unwrap();
-        writer.push(SOL_UDP, UDP_SEGMENT, &1400u16.to_ne_bytes()).unwrap();
+        writer
+            .push(libc::IPPROTO_IP, libc::IP_PKTINFO, &[1u8; 12])
+            .unwrap();
+        writer
+            .push(SOL_UDP, UDP_SEGMENT, &1400u16.to_ne_bytes())
+            .unwrap();
         let used = writer.len();
         assert_eq!(used, cmsg_space(12) + cmsg_space(2));
 
@@ -335,7 +344,9 @@ mod tests {
     fn buffer_exhaustion_is_reported() {
         let mut buffer = ControlBuffer::new();
         let mut writer = CmsgWriter::new(&mut buffer);
-        writer.push(SOL_UDP, UDP_SEGMENT, &1400u16.to_ne_bytes()).unwrap();
+        writer
+            .push(SOL_UDP, UDP_SEGMENT, &1400u16.to_ne_bytes())
+            .unwrap();
         writer
             .push(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, &[0u8; 20])
             .unwrap();
@@ -380,8 +391,7 @@ mod tests {
             ty: UDP_GRO,
             data: &[0u8; 2],
         });
-        buffer
-            .as_mut_slice()[..mem::size_of::<usize>()]
+        buffer.as_mut_slice()[..mem::size_of::<usize>()]
             .copy_from_slice(&(CONTROL_BUFFER_SIZE * 2).to_ne_bytes());
         let control = buffer.as_slice().to_vec();
         assert!(matches!(
@@ -421,7 +431,9 @@ mod tests {
         let mut buffer = ControlBuffer::new();
         let mut writer = CmsgWriter::new(&mut buffer);
         writer.push(libc::IPPROTO_IP, 1234, &[0u8; 4]).unwrap();
-        writer.push(SOL_UDP, UDP_GRO, &512u16.to_ne_bytes()).unwrap();
+        writer
+            .push(SOL_UDP, UDP_GRO, &512u16.to_ne_bytes())
+            .unwrap();
         let control = writer.finish().to_vec();
         assert_eq!(
             gro_size(&control).unwrap(),
@@ -432,13 +444,11 @@ mod tests {
     #[test]
     fn cmsg_geometry_matches_libc() {
         let payload = 20;
-        assert_eq!(
-            cmsg_space(payload) as libc::c_uint,
-            unsafe { libc::CMSG_SPACE(payload as libc::c_uint) }
-        );
-        assert_eq!(
-            cmsg_len(payload) as libc::c_uint,
-            unsafe { libc::CMSG_LEN(payload as libc::c_uint) }
-        );
+        assert_eq!(cmsg_space(payload) as libc::c_uint, unsafe {
+            libc::CMSG_SPACE(payload as libc::c_uint)
+        });
+        assert_eq!(cmsg_len(payload) as libc::c_uint, unsafe {
+            libc::CMSG_LEN(payload as libc::c_uint)
+        });
     }
 }

@@ -20,13 +20,11 @@ compile_error!(
 );
 
 pub use error::{TunError, TunResult};
+#[cfg(target_os = "linux")]
+pub use linux::{Offload, Tun, TunConfig, TunSet, IDEAL_BATCH_SIZE, TUN_DEVICE_PATH};
 pub use offload::{
     gso_none_checksum, gso_segment_count, gso_segment_len, max_gso_segments, max_gso_size,
     packet_buffer_size, prepare_gso, read_buffer_size, split_gso, GsoError, MAX_PACKET_SIZE,
-};
-#[cfg(target_os = "linux")]
-pub use linux::{
-    Offload, Tun, TunConfig, TunSet, IDEAL_BATCH_SIZE, TUN_DEVICE_PATH,
 };
 pub use virtio::{
     GsoType, VirtioNetHdr, VIRTIO_NET_HDR_F_DATA_VALID, VIRTIO_NET_HDR_F_NEEDS_CSUM,

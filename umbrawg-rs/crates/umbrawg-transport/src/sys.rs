@@ -15,7 +15,7 @@ use crate::addr::AddressFamily;
 use crate::batch::Outgoing;
 use crate::cmsg::{CmsgWriter, ControlBuffer};
 use crate::consts::{
-    CONTROL_BUFFER_SIZE, IP_MTU_DISCOVER, IPV6_MTU_DISCOVER, SIOCGIFMTU, SO_BINDTODEVICE, SO_MARK,
+    CONTROL_BUFFER_SIZE, IPV6_MTU_DISCOVER, IP_MTU_DISCOVER, SIOCGIFMTU, SO_BINDTODEVICE, SO_MARK,
     UDP_GRO, UDP_SEGMENT,
 };
 use crate::gso::GsoSize;
@@ -47,8 +47,9 @@ fn setsockopt(
     value: *const libc::c_void,
     length: usize,
 ) -> Result<()> {
-    let length = libc::socklen_t::try_from(length)
-        .map_err(|_| TransportError::Unsupported { feature: "oversized socket option" })?;
+    let length = libc::socklen_t::try_from(length).map_err(|_| TransportError::Unsupported {
+        feature: "oversized socket option",
+    })?;
     // SAFETY: `value` points to `length` readable bytes owned by the caller for
     // the duration of the call.
     let result = unsafe { libc::setsockopt(fd, level, name, value, length) };
@@ -193,7 +194,11 @@ pub(crate) fn local_addr(fd: RawFd) -> Result<SocketAddr> {
     let mut length = mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
     // SAFETY: `storage` is writable for `length` bytes and `length` is valid.
     let result = unsafe {
-        libc::getsockname(fd, (&mut storage as *mut libc::sockaddr_storage).cast(), &mut length)
+        libc::getsockname(
+            fd,
+            (&mut storage as *mut libc::sockaddr_storage).cast(),
+            &mut length,
+        )
     };
     if result < 0 {
         return Err(TransportError::last_io("getsockname"));
@@ -289,12 +294,7 @@ pub(crate) fn bind_to_device(fd: RawFd, interface: &str) -> Result<()> {
     }
     let mut value = [0u8; libc::IFNAMSIZ];
     value[..name.len()].copy_from_slice(name);
-    setsockopt_bytes(
-        fd,
-        libc::SOL_SOCKET,
-        SO_BINDTODEVICE,
-        &value[..=name.len()],
-    )
+    setsockopt_bytes(fd, libc::SOL_SOCKET, SO_BINDTODEVICE, &value[..=name.len()])
 }
 
 /// Reads the MTU of `interface` through `SIOCGIFMTU`.
@@ -396,7 +396,8 @@ pub(crate) fn decode_sockaddr(
     match libc::c_int::from(family) {
         libc::AF_INET if length >= mem::size_of::<libc::sockaddr_in>() => {
             // SAFETY: the kernel wrote at least `sockaddr_in` bytes.
-            let sin = unsafe { ptr::read_unaligned(storage as *const _ as *const libc::sockaddr_in) };
+            let sin =
+                unsafe { ptr::read_unaligned(storage as *const _ as *const libc::sockaddr_in) };
             Some(SocketAddr::V4(SocketAddrV4::new(
                 Ipv4Addr::from(sin.sin_addr.s_addr.to_ne_bytes()),
                 u16::from_be(sin.sin_port),
@@ -484,7 +485,11 @@ impl RecvBatchRaw {
                 (*iov).iov_len = buffer.len();
 
                 let peer = peers.add(index);
-                ptr::write_bytes(peer.cast::<u8>(), 0, mem::size_of::<libc::sockaddr_storage>());
+                ptr::write_bytes(
+                    peer.cast::<u8>(),
+                    0,
+                    mem::size_of::<libc::sockaddr_storage>(),
+                );
 
                 let message = msgs.add(index);
                 (*message).msg_hdr.msg_name = peer.cast();
@@ -528,15 +533,15 @@ impl RecvBatchRaw {
 
     /// Parsed peer address of datagram `index`.
     pub(crate) fn peer(&self, index: usize) -> Option<SocketAddr> {
-        decode_sockaddr(
-            &self.peers[index],
-            self.msgs[index].msg_hdr.msg_namelen,
-        )
+        decode_sockaddr(&self.peers[index], self.msgs[index].msg_hdr.msg_namelen)
     }
 
     /// Control data of datagram `index`.
     pub(crate) fn control(&self, index: usize) -> &[u8] {
-        let length = self.msgs[index].msg_hdr.msg_controllen.min(CONTROL_BUFFER_SIZE);
+        let length = self.msgs[index]
+            .msg_hdr
+            .msg_controllen
+            .min(CONTROL_BUFFER_SIZE);
         &self.controls[index].as_slice()[..length]
     }
 }
@@ -655,7 +660,11 @@ impl SendBatchRaw {
 }
 
 /// Sends a single datagram with `sendmsg`.
-pub(crate) fn sendmsg_single(fd: RawFd, peer: SocketAddr, datagram: SendDatagram<'_>) -> Result<usize> {
+pub(crate) fn sendmsg_single(
+    fd: RawFd,
+    peer: SocketAddr,
+    datagram: SendDatagram<'_>,
+) -> Result<usize> {
     let mut control = ControlBuffer::new();
     // SAFETY: `sockaddr_storage` is plain-old-data.
     let mut storage: libc::sockaddr_storage = unsafe { mem::zeroed() };

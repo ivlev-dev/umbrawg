@@ -954,6 +954,7 @@ dependencies = [
  "env_logger",
  "libc",
  "log",
+ "rand_core",
  "thiserror",
  "umbrawg-crypto",
  "umbrawg-device",

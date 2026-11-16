@@ -290,9 +290,7 @@ fn insert_node<const N: usize>(
         *slot = Some(Box::new(Node::leaf(prefix, cidr, Some(peer))));
         return;
     };
-    let common = common_bits(&node.prefix, &prefix)
-        .min(node.cidr)
-        .min(cidr);
+    let common = common_bits(&node.prefix, &prefix).min(node.cidr).min(cidr);
     if common == node.cidr && common == cidr {
         node.peer = Some(peer);
         *slot = Some(node);
@@ -318,10 +316,7 @@ fn insert_node<const N: usize>(
     *slot = Some(Box::new(parent));
 }
 
-fn lookup_node<const N: usize>(
-    root: Option<&Node<N>>,
-    address: &[u8; N],
-) -> Option<PeerId> {
+fn lookup_node<const N: usize>(root: Option<&Node<N>>, address: &[u8; N]) -> Option<PeerId> {
     let mut current = root;
     let mut found = None;
     while let Some(node) = current {
@@ -412,18 +407,12 @@ mod tests {
         let table = AllowedIps::new();
         let first = id(1);
         let second = id(2);
-        table.insert_many(
-            &[prefix("10.0.0.0", 8), prefix("2001:db8::", 32)],
-            first,
-        );
+        table.insert_many(&[prefix("10.0.0.0", 8), prefix("2001:db8::", 32)], first);
         table.insert(prefix("192.168.0.0", 16), second);
         table.remove_by_peer(first);
         assert!(table.entries_for_peer(first).is_empty());
         assert_eq!(table.lookup("10.0.0.1".parse().unwrap()), None);
-        assert_eq!(
-            table.lookup("192.168.0.1".parse().unwrap()),
-            Some(second)
-        );
+        assert_eq!(table.lookup("192.168.0.1".parse().unwrap()), Some(second));
     }
 
     #[test]

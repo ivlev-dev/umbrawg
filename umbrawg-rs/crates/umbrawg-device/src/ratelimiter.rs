@@ -119,7 +119,11 @@ impl RateLimiter {
 
     #[must_use]
     pub fn len(&self) -> usize {
-        self.table.lock().iter().filter(|entry| entry.occupied).count()
+        self.table
+            .lock()
+            .iter()
+            .filter(|entry| entry.occupied)
+            .count()
     }
 
     #[must_use]

@@ -69,10 +69,8 @@ impl TempDir {
             .duration_since(UNIX_EPOCH)
             .expect("clock")
             .as_nanos();
-        let path = std::env::temp_dir().join(format!(
-            "umbrawg-uapi-{tag}-{}-{nanos}",
-            std::process::id()
-        ));
+        let path =
+            std::env::temp_dir().join(format!("umbrawg-uapi-{tag}-{}-{nanos}", std::process::id()));
         fs::create_dir_all(&path).expect("temp directory");
         Self(path)
     }
@@ -493,9 +491,8 @@ fn rejects_unauthorized_peer() {
     let socket_path = listener.path().to_path_buf();
     let handle = listener.handle().expect("handle");
 
-    let thread = std::thread::spawn(move || {
-        listener.run_with_authorizer(control.as_ref(), |_| false)
-    });
+    let thread =
+        std::thread::spawn(move || listener.run_with_authorizer(control.as_ref(), |_| false));
 
     let mut stream = UnixStream::connect(&socket_path).expect("connect");
     let mut reader = BufReader::new(stream.try_clone().expect("clone"));
@@ -664,7 +661,10 @@ fn clears_optional_fields() {
     assert!(!response.contains("private_key="), "{response}");
     assert!(!response.contains("i1="), "{response}");
     assert!(!response.contains("header_protection_key="), "{response}");
-    assert!(!response.contains("persistent_keepalive_interval="), "{response}");
+    assert!(
+        !response.contains("persistent_keepalive_interval="),
+        "{response}"
+    );
     assert!(response.contains("i2=<r 8>\n"), "{response}");
     assert!(
         response.contains(&format!("preshared_key={}\n", "00".repeat(32))),
@@ -697,15 +697,11 @@ fn rejects_invalid_merged_obfuscation() {
     assert!(!response.contains("h1=1-2\n"), "{response}");
 
     let key = "cc".repeat(32);
-    let small = format!(
-        "set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=11\n\n"
-    );
+    let small = format!("set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=11\n\n");
     stream.write_all(small.as_bytes()).expect("small padding");
     assert_eq!(read_response(&mut reader), "errno=-22\n");
 
-    let valid = format!(
-        "set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=12\n\n"
-    );
+    let valid = format!("set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=12\n\n");
     stream.write_all(valid.as_bytes()).expect("valid padding");
     assert_eq!(read_response(&mut reader), "errno=0\n");
 

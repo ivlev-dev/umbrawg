@@ -3,7 +3,9 @@
 use core::fmt;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 
-use crate::gso::{IPV4_HEADER_LEN, IPV6_HEADER_LEN, MAX_UDP_PAYLOAD_V4, MAX_UDP_PAYLOAD_V6, UDP_HEADER_LEN};
+use crate::gso::{
+    IPV4_HEADER_LEN, IPV6_HEADER_LEN, MAX_UDP_PAYLOAD_V4, MAX_UDP_PAYLOAD_V6, UDP_HEADER_LEN,
+};
 use crate::sticky::SourceAddr;
 
 /// Address family of a UDP socket.
@@ -161,8 +163,14 @@ mod tests {
         assert_eq!(AddressFamily::of(v6), AddressFamily::Ipv6);
         assert!(AddressFamily::Ipv4.is_ipv4());
         assert!(AddressFamily::Ipv6.is_ipv6());
-        assert_eq!(AddressFamily::Ipv4.unspecified(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
-        assert_eq!(AddressFamily::Ipv6.unspecified(), IpAddr::V6(Ipv6Addr::UNSPECIFIED));
+        assert_eq!(
+            AddressFamily::Ipv4.unspecified(),
+            IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+        );
+        assert_eq!(
+            AddressFamily::Ipv6.unspecified(),
+            IpAddr::V6(Ipv6Addr::UNSPECIFIED)
+        );
     }
 
     #[test]

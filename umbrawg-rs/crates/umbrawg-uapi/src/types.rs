@@ -12,7 +12,8 @@ use std::str::FromStr;
 use umbrawg_crypto::{Key, PublicKey};
 use umbrawg_proto::header_protection::MIN_PADDING;
 use umbrawg_proto::messages::{
-    MESSAGE_DATA, MESSAGE_HANDSHAKE_COOKIE, MESSAGE_HANDSHAKE_INITIATION, MESSAGE_HANDSHAKE_RESPONSE,
+    MESSAGE_DATA, MESSAGE_HANDSHAKE_COOKIE, MESSAGE_HANDSHAKE_INITIATION,
+    MESSAGE_HANDSHAKE_RESPONSE,
 };
 
 use crate::error::UapiError;
@@ -564,10 +565,7 @@ pub fn validate_obfuscation_update(
             ("s3", request.s3.unwrap_or(current.s3)),
             ("s4", request.s4.unwrap_or(current.s4)),
         ];
-        if let Some((name, value)) = paddings
-            .into_iter()
-            .find(|(_, value)| *value < MIN_PADDING)
-        {
+        if let Some((name, value)) = paddings.into_iter().find(|(_, value)| *value < MIN_PADDING) {
             return Err(UapiError::InvalidConfiguration(format!(
                 "`{name}` must be at least {MIN_PADDING} when header protection is enabled, got {value}"
             )));
@@ -683,7 +681,10 @@ mod tests {
 
     #[test]
     fn parses_u16_ranges() {
-        assert_eq!("25".parse::<U16Range>().expect("valid"), U16Range::single(25));
+        assert_eq!(
+            "25".parse::<U16Range>().expect("valid"),
+            U16Range::single(25)
+        );
         assert_eq!(
             "0-100".parse::<U16Range>().expect("valid"),
             U16Range::new(0, 100)
@@ -754,19 +755,31 @@ mod tests {
     #[test]
     fn masks_host_bits_in_allowed_ips() {
         assert_eq!(
-            "10.1.2.3/8".parse::<AllowedIp>().expect("valid").to_string(),
+            "10.1.2.3/8"
+                .parse::<AllowedIp>()
+                .expect("valid")
+                .to_string(),
             "10.0.0.0/8"
         );
         assert_eq!(
-            "fd00::1/64".parse::<AllowedIp>().expect("valid").to_string(),
+            "fd00::1/64"
+                .parse::<AllowedIp>()
+                .expect("valid")
+                .to_string(),
             "fd00::/64"
         );
         assert_eq!(
-            "10.1.2.3/32".parse::<AllowedIp>().expect("valid").to_string(),
+            "10.1.2.3/32"
+                .parse::<AllowedIp>()
+                .expect("valid")
+                .to_string(),
             "10.1.2.3/32"
         );
         assert_eq!(
-            "10.1.2.3/0".parse::<AllowedIp>().expect("valid").to_string(),
+            "10.1.2.3/0"
+                .parse::<AllowedIp>()
+                .expect("valid")
+                .to_string(),
             "0.0.0.0/0"
         );
     }

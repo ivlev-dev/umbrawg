@@ -325,18 +325,16 @@ impl Tun {
         if config.nonblocking {
             options.custom_flags(libc::O_NONBLOCK);
         }
-        let file = options
-            .open(TUN_DEVICE_PATH)
-            .map_err(|error| {
-                if error.kind() == ErrorKind::NotFound {
-                    io::Error::new(
-                        ErrorKind::NotFound,
-                        format!("{TUN_DEVICE_PATH} does not exist: {error}"),
-                    )
-                } else {
-                    error
-                }
-            })?;
+        let file = options.open(TUN_DEVICE_PATH).map_err(|error| {
+            if error.kind() == ErrorKind::NotFound {
+                io::Error::new(
+                    ErrorKind::NotFound,
+                    format!("{TUN_DEVICE_PATH} does not exist: {error}"),
+                )
+            } else {
+                error
+            }
+        })?;
         let fd = file.as_raw_fd();
 
         let features = get_features(fd)?;
@@ -761,9 +759,7 @@ impl TunSet {
 
     /// Returns the shared interface name.
     pub fn name(&self) -> &str {
-        self.queues
-            .first()
-            .map_or("", |queue| queue.name())
+        self.queues.first().map_or("", |queue| queue.name())
     }
 
     /// Returns the batch size of the queues.
@@ -1089,7 +1085,11 @@ mod tests {
 
     #[test]
     fn ifreq_layout_matches_kernel_abi() {
-        let expected = if cfg!(target_pointer_width = "64") { 40 } else { 32 };
+        let expected = if cfg!(target_pointer_width = "64") {
+            40
+        } else {
+            32
+        };
         assert_eq!(core::mem::size_of::<IfReq>(), expected);
     }
 

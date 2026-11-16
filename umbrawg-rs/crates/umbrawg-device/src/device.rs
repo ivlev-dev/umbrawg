@@ -15,9 +15,9 @@ use umbrawg_proto::messages::limits::{
     DEFAULT_UDP_WINDOW, INITIATIONS_PER_SECOND, MAX_PEERS_PER_DEVICE,
 };
 use umbrawg_proto::messages::{
-    COOKIE_REPLY_SIZE, INITIATION_SIZE, MESSAGE_HANDSHAKE_COOKIE, MESSAGE_HANDSHAKE_INITIATION,
-    MESSAGE_HANDSHAKE_RESPONSE, MESSAGE_MINIMUM_LENGTH, MAX_PACKET_SIZE, RESPONSE_SIZE,
-    TRANSPORT_HEADER_SIZE,
+    COOKIE_REPLY_SIZE, INITIATION_SIZE, MAX_PACKET_SIZE, MESSAGE_HANDSHAKE_COOKIE,
+    MESSAGE_HANDSHAKE_INITIATION, MESSAGE_HANDSHAKE_RESPONSE, MESSAGE_MINIMUM_LENGTH,
+    RESPONSE_SIZE, TRANSPORT_HEADER_SIZE,
 };
 use umbrawg_proto::obf::{DetectedPacket, MessageKind, Obfuscator};
 use umbrawg_proto::{CookieReply, HandshakeInitiation, HandshakeResponse, ObfParams};
@@ -34,8 +34,7 @@ use crate::peer::{Peer, PeerConfig, PeerState};
 use crate::ratelimiter::RateLimiter;
 use crate::timers::{Range16, TimerKind, Timings};
 
-const TRANSPORT_FLOOD_INTERVAL: Duration =
-    Duration::from_millis(1000 / INITIATIONS_PER_SECOND);
+const TRANSPORT_FLOOD_INTERVAL: Duration = Duration::from_millis(1000 / INITIATIONS_PER_SECOND);
 
 pub struct DeviceConfig {
     pub private_key: Option<Key>,
@@ -152,7 +151,9 @@ impl Device {
         let key = key
             .filter(|value| !value.is_zero())
             .map(normalize_private_key);
-        let identity = key.as_ref().map(|value| StaticIdentity::from_bytes(value.to_bytes()));
+        let identity = key
+            .as_ref()
+            .map(|value| StaticIdentity::from_bytes(value.to_bytes()));
         let checker = identity
             .as_ref()
             .map(|identity| CookieChecker::new(identity, &mut OsRng, Instant::now()));
@@ -418,13 +419,7 @@ impl Device {
                 Obfuscator::new(&params).pick_header(MessageKind::Initiation, ctx.rng)
             };
             let mut os_rng = OsRng;
-            match noise.create_initiation(
-                identity_ref,
-                &mut os_rng,
-                header,
-                index,
-                Tai64N::now(),
-            ) {
+            match noise.create_initiation(identity_ref, &mut os_rng, header, index, Tai64N::now()) {
                 Ok(raw) => {
                     handshake.last_sent = Some(ctx.now);
                     raw
@@ -604,14 +599,8 @@ impl Device {
         let Some(endpoint) = peer.endpoint() else {
             return Err(DeviceError::NoEndpoint);
         };
-        let length = self.encrypt_with_keypair(
-            peer,
-            &keypair,
-            &[],
-            ctx.scratch,
-            ctx.rng,
-            ctx.now,
-        )?;
+        let length =
+            self.encrypt_with_keypair(peer, &keypair, &[], ctx.scratch, ctx.rng, ctx.now)?;
         ctx.io
             .send_datagram(endpoint, Some(peer), &ctx.scratch[..length], None);
         peer.add_tx(length as u64);
@@ -875,7 +864,9 @@ impl Device {
         }
         match detected.kind {
             MessageKind::Transport => self.handle_transport(packet, detected, source, ctx),
-            MessageKind::Initiation => self.handle_initiation(packet, detected.padding, source, ctx),
+            MessageKind::Initiation => {
+                self.handle_initiation(packet, detected.padding, source, ctx)
+            }
             MessageKind::Response => self.handle_response(packet, detected.padding, source, ctx),
             MessageKind::Cookie => self.handle_cookie(packet, detected.padding, ctx),
         }
@@ -1021,19 +1012,17 @@ impl Device {
         }
         {
             let handshake = peer.handshake.lock();
-            if handshake
-                .last_initiation_consumed
-                .is_some_and(|last| ctx.now.saturating_duration_since(last) < TRANSPORT_FLOOD_INTERVAL)
-            {
+            if handshake.last_initiation_consumed.is_some_and(|last| {
+                ctx.now.saturating_duration_since(last) < TRANSPORT_FLOOD_INTERVAL
+            }) {
                 return Ok(IncomingOutcome::Dropped);
             }
         }
         let consumed = {
             let mut handshake = peer.handshake.lock();
-            if handshake
-                .last_initiation_consumed
-                .is_some_and(|last| ctx.now.saturating_duration_since(last) < TRANSPORT_FLOOD_INTERVAL)
-            {
+            if handshake.last_initiation_consumed.is_some_and(|last| {
+                ctx.now.saturating_duration_since(last) < TRANSPORT_FLOOD_INTERVAL
+            }) {
                 return Ok(IncomingOutcome::Dropped);
             }
             let Some(noise) = handshake.noise.as_mut() else {
@@ -1221,9 +1210,7 @@ impl Device {
                 };
                 if again && self.timers_active(peer) {
                     let deadline = ctx.now + timings.send_keepalive(ctx.rng);
-                    peer.timers
-                        .lock()
-                        .arm(TimerKind::SendKeepalive, deadline);
+                    peer.timers.lock().arm(TimerKind::SendKeepalive, deadline);
                 }
             }
             TimerKind::NewHandshake => {
@@ -1477,7 +1464,9 @@ fn ip_packet_info(packet: &[u8]) -> Option<(usize, IpAddr)> {
             }
             Some((
                 total,
-                IpAddr::V4(Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15])),
+                IpAddr::V4(Ipv4Addr::new(
+                    packet[12], packet[13], packet[14], packet[15],
+                )),
             ))
         }
         6 => {

@@ -296,9 +296,7 @@ fn apply_peer(device: &Device, request: PeerRequest) -> Result<(), UapiError> {
             }
             AllowedIpChange::Remove(prefix) => {
                 if let Some(prefix) = AllowedIp::new(prefix.address(), prefix.cidr()) {
-                    device
-                        .allowed_ips()
-                        .remove_from_peer(prefix, peer.id());
+                    device.allowed_ips().remove_from_peer(prefix, peer.id());
                 }
             }
         }

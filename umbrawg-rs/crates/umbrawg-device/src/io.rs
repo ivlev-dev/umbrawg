@@ -28,12 +28,7 @@ pub struct IoContext<'a, R: RngCore, S: DatagramSink> {
 
 impl<'a, R: RngCore, S: DatagramSink> IoContext<'a, R, S> {
     #[must_use]
-    pub fn new(
-        rng: &'a mut R,
-        now: Instant,
-        scratch: &'a mut [u8],
-        io: &'a mut S,
-    ) -> Self {
+    pub fn new(rng: &'a mut R, now: Instant, scratch: &'a mut [u8], io: &'a mut S) -> Self {
         Self {
             rng,
             now,

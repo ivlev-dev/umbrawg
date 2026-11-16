@@ -126,8 +126,7 @@ pub fn prepare_gso(input: &[u8], hdr: &mut VirtioNetHdr) -> Result<(), GsoError>
         return Err(GsoError::InvalidSegmentSize(0));
     }
 
-    let kind = GsoType::from_u8(raw_gso_type)
-        .ok_or(GsoError::UnsupportedGsoType(raw_gso_type))?;
+    let kind = GsoType::from_u8(raw_gso_type).ok_or(GsoError::UnsupportedGsoType(raw_gso_type))?;
     let version = input[0] >> 4;
     if version != 4 && version != 6 {
         return Err(GsoError::Invalid("invalid IP version"));
@@ -146,9 +145,7 @@ pub fn prepare_gso(input: &[u8], hdr: &mut VirtioNetHdr) -> Result<(), GsoError>
     let ip_header_len = hdr.csum_start as usize;
     let minimum_ip_header_len = if version == 4 { 20 } else { 40 };
     if ip_header_len < minimum_ip_header_len {
-        return Err(GsoError::Invalid(
-            "checksum start precedes the IP header",
-        ));
+        return Err(GsoError::Invalid("checksum start precedes the IP header"));
     }
 
     match kind {
@@ -382,9 +379,9 @@ fn pseudo_header_checksum_no_fold(
 mod tests {
     use super::*;
     use crate::virtio::{
-        GsoType, VIRTIO_NET_HDR_F_DATA_VALID, VIRTIO_NET_HDR_F_NEEDS_CSUM,
-        VIRTIO_NET_HDR_GSO_ECN, VIRTIO_NET_HDR_GSO_TCPV4, VIRTIO_NET_HDR_GSO_TCPV6,
-        VIRTIO_NET_HDR_GSO_UDP, VIRTIO_NET_HDR_GSO_UDP_L4,
+        GsoType, VIRTIO_NET_HDR_F_DATA_VALID, VIRTIO_NET_HDR_F_NEEDS_CSUM, VIRTIO_NET_HDR_GSO_ECN,
+        VIRTIO_NET_HDR_GSO_TCPV4, VIRTIO_NET_HDR_GSO_TCPV6, VIRTIO_NET_HDR_GSO_UDP,
+        VIRTIO_NET_HDR_GSO_UDP_L4,
     };
 
     fn ipv4_header(protocol: u8, payload_len: usize) -> Vec<u8> {
@@ -409,8 +406,10 @@ mod tests {
         packet[4..6].copy_from_slice(&(payload_len as u16).to_be_bytes());
         packet[6] = protocol;
         packet[7] = 64;
-        packet[8..24].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]);
-        packet[24..40].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2]);
+        packet[8..24]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1]);
+        packet[24..40]
+            .copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 2]);
         packet
     }
 
@@ -921,7 +920,10 @@ mod tests {
 
         assert_eq!(prepare_gso(&packet, &mut header), Ok(()));
         assert_eq!(header.hdr_len, 44);
-        assert_eq!(gso_segment_count(packet.len(), header.hdr_len, header.gso_size), 0);
+        assert_eq!(
+            gso_segment_count(packet.len(), header.hdr_len, header.gso_size),
+            0
+        );
         assert_eq!(gso_segment_len(packet.len(), &header, 0), None);
     }
 
@@ -955,7 +957,9 @@ mod tests {
         let mut packet = [];
         assert_eq!(
             gso_none_checksum(&mut packet, 0, 0),
-            Err(GsoError::PacketTooShort("checksum offset exceeds the packet"))
+            Err(GsoError::PacketTooShort(
+                "checksum offset exceeds the packet"
+            ))
         );
     }
 }

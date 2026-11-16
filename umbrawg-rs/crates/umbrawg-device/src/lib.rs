@@ -21,7 +21,7 @@ pub use allowedips::{AllowedIp, AllowedIpEntry, AllowedIps, PeerId};
 pub use buffer::{Buffer, BufferPool, DEFAULT_BUFFER_SIZE};
 pub use device::{Device, DeviceConfig, SendOutcome, TimerEvent};
 pub use error::{DeviceError, Result};
-pub use gso::{BatchLayout, GsoGroup, GroSegments, MAX_GSO_GROUPS, MAX_GSO_SEGMENTS};
+pub use gso::{BatchLayout, GroSegments, GsoGroup, MAX_GSO_GROUPS, MAX_GSO_SEGMENTS};
 pub use index::{IndexEntry, IndexTable};
 pub use io::{DatagramSink, IncomingMeta, IncomingOutcome, IoContext, PacketIo};
 pub use keypair::{Keypair, Keypairs, RemovedIndexes};

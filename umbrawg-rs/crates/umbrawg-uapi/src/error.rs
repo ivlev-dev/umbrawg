@@ -54,9 +54,9 @@ impl UapiError {
         match self {
             Self::Io(_) => -i64::from(libc::EIO),
             Self::Protocol(_) => -i64::from(libc::EPROTO),
-            Self::InvalidValue { .. }
-            | Self::UnknownKey(_)
-            | Self::InvalidConfiguration(_) => -i64::from(libc::EINVAL),
+            Self::InvalidValue { .. } | Self::UnknownKey(_) | Self::InvalidConfiguration(_) => {
+                -i64::from(libc::EINVAL)
+            }
             Self::AddressInUse => -i64::from(libc::EADDRINUSE),
             Self::PermissionDenied => -i64::from(libc::EACCES),
             Self::Internal(_) => ERRNO_UNKNOWN,

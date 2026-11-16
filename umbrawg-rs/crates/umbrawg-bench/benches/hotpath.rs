@@ -3,7 +3,7 @@ use rand_core::{impls::fill_bytes_via_next, Error as RandError, RngCore};
 
 use umbrawg_crypto::{aead, blake2s, Key, PrivateKey, KEY_LEN};
 use umbrawg_proto::{obf::MessageKind, ObfParams, Obfuscator};
-use umbrawg_transport::{GsoLayout, GsoSize, coalesce_into, split_into_segments};
+use umbrawg_transport::{coalesce_into, split_into_segments, GsoLayout, GsoSize};
 use umbrawg_tun::VirtioNetHdr;
 
 const SIZES: [usize; 5] = [64, 256, 1420, 8192, 65535];
@@ -76,10 +76,7 @@ fn bench_aead(c: &mut Criterion) {
             sealed[..size].fill(0x5a);
             aead::seal_in_place(&key, 1, aad, &mut sealed).unwrap();
             b.iter_with_setup(
-                || {
-                    
-                    sealed.clone()
-                },
+                || sealed.clone(),
                 |mut buf| {
                     let out = aead::open_in_place(&key, 1, aad, &mut buf).unwrap();
                     black_box(out);
@@ -150,35 +147,35 @@ fn bench_blake2s(c: &mut Criterion) {
     let data = vec![0x5a; 1420];
     {
         let mut group = c.benchmark_group("blake2s_keyed");
-    group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("keyed_16", |b| {
-        b.iter(|| {
-            let out = blake2s::keyed_16(&key, &data);
-            black_box(out);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function("keyed_16", |b| {
+            b.iter(|| {
+                let out = blake2s::keyed_16(&key, &data);
+                black_box(out);
+            });
         });
-    });
-    group.bench_function("keyed_32", |b| {
-        b.iter(|| {
-            let out = blake2s::keyed_32(&key, &data);
-            black_box(out);
+        group.bench_function("keyed_32", |b| {
+            b.iter(|| {
+                let out = blake2s::keyed_32(&key, &data);
+                black_box(out);
+            });
         });
-    });
-    group.finish();
+        group.finish();
     }
 
     {
         let mut group = c.benchmark_group("blake2s_incremental");
-    group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("incremental", |b| {
-        b.iter(|| {
-            let mut hasher = blake2s::Blake2s::new();
-            hasher.update(&data);
-            let digest = hasher.finalize();
-            black_box(digest);
+        group.throughput(Throughput::Bytes(data.len() as u64));
+        group.bench_function("incremental", |b| {
+            b.iter(|| {
+                let mut hasher = blake2s::Blake2s::new();
+                hasher.update(&data);
+                let digest = hasher.finalize();
+                black_box(digest);
+            });
         });
-    });
-    group.finish();
-}
+        group.finish();
+    }
 }
 
 fn bench_x25519(c: &mut Criterion) {
@@ -240,7 +237,8 @@ fn bench_obf(c: &mut Criterion) {
                     || {
                         let mut dst = vec![0u8; 512];
                         let mut rng = FixedRng(1);
-                        let (header, layout) = obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
+                        let (header, layout) =
+                            obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
                         black_box(header);
                         (dst, layout)
                     },
@@ -273,7 +271,8 @@ fn bench_obf(c: &mut Criterion) {
                     || {
                         let mut dst = vec![0u8; 512];
                         let mut rng = FixedRng(3);
-                        let (_header, layout) = obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
+                        let (_header, layout) =
+                            obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
                         obf.finish_fixed(kind, &mut dst, &layout).unwrap();
                         let mut packet = dst[..layout.total].to_vec();
                         if packet.len() < 32 {
@@ -297,7 +296,8 @@ fn bench_obf(c: &mut Criterion) {
                     || {
                         let mut dst = vec![0u8; 512];
                         let mut rng = FixedRng(4);
-                        let (_header, layout) = obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
+                        let (_header, layout) =
+                            obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
                         obf.finish_fixed(kind, &mut dst, &layout).unwrap();
                         let mut packet = dst[..layout.total].to_vec();
                         if packet.len() < 32 {

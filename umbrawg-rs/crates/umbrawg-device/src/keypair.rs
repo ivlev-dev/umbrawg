@@ -119,13 +119,12 @@ impl Keypair {
     }
 
     pub fn validate_replay(&self, counter: u64) -> bool {
-        self.replay
-            .lock()
-            .validate(counter, REJECT_AFTER_MESSAGES)
+        self.replay.lock().validate(counter, REJECT_AFTER_MESSAGES)
     }
 
     pub fn exhaust(&self) {
-        self.send_nonce.store(REJECT_AFTER_MESSAGES, Ordering::Relaxed);
+        self.send_nonce
+            .store(REJECT_AFTER_MESSAGES, Ordering::Relaxed);
     }
 }
 
