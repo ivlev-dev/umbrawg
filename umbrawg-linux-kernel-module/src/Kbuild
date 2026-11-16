@@ -10,15 +10,4 @@ ccflags-$(if $(OMIT_ENDPOINTS),y,) += -D'OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)"'
 
 umbrawg-y := main.o noise.o device.o peer.o timers.o queueing.o send.o receive.o socket.o peerlookup.o allowedips.o ratelimiter.o cookie.o netlink.o junk.o header_protection.o
 
-ifeq ($(shell [ $(VERSION) -lt 6 -o \( $(VERSION) -eq 6 -a $(PATCHLEVEL) -lt 1 \) ] && echo y),y)
-	kbuild-dir := $(if $(filter /%,$(src)),$(src),$(srctree)/$(src))
-else
-	kbuild-dir := $(src)
-endif
-
-ifeq ($(shell [ $(VERSION) -lt 5 -o \( $(VERSION) -eq 5 -a $(PATCHLEVEL) -lt 10 \) ] && echo y),y)
-	include $(src)/crypto/Kbuild.include
-endif
-include $(src)/compat/Kbuild.include
-
 obj-$(if $(KBUILD_EXTMOD),m,$(CONFIG_UMBRAWG)) := umbrawg.o

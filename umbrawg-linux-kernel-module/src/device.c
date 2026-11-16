@@ -32,9 +32,7 @@ static LIST_HEAD(device_list);
 static int uwg_open(struct net_device *dev)
 {
 	struct in_device *dev_v4 = __in_dev_get_rtnl(dev);
-#ifndef COMPAT_CANNOT_USE_IN6_DEV_GET
 	struct inet6_dev *dev_v6 = __in6_dev_get(dev);
-#endif
 	struct uwg_device *uwg = netdev_priv(dev);
 	struct uwg_peer *peer;
 	int ret;
@@ -47,14 +45,8 @@ static int uwg_open(struct net_device *dev)
 		IN_DEV_CONF_SET(dev_v4, SEND_REDIRECTS, false);
 		IPV4_DEVCONF_ALL(dev_net(dev), SEND_REDIRECTS) = false;
 	}
-#ifndef COMPAT_CANNOT_USE_IN6_DEV_GET
 	if (dev_v6)
-#ifndef COMPAT_CANNOT_USE_DEV_CNF
 		dev_v6->cnf.addr_gen_mode = IN6_ADDR_GEN_MODE_NONE;
-#else
-		dev_v6->addr_gen_mode = IN6_ADDR_GEN_MODE_NONE;
-#endif
-#endif
 
 	mutex_lock(&uwg->device_update_lock);
 	ret = uwg_socket_init(uwg, uwg->incoming_port);
@@ -247,9 +239,6 @@ static const struct net_device_ops netdev_ops = {
 	.ndo_open		= uwg_open,
 	.ndo_stop		= uwg_stop,
 	.ndo_start_xmit		= uwg_xmit,
-#ifdef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
-	.ndo_get_stats64 = dev_get_tstats64
-#endif
 };
 
 static void uwg_destruct(struct net_device *dev)
@@ -278,9 +267,6 @@ static void uwg_destruct(struct net_device *dev)
 	rcu_barrier(); /* Wait for all the peers to be actually freed. */
 	uwg_ratelimiter_uninit();
 	memzero_explicit(&uwg->static_identity, sizeof(uwg->static_identity));
-#ifdef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
-	free_percpu(dev->tstats);
-#endif
 	kvfree(uwg->index_hashtable);
 	kvfree(uwg->peer_hashtable);
 	mutex_unlock(&uwg->device_update_lock);
@@ -308,26 +294,14 @@ static void uwg_setup(struct net_device *dev)
 	dev->needed_tailroom = noise_encrypted_len(MESSAGE_PADDING_MULTIPLE);
 	dev->type = ARPHRD_NONE;
 	dev->flags = IFF_POINTOPOINT | IFF_NOARP;
-#ifndef COMPAT_CANNOT_USE_IFF_NO_QUEUE
 	dev->priv_flags |= IFF_NO_QUEUE;
-#else
-	dev->tx_queue_len = 0;
-#endif
-#ifdef COMPAT_NETDEV_HAS_LLTX_PARAM
 	dev->lltx = true;
-#else
-	dev->features |= NETIF_F_LLTX;
-#endif
 	dev->features |= UWG_NETDEV_FEATURES;
 	dev->hw_features |= UWG_NETDEV_FEATURES;
 	dev->hw_enc_features |= UWG_NETDEV_FEATURES;
 	dev->mtu = ETH_DATA_LEN - overhead;
-#ifndef COMPAT_CANNOT_USE_MAX_MTU
 	dev->max_mtu = round_down(INT_MAX, MESSAGE_PADDING_MULTIPLE) - overhead;
-#endif
-#ifndef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
-#endif
 
 	SET_NETDEV_DEVTYPE(dev, &device_type);
 
@@ -373,16 +347,10 @@ static int uwg_newlink(struct net_device *dev,
 	if (!uwg->index_hashtable)
 		goto err_free_peer_hashtable;
 
-#ifdef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
-	dev->tstats = netdev_alloc_pcpu_stats(struct pcpu_sw_netstats);
-	if (!dev->tstats)
-		goto err_free_index_hashtable;
-#endif
-
 	uwg->handshake_receive_wq = alloc_workqueue("uwg-kex-%s",
 			WQ_CPU_INTENSIVE | WQ_FREEZABLE | WQ_PERCPU, 0, dev->name);
 	if (!uwg->handshake_receive_wq)
-		goto err_free_tstats;
+		goto err_free_index_hashtable;
 
 	uwg->handshake_send_wq = alloc_workqueue("uwg-kex-%s",
 			WQ_UNBOUND | WQ_FREEZABLE, 0, dev->name);
@@ -442,42 +410,18 @@ err_destroy_handshake_send:
 	destroy_workqueue(uwg->handshake_send_wq);
 err_destroy_handshake_receive:
 	destroy_workqueue(uwg->handshake_receive_wq);
-err_free_tstats:
-#ifdef COMPAT_CANNOT_USE_PCPU_STAT_TYPE
-	free_percpu(dev->tstats);
 err_free_index_hashtable:
-#endif
 	kvfree(uwg->index_hashtable);
 err_free_peer_hashtable:
 	kvfree(uwg->peer_hashtable);
 	return ret;
 }
 
-#ifdef COMPAT_CANNOT_USE_RTNL_NEWLINK_PARAMS
-static int uwg_newlink_old(struct net *src_net, struct net_device *dev,
-		      struct nlattr *tb[], struct nlattr *data[],
-		      struct netlink_ext_ack *extack)
-{
-	struct rtnl_newlink_params params = {
-		.src_net = src_net,
-		.link_net = NULL,
-		.peer_net = NULL,
-		.tb = tb,
-		.data = data,
-	};
-	return uwg_newlink(dev, &params, NULL);
-}
-#endif
-
 static struct rtnl_link_ops link_ops __read_mostly = {
 	.kind			= KBUILD_MODNAME,
 	.priv_size		= sizeof(struct uwg_device),
 	.setup			= uwg_setup,
-#ifndef COMPAT_CANNOT_USE_RTNL_NEWLINK_PARAMS
 	.newlink		= uwg_newlink,
-#else
-	.newlink 		= uwg_newlink_old,
-#endif
 };
 
 static void uwg_netns_pre_exit(struct net *net)

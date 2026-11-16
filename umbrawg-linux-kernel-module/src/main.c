@@ -4,6 +4,12 @@
  * Copyright (C) 2024 AmneziaVPN <admin@amnezia.org>. All Rights Reserved.
  */
 
+#include <linux/version.h>
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(7, 0, 0)
+#error "UmbraWG requires Linux 7.0 or newer"
+#endif
+
 #include "version.h"
 #include "device.h"
 #include "noise.h"
@@ -20,13 +26,6 @@
 static int __init uwg_mod_init(void)
 {
 	int ret;
-
-#ifdef COMPAT_INIT_CRYPTO
-	if ((ret = chacha20_mod_init()) || (ret = poly1305_mod_init()) ||
-	    (ret = chacha20poly1305_mod_init()) || (ret = blake2s_mod_init()) ||
-	    (ret = curve25519_mod_init()))
-		return ret;
-#endif
 
 	ret = uwg_allowedips_slab_init();
 	if (ret < 0)

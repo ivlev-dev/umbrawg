@@ -13,9 +13,6 @@
 #include "socket.h"
 #include "type.h"
 
-#ifdef COMPAT_CRYPTO_IS_ZINC
-#include <linux/simd.h>
-#endif
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/udp.h>
@@ -328,8 +325,7 @@ static void keep_key_fresh(struct uwg_peer *peer)
 	}
 }
 
-static bool decrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
-			   COMPAT_MAYBE_SIMD_CONTEXT(simd_context_t *simd_context))
+static bool decrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 {
 	struct scatterlist sg[MAX_SKB_FRAGS + 8];
 	struct sk_buff *trailer;
@@ -366,9 +362,8 @@ static bool decrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 		return false;
 
 	if (!chacha20poly1305_decrypt_sg_inplace(sg, skb->len, NULL, 0,
-					         PACKET_CB(skb)->nonce,
-						 keypair->receiving.key
-					 COMPAT_MAYBE_SIMD_CONTEXT(simd_context)))
+						 PACKET_CB(skb)->nonce,
+						 keypair->receiving.key))
 		return false;
 
 	/* Another ugly situation of pushing and pulling the header so as to
@@ -474,9 +469,7 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 	 * again in software.
 	 */
 	skb->ip_summed = CHECKSUM_UNNECESSARY;
-#ifndef COMPAT_CANNOT_USE_CSUM_LEVEL
 	skb->csum_level = ~0; /* All levels */
-#endif
 	skb->protocol = ip_tunnel_parse_protocol(skb);
 	if (skb->protocol == htons(ETH_P_IP)) {
 		len = ntohs(ip_hdr(skb)->tot_len);
@@ -597,26 +590,15 @@ void uwg_packet_decrypt_worker(struct work_struct *work)
 	struct crypt_queue *queue = container_of(work, struct multicore_worker,
 						 work)->ptr;
 	struct sk_buff *skb;
-#ifdef COMPAT_CRYPTO_IS_ZINC
-	simd_context_t simd_context;
-	simd_get(&simd_context);
-#endif
+
 	while ((skb = ptr_ring_consume_bh(&queue->ring)) != NULL) {
 		enum packet_state state =
-			likely(decrypt_packet(skb, PACKET_CB(skb)->keypair
-					      COMPAT_MAYBE_SIMD_CONTEXT(&simd_context))) ?
+			likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
 				PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
 		uwg_queue_enqueue_per_peer_rx(skb, state);
-#ifdef COMPAT_CRYPTO_IS_ZINC
-		simd_relax(&simd_context);
-#endif
 		if (need_resched())
 			cond_resched();
 	}
-
-#ifdef COMPAT_CRYPTO_IS_ZINC
-	simd_put(&simd_context);
-#endif
 }
 
 static void uwg_packet_consume_data(struct uwg_device *uwg, struct sk_buff *skb)

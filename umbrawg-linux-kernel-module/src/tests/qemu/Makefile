@@ -15,7 +15,7 @@ endif
 ARCH := $(firstword $(subst -, ,$(CBUILD)))
 
 # Set these from the environment to override
-KERNEL_VERSION ?= 5.4.200
+KERNEL_VERSION ?= 7.3.4
 KERNEL_VERSION := $(KERNEL_VERSION)$(if $(DEBUG_KERNEL),$(if $(findstring -debug,$(KERNEL_VERSION)),,-debug),)
 BUILD_PATH ?= $(PWD)/../../../qemu-build/$(ARCH)
 DISTFILES_PATH ?= $(PWD)/distfiles
@@ -98,17 +98,6 @@ else
 QEMU_MACHINE := -cpu cortex-a53 -machine virt
 CFLAGS += -march=armv8-a -mtune=cortex-a53
 endif
-else ifeq ($(ARCH),aarch64_be)
-QEMU_ARCH := aarch64
-QEMU_VPORT_RESULT := virtio-serial-device
-KERNEL_ARCH := arm64
-KERNEL_BZIMAGE := $(KERNEL_PATH)/arch/arm64/boot/Image
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host -machine virt,gic_version=host,accel=kvm
-else
-QEMU_MACHINE := -cpu cortex-a53 -machine virt
-CFLAGS += -march=armv8-a -mtune=cortex-a53
-endif
 else ifeq ($(ARCH),arm)
 QEMU_ARCH := arm
 QEMU_VPORT_RESULT := virtio-serial-device
@@ -120,18 +109,6 @@ else
 QEMU_MACHINE := -cpu cortex-a15 -machine virt
 CFLAGS += -march=armv7-a -mtune=cortex-a15 -mabi=aapcs-linux
 endif
-else ifeq ($(ARCH),armeb)
-QEMU_ARCH := arm
-QEMU_VPORT_RESULT := virtio-serial-device
-KERNEL_ARCH := arm
-KERNEL_BZIMAGE := $(KERNEL_PATH)/arch/arm/boot/zImage
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host -machine virt,gic_version=host,accel=kvm
-else
-QEMU_MACHINE := -cpu cortex-a15 -machine virt
-CFLAGS += -march=armv7-a -mabi=aapcs-linux # We don't pass -mtune=cortex-a15 due to a compiler bug on big endian.
-LDFLAGS += -Wl,--be8
-endif
 else ifeq ($(ARCH),x86_64)
 QEMU_ARCH := x86_64
 KERNEL_ARCH := x86_64
@@ -142,92 +119,8 @@ else
 QEMU_MACHINE := -cpu Skylake-Server -machine q35
 CFLAGS += -march=skylake-avx512
 endif
-else ifeq ($(ARCH),i686)
-QEMU_ARCH := i386
-KERNEL_ARCH := x86
-KERNEL_BZIMAGE := $(KERNEL_PATH)/arch/x86/boot/bzImage
-ifeq ($(subst x86_64,i686,$(HOST_ARCH)),$(ARCH))
-QEMU_MACHINE := -cpu host -machine q35,accel=kvm
 else
-QEMU_MACHINE := -cpu coreduo -machine q35
-CFLAGS += -march=prescott
-endif
-else ifeq ($(ARCH),mips64)
-QEMU_ARCH := mips64
-KERNEL_ARCH := mips
-KERNEL_BZIMAGE := $(KERNEL_PATH)/vmlinux
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host -machine malta,accel=kvm
-CFLAGS += -EB
-else
-QEMU_MACHINE := -cpu MIPS64R2-generic -machine malta -smp 1
-CFLAGS += -march=mips64r2 -EB
-endif
-else ifeq ($(ARCH),mips64el)
-QEMU_ARCH := mips64el
-KERNEL_ARCH := mips
-KERNEL_BZIMAGE := $(KERNEL_PATH)/vmlinux
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host -machine malta,accel=kvm
-CFLAGS += -EL
-else
-QEMU_MACHINE := -cpu MIPS64R2-generic -machine malta -smp 1
-CFLAGS += -march=mips64r2 -EL
-endif
-else ifeq ($(ARCH),mips)
-QEMU_ARCH := mips
-KERNEL_ARCH := mips
-KERNEL_BZIMAGE := $(KERNEL_PATH)/vmlinux
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host -machine malta,accel=kvm
-CFLAGS += -EB
-else
-QEMU_MACHINE := -cpu 24Kf -machine malta -smp 1
-CFLAGS += -march=mips32r2 -EB
-endif
-else ifeq ($(ARCH),mipsel)
-QEMU_ARCH := mipsel
-KERNEL_ARCH := mips
-KERNEL_BZIMAGE := $(KERNEL_PATH)/vmlinux
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host -machine malta,accel=kvm
-CFLAGS += -EL
-else
-QEMU_MACHINE := -cpu 24Kf -machine malta -smp 1
-CFLAGS += -march=mips32r2 -EL
-endif
-else ifeq ($(ARCH),powerpc64le)
-QEMU_ARCH := ppc64
-KERNEL_ARCH := powerpc
-KERNEL_BZIMAGE := $(KERNEL_PATH)/vmlinux
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host,accel=kvm -machine pseries
-else
-QEMU_MACHINE := -machine pseries
-endif
-CFLAGS += -mcpu=powerpc64le -mlong-double-64
-else ifeq ($(ARCH),powerpc)
-QEMU_ARCH := ppc
-KERNEL_ARCH := powerpc
-KERNEL_BZIMAGE := $(KERNEL_PATH)/arch/powerpc/boot/uImage
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host,accel=kvm -machine ppce500
-else
-QEMU_MACHINE := -machine ppce500
-endif
-CFLAGS += -mcpu=powerpc -mlong-double-64 -msecure-plt
-else ifeq ($(ARCH),m68k)
-QEMU_ARCH := m68k
-KERNEL_ARCH := m68k
-KERNEL_BZIMAGE := $(KERNEL_PATH)/vmlinux
-KERNEL_CMDLINE := $(shell sed -n 's/CONFIG_CMDLINE=\(.*\)/\1/p' arch/m68k.config)
-ifeq ($(HOST_ARCH),$(ARCH))
-QEMU_MACHINE := -cpu host,accel=kvm -machine q800 -append $(KERNEL_CMDLINE)
-else
-QEMU_MACHINE := -machine q800 -smp 1 -append $(KERNEL_CMDLINE)
-endif
-else
-$(error I only build: x86_64, i686, arm, armeb, aarch64, aarch64_be, mips, mipsel, mips64, mips64el, powerpc64le, powerpc, m68k)
+$(error I only build: x86_64, aarch64, arm)
 endif
 
 REAL_CC := $(CBUILD)-gcc

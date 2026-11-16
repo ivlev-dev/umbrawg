@@ -20,7 +20,6 @@ src/tests/qemu/distfiles/
 *.nam
 *.til
 .cache.mk
-src/crypto/zinc/*/*.S
 src/umbrawg.mod
 src/generated
 src/kernel

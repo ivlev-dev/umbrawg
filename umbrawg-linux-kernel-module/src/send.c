@@ -14,9 +14,6 @@
 #include "cookie.h"
 #include "type.h"
 
-#ifdef COMPAT_CRYPTO_IS_ZINC
-#include <linux/simd.h>
-#endif
 #include <linux/uio.h>
 #include <linux/inetdevice.h>
 #include <linux/socket.h>
@@ -222,8 +219,7 @@ static unsigned int calculate_skb_padding(struct sk_buff *skb)
 	return padded_size - last_unit;
 }
 
-static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
-	COMPAT_MAYBE_SIMD_CONTEXT(simd_context_t *simd_context))
+static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 {
 	struct uwg_peer *peer = keypair->entry.peer;
 	unsigned int padding_len, plaintext_len, trailer_len, packet_len;
@@ -307,8 +303,7 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair
 		return false;
 	return chacha20poly1305_encrypt_sg_inplace(sg, plaintext_len, NULL, 0,
 						   PACKET_CB(skb)->nonce,
-						   keypair->sending.key
-							COMPAT_MAYBE_SIMD_CONTEXT(simd_context));
+						   keypair->sending.key);
 }
 
 void uwg_packet_send_keepalive(struct uwg_peer *peer)
@@ -385,18 +380,11 @@ void uwg_packet_encrypt_worker(struct work_struct *work)
 						 work)->ptr;
 	struct sk_buff *first, *skb, *next;
 
-#ifdef COMPAT_CRYPTO_IS_ZINC
-	simd_context_t simd_context;
-	simd_get(&simd_context);
-#endif
 	while ((first = ptr_ring_consume_bh(&queue->ring)) != NULL) {
 		enum packet_state state = PACKET_STATE_CRYPTED;
 
 		skb_list_walk_safe(first, skb, next) {
-			if (likely(encrypt_packet(
-						  skb,
-						  PACKET_CB(first)->keypair
-						  COMPAT_MAYBE_SIMD_CONTEXT(&simd_context)))) {
+			if (likely(encrypt_packet(skb, PACKET_CB(first)->keypair))) {
 				uwg_reset_packet(skb, true);
 			} else {
 				state = PACKET_STATE_DEAD;
@@ -405,15 +393,9 @@ void uwg_packet_encrypt_worker(struct work_struct *work)
 		}
 		uwg_queue_enqueue_per_peer_tx(first, state);
 
-#ifdef COMPAT_CRYPTO_IS_ZINC
-		simd_relax(&simd_context);
-#endif
 		if (need_resched())
 			cond_resched();
 	}
-#ifdef COMPAT_CRYPTO_IS_ZINC
-	simd_put(&simd_context);
-#endif
 }
 
 static void uwg_packet_create_data(struct uwg_peer *peer, struct sk_buff *first)

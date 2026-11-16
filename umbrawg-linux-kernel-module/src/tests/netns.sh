@@ -32,7 +32,7 @@ netns0="uwg-test-$$-0"
 netns1="uwg-test-$$-1"
 netns2="uwg-test-$$-2"
 pretty() { echo -e "\x1b[32m\x1b[1m[+] ${1:+NS$1: }${2}\x1b[0m" >&3; }
-compatwarn() { echo -e "\x1b[31m\x1b[1m[-] Tolerated failure: $1\x1b[0m" >&3; }
+tolerated_failure() { echo -e "\x1b[31m\x1b[1m[-] Tolerated failure: $1\x1b[0m" >&3; }
 pp() { pretty "" "$*"; "$@"; }
 maybe_exec() { if [[ $BASHPID -eq $$ ]]; then "$@"; else exec "$@"; fi; }
 n0() { pretty 0 "$*"; maybe_exec ip netns exec $netns0 "$@"; }
@@ -354,7 +354,7 @@ n1 ping -I uwg0 -c 1 -W 1 192.168.241.2
 # What about when the mark changes and the packet must be rerouted?
 n1 iptables -t mangle -I OUTPUT -j MARK --set-xmark 1
 n1 ping -c 1 -W 1 192.168.241.2 # First the boring case
-n1 ping -I uwg0 -c 1 -W 1 192.168.241.2 || compatwarn "sk_bound_dev_if test failed, but fix not backportable in compat layer" # Then the sk_bound_dev_if case
+n1 ping -I uwg0 -c 1 -W 1 192.168.241.2 || tolerated_failure "sk_bound_dev_if test failed" # Then the sk_bound_dev_if case
 n1 iptables -t mangle -D OUTPUT -j MARK --set-xmark 1
 
 # Test that onion routing works, even when it loops

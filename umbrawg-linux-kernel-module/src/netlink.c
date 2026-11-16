@@ -1070,29 +1070,18 @@ out_nodev:
 	return ret;
 }
 
-#ifndef COMPAT_CANNOT_USE_CONST_GENL_OPS
-static const
-#else
-static
-#endif
-struct genl_ops genl_ops[] = {
+static const struct genl_ops genl_ops[] = {
 	{
 		.cmd = UWG_CMD_GET_DEVICE,
-#ifndef COMPAT_CANNOT_USE_NETLINK_START
 		.start = uwg_get_device_start,
-#endif
 		.dumpit = uwg_get_device_dump,
 		.done = uwg_get_device_done,
-#ifdef COMPAT_CANNOT_INDIVIDUAL_NETLINK_OPS_POLICY
 		.policy = device_policy,
-#endif
 		.flags = GENL_UNS_ADMIN_PERM
 	}, {
 		.cmd = UWG_CMD_SET_DEVICE,
 		.doit = uwg_set_device,
-#ifdef COMPAT_CANNOT_INDIVIDUAL_NETLINK_OPS_POLICY
 		.policy = device_policy,
-#endif
 		.flags = GENL_UNS_ADMIN_PERM
 	}
 };
@@ -1103,29 +1092,17 @@ static const struct genl_multicast_group uwg_genl_mcgrps[] = {
 	}
 };
 
-static struct genl_family genl_family
-#ifndef COMPAT_CANNOT_USE_GENL_NOPS
-__ro_after_init = {
+static struct genl_family genl_family __ro_after_init = {
 	.ops = genl_ops,
 	.n_ops = ARRAY_SIZE(genl_ops),
-#else
-= {
-#endif
-#ifdef COMPAT_GENL_HAS_RESV_START_OP
 	.resv_start_op = UWG_CMD_SET_DEVICE + 1,
-#endif
 	.name = UWG_GENL_NAME,
 	.version = UWG_GENL_VERSION,
 	.maxattr = UWGDEVICE_A_MAX,
 	.module = THIS_MODULE,
-#ifndef COMPAT_CANNOT_INDIVIDUAL_NETLINK_OPS_POLICY
-	.policy = device_policy,
-#endif
 	.netnsok = true,
-#ifndef COMPAT_CANNOT_USE_NETLINK_MCGRPS
 	.mcgrps = uwg_genl_mcgrps,
 	.n_mcgrps = ARRAY_SIZE(uwg_genl_mcgrps)
-#endif
 };
 
 int __init uwg_genetlink_init(void)

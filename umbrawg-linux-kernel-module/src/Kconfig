@@ -4,12 +4,11 @@ config UMBRAWG
 	depends on IPV6 || !IPV6
 	select NET_UDP_TUNNEL
 	select DST_CACHE
-	select CRYPTO
-	select CRYPTO_ALGAPI
-	select VFP
-	select VFPv3 if CPU_V7
-	select NEON if CPU_V7
-	select KERNEL_MODE_NEON if CPU_V7
+	select CRYPTO_LIB_CURVE25519
+	select CRYPTO_LIB_CHACHA20POLY1305
+	select CRYPTO_LIB_CHACHA
+	select CRYPTO_LIB_POLY1305
+	select CRYPTO_LIB_UTILS
 	default m
 	help
 	  WireGuard is a secure, fast, and easy to use replacement for IPsec
