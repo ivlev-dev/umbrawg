@@ -212,6 +212,25 @@ python3 bench/bench-plot.py results.csv -o report.html   # заголовок п
 предупреждения о ячейках с потерями UDP > 1%. При отсутствии данных скрипт
 завершается с кодом 1. Тесты: `python3 -m unittest discover -s bench/tests`.
 
+## Сравнение прогонов
+
+`bench-compare.py` сравнивает два CSV-прогона стенда: агрегирует медиану
+`mbit` и медиану потерь (`extra`: для UDP — `lost_percent`, для TCP —
+ретрансмиты) по ячейке `(impl, mode, proto, conns, loss, obf, peers)`,
+сопоставляет ячейки baseline/candidate, считает Δ% и помечает регрессии
+(падение пропускной способности больше порога или рост потерь/ретрансмитов
+больше 1 п.п.):
+
+```bash
+python3 bench/bench-compare.py baseline.csv candidate.csv
+python3 bench/bench-compare.py baseline.csv candidate.csv --threshold 10 --md diff.md --json diff.json
+```
+
+Статусы: `OK`, `REGRESSION`, `BETTER`, а также `MISSING`/`NEW` для
+отсутствующих ячеек. Код выхода: 0 — регрессий нет, 1 — есть регрессии,
+2 — ошибка входных данных. После оптимизации прогоняйте новый результат
+против базового: `python3 bench/bench-compare.py ab-master.csv ab-wire.csv`.
+
 ## Ограничения стенда
 
 - **veth не даёт очередей сам по себе.** `ip link add ... numtxqueues N

@@ -268,8 +268,8 @@ Markdown. Подробности и методика — [bench/README.md](bench
 SMOKE=1 bash bench/bench.sh                        # быстрый прогон (нужен root)
 PLAN_ONLY=1 FORCE=1 bash bench/bench.sh             # план без трафика, без root
 bash bench/tests/test-bench-lib.sh                  # 62 проверки хелперов
-python3 -m unittest discover -s bench/tests -p 'test_*.py'   # 17 тестов отчёта
-scripts/check-packaging.sh                          # man/systemd/completions/версии
+python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отчёта и сравнения прогонов
+python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнение двух прогонов, регрессииscripts/check-packaging.sh                          # man/systemd/completions/версии
 ```
 
 Пути не зашиты в скрипт: `BENCH_DIR` — каталог `bench.sh`, `REPO_ROOT` — этот
