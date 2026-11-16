@@ -294,6 +294,7 @@ pub(crate) struct RxBatch {
     count: usize,
     offset: usize,
     slot: usize,
+    errors: usize,
 }
 
 impl RxBatch {
@@ -306,7 +307,12 @@ impl RxBatch {
             count: 0,
             offset: 0,
             slot,
+            errors: 0,
         }
+    }
+
+    pub fn take_errors(&mut self) -> usize {
+        std::mem::take(&mut self.errors)
     }
 
     /// Добавляет пакет. Возвращает `false`, если накопитель переполнен.
@@ -373,7 +379,7 @@ impl RxBatch {
         }
     }
 
-    fn write_singles<S: PacketSink>(&self, sink: &S, start: usize, end: usize) {
+    fn write_singles<S: PacketSink>(&mut self, sink: &S, start: usize, end: usize) {
         for index in start..end {
             self.write_single(sink, index);
         }
@@ -453,9 +459,10 @@ impl RxBatch {
         sink.write_gso(&header, &self.gso_buffer[..total])
     }
 
-    fn write_single<S: PacketSink>(&self, sink: &S, index: usize) {
+    fn write_single<S: PacketSink>(&mut self, sink: &S, index: usize) {
         let (offset, length) = self.packets[index];
         if let Err(error) = sink.write_packet(&self.buffer[offset..offset + length]) {
+            self.errors += 1;
             log::debug!("tun write failed: {error}");
         }
     }

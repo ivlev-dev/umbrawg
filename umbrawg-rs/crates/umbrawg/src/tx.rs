@@ -49,6 +49,7 @@ pub struct TxBatch {
     groups: Vec<GsoGroup>,
     peers: Vec<PeerBatch>,
     used: usize,
+    dropped: usize,
 }
 
 impl TxBatch {
@@ -59,6 +60,7 @@ impl TxBatch {
             groups: Vec::with_capacity(MAX_GROUPS),
             peers: Vec::new(),
             used: 0,
+            dropped: 0,
         })
     }
 
@@ -67,6 +69,7 @@ impl TxBatch {
         self.groups.clear();
         self.peers.clear();
         self.used = 0;
+        self.dropped = 0;
     }
 
     /// Возвращает `true`, если отправлять нечего.
@@ -135,9 +138,13 @@ impl TxBatch {
     /// остаётся неготовым после нескольких попыток, остаток отбрасывается:
     /// дейтаграммы UDP и так не гарантируют доставку.
     pub fn flush(&mut self, socket: &Socket, buffer: &[u8]) -> usize {
+        self.flush_tracked(socket, buffer).0
+    }
+
+    pub fn flush_tracked(&mut self, socket: &Socket, buffer: &[u8]) -> (usize, usize) {
         if self.groups.is_empty() {
             self.clear();
-            return 0;
+            return (0, 0);
         }
         let limits = SegmentLimits::from_socket(socket);
         let gso = socket.gso_enabled();
@@ -160,8 +167,9 @@ impl TxBatch {
                 sent += self.send(socket, peer.endpoint, &outgoings[..pending]);
             }
         }
+        let dropped = self.dropped;
         self.clear();
-        sent
+        (sent, dropped)
     }
 
     fn send(&mut self, socket: &Socket, endpoint: SocketAddr, outgoings: &[Outgoing<'_>]) -> usize {
@@ -174,6 +182,7 @@ impl TxBatch {
                     attempts += 1;
                     if attempts > MAX_SEND_ATTEMPTS {
                         log::debug!("send batch made no progress to {endpoint}");
+                        self.dropped += remaining.len();
                         break;
                     }
                 }
@@ -186,12 +195,14 @@ impl TxBatch {
                     attempts += 1;
                     if attempts > MAX_SEND_ATTEMPTS {
                         log::debug!("send batch is blocked on {endpoint}");
+                        self.dropped += remaining.len();
                         break;
                     }
                     wait_writable(socket);
                 }
                 Err(error) => {
                     log::debug!("send batch to {endpoint} failed: {error}");
+                    self.dropped += remaining.len();
                     break;
                 }
             }
