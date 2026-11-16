@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
@@ -50,6 +50,21 @@ impl PeerState {
     pub const fn is_established(self) -> bool {
         matches!(self, Self::Established)
     }
+}
+
+static TIMER_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
+
+const NO_DEADLINE: u64 = u64::MAX;
+
+fn encode_deadline(deadline: Option<Instant>) -> u64 {
+    match deadline {
+        Some(instant) => instant.saturating_duration_since(*TIMER_EPOCH).as_nanos() as u64,
+        None => NO_DEADLINE,
+    }
+}
+
+fn decode_deadline(value: u64) -> Option<Instant> {
+    (value != NO_DEADLINE).then(|| *TIMER_EPOCH + Duration::from_nanos(value))
 }
 
 pub(crate) struct PeerHandshake {
@@ -120,6 +135,7 @@ pub struct Peer {
     pub(crate) keypairs: RwLock<Keypairs>,
     pub(crate) cookie_generator: Mutex<CookieGenerator>,
     pub(crate) timers: Mutex<Timers>,
+    next_deadline: AtomicU64,
     pub(crate) staged: Mutex<StagedQueue>,
 }
 
@@ -154,6 +170,7 @@ impl Peer {
             keypairs: RwLock::new(Keypairs::new()),
             cookie_generator: Mutex::new(CookieGenerator::new(public_key)),
             timers: Mutex::new(Timers::new()),
+            next_deadline: AtomicU64::new(NO_DEADLINE),
             staged: Mutex::new(StagedQueue::new(MAX_STAGED_PACKETS)),
         }
     }
@@ -196,6 +213,9 @@ impl Peer {
         if self.disable_roaming.load(Ordering::Relaxed) {
             return false;
         }
+        if *self.endpoint.read() == Some(endpoint) {
+            return false;
+        }
         let mut current = self.endpoint.write();
         if *current == Some(endpoint) {
             return false;
@@ -203,6 +223,27 @@ impl Peer {
         *current = Some(endpoint);
         self.udp_window.store(DEFAULT_UDP_WINDOW, Ordering::Relaxed);
         true
+    }
+
+    pub(crate) fn with_timers<R>(&self, update: impl FnOnce(&mut Timers) -> R) -> R {
+        let mut timers = self.timers.lock();
+        let result = update(&mut timers);
+        self.next_deadline
+            .store(encode_deadline(timers.next_deadline()), Ordering::Relaxed);
+        result
+    }
+
+    #[must_use]
+    pub(crate) fn next_deadline(&self) -> Option<Instant> {
+        decode_deadline(self.next_deadline.load(Ordering::Relaxed))
+    }
+
+    #[must_use]
+    pub(crate) fn promote_keypair(&self, keypair: &Arc<Keypair>) -> Option<RemovedIndexes> {
+        if !self.keypairs.read().is_next(keypair) {
+            return None;
+        }
+        self.keypairs.write().received_with(keypair)
     }
 
     #[must_use]
@@ -360,7 +401,7 @@ impl Peer {
     pub(crate) fn zero_and_flush(&self) -> RemovedIndexes {
         let removed = self.clear_session();
         self.flush_staged_drop();
-        self.timers.lock().reset();
+        self.with_timers(Timers::reset);
         removed
     }
 
@@ -383,5 +424,84 @@ impl core::fmt::Debug for Peer {
             .field("public_key", &self.public_key)
             .field("running", &self.running())
             .finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::allowedips::PeerId;
+    use crate::timers::TimerKind;
+
+    fn peer() -> Peer {
+        Peer::new(
+            PeerId::new_unchecked(1),
+            PeerConfig::new(PublicKey::from_bytes([7u8; 32])),
+            None,
+        )
+    }
+
+    fn keypair(local: u32, initiator: bool) -> Arc<Keypair> {
+        Arc::new(Keypair::from_keys(
+            Instant::now(),
+            local,
+            0,
+            initiator,
+            &Key::from_bytes([local as u8; 32]),
+            &Key::from_bytes([local as u8 ^ 0xff; 32]),
+        ))
+    }
+
+    #[test]
+    fn next_deadline_follows_timer_updates() {
+        let peer = peer();
+        assert_eq!(peer.next_deadline(), None);
+        let deadline = Instant::now() + Duration::from_secs(5);
+        peer.with_timers(|timers| timers.arm(TimerKind::SendKeepalive, deadline));
+        assert_eq!(peer.next_deadline(), Some(deadline));
+        let later = deadline + Duration::from_secs(5);
+        peer.with_timers(|timers| timers.arm(TimerKind::NewHandshake, later));
+        assert_eq!(peer.next_deadline(), Some(deadline));
+        peer.with_timers(|timers| timers.disarm(TimerKind::SendKeepalive));
+        assert_eq!(peer.next_deadline(), Some(later));
+        peer.with_timers(Timers::reset);
+        assert_eq!(peer.next_deadline(), None);
+    }
+
+    #[test]
+    fn promote_keypair_only_accepts_the_next_keypair() {
+        let peer = peer();
+        let unknown = keypair(1, true);
+        assert!(peer.promote_keypair(&unknown).is_none());
+        assert!(peer.current_keypair().is_none());
+
+        let next = keypair(2, false);
+        peer.keypairs.write().install(Arc::clone(&next), false);
+        assert!(peer.current_keypair().is_none());
+        assert!(peer.promote_keypair(&unknown).is_none());
+        assert!(peer.current_keypair().is_none());
+        assert!(peer.promote_keypair(&next).is_some());
+        assert!(peer
+            .current_keypair()
+            .is_some_and(|pair| Arc::ptr_eq(&pair, &next)));
+        assert!(peer.promote_keypair(&next).is_none());
+    }
+
+    #[test]
+    fn endpoint_updates_only_on_change() {
+        let peer = peer();
+        let first: SocketAddr = "10.0.0.1:51820".parse().unwrap();
+        let second: SocketAddr = "10.0.0.2:51820".parse().unwrap();
+        assert!(peer.set_endpoint_from_packet(first));
+        assert_eq!(peer.endpoint(), Some(first));
+        assert!(!peer.set_endpoint_from_packet(first));
+        peer.observe_udp_window(9000);
+        assert!(!peer.set_endpoint_from_packet(first));
+        assert_eq!(peer.udp_window(), 9000);
+        assert!(peer.set_endpoint_from_packet(second));
+        assert_eq!(peer.udp_window(), DEFAULT_UDP_WINDOW);
+        peer.set_roaming_disabled(true);
+        assert!(!peer.set_endpoint_from_packet(first));
+        assert_eq!(peer.endpoint(), Some(second));
     }
 }

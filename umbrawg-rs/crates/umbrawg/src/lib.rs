@@ -270,6 +270,10 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
     let mut recv_queue =
         RecvQueue::new(RECV_BATCH).map_err(|error| io::Error::other(error.to_string()))?;
     let mut recv_buffers: Vec<Vec<u8>> = (0..RECV_BATCH).map(|_| vec![0u8; MAX_PACKET]).collect();
+    let mut recv_slices: Vec<&mut [u8]> = recv_buffers
+        .iter_mut()
+        .map(|buffer| buffer.as_mut_slice())
+        .collect();
     let slot = tun.mtu() as usize + TUN_PACKET_MARGIN;
     let mut tun_bufs: Vec<Vec<u8>> = (0..TUN_BATCH).map(|_| vec![0u8; slot]).collect();
     let mut tun_slices: Vec<&mut [u8]> = tun_bufs
@@ -420,19 +424,13 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
         }
 
         loop {
-            let received = {
-                let mut buffers: Vec<&mut [u8]> = recv_buffers
-                    .iter_mut()
-                    .map(|buffer| buffer.as_mut_slice())
-                    .collect();
-                active.recv_batch(&mut recv_queue, &mut buffers)
-            };
-            match received {
+            match active.recv_batch(&mut recv_queue, &mut recv_slices) {
                 Ok(0) => break,
                 Ok(count) => {
                     busy = true;
                     log::debug!("rx batch of {count} datagrams");
-                    for (index, buffer) in recv_buffers.iter_mut().enumerate().take(count) {
+                    let snapshot = device.incoming_snapshot();
+                    for (index, buffer) in recv_slices.iter_mut().enumerate().take(count) {
                         let Some(meta) = recv_queue.meta(index) else {
                             continue;
                         };
@@ -450,9 +448,10 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                             rx: &mut rx,
                         };
                         let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
-                        match device.handle_incoming(
+                        match device.handle_incoming_with(
                             slice,
                             IncomingMeta::new(endpoint.dst(), gro_size),
+                            &snapshot,
                             &mut context,
                         ) {
                             Ok(outcome) => log::debug!("incoming {} bytes: {outcome:?}", meta.size),
@@ -470,16 +469,20 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
 
         rx.flush(&tun);
 
-        for peer in device.peers() {
+        let mut staged_error: Option<DeviceError> = None;
+        device.for_each_peer(|peer| {
             let mut io = WorkerIo {
                 socket: active,
                 tun: &tun,
                 rx: &mut rx,
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
-            if let Err(error) = device.flush_staged(&peer, &mut context) {
-                log::debug!("flush failed: {error}");
+            if let Err(error) = device.flush_staged(peer, &mut context) {
+                staged_error = Some(error);
             }
+        });
+        if let Some(error) = staged_error {
+            log::debug!("flush failed: {error}");
         }
 
         if device

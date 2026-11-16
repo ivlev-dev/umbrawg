@@ -36,6 +36,13 @@ use crate::timers::{Range16, TimerKind, Timings};
 
 const TRANSPORT_FLOOD_INTERVAL: Duration = Duration::from_millis(1000 / INITIATIONS_PER_SECOND);
 
+/// Настройки обфускации и таймеров, снятые один раз на батч приёма.
+#[derive(Clone)]
+pub struct IncomingSnapshot {
+    params: Arc<ObfParams>,
+    timings: Timings,
+}
+
 pub struct DeviceConfig {
     pub private_key: Option<Key>,
     pub listen_port: u16,
@@ -269,6 +276,13 @@ impl Device {
         self.peers.load().len()
     }
 
+    pub fn for_each_peer(&self, mut visit: impl FnMut(&Arc<Peer>)) {
+        let peers = self.peers.load();
+        for peer in peers.values() {
+            visit(peer);
+        }
+    }
+
     #[must_use]
     pub fn peers(&self) -> Vec<Arc<Peer>> {
         let mut peers: Vec<Arc<Peer>> = self.peers.load().values().cloned().collect();
@@ -405,10 +419,11 @@ impl Device {
         let min_timeout = timings.rekey_min_timeout();
         if !retry {
             let max = timings.max_handshake_attempts(ctx.rng);
-            let mut timers = peer.timers.lock();
-            timers.handshake_attempts = 0;
-            timers.max_handshake_attempts = max;
-            timers.sent_last_minute_handshake = false;
+            peer.with_timers(|timers| {
+                timers.handshake_attempts = 0;
+                timers.max_handshake_attempts = max;
+                timers.sent_last_minute_handshake = false;
+            });
         }
         let identity = self.identity.read();
         let Some(identity_ref) = identity.as_ref() else {
@@ -941,14 +956,34 @@ impl Device {
         Ok(())
     }
 
+    /// Снимает снимок настроек обфускации и таймеров для батча приёма.
+    #[must_use]
+    pub fn incoming_snapshot(&self) -> IncomingSnapshot {
+        IncomingSnapshot {
+            params: self.obfuscation.load_full(),
+            timings: self.timings(),
+        }
+    }
+
     pub fn handle_incoming<R: RngCore, S: PacketIo>(
         &self,
         packet: &mut [u8],
         meta: IncomingMeta,
         ctx: &mut IoContext<'_, R, S>,
     ) -> Result<IncomingOutcome> {
+        let snapshot = self.incoming_snapshot();
+        self.handle_incoming_with(packet, meta, &snapshot, ctx)
+    }
+
+    pub fn handle_incoming_with<R: RngCore, S: PacketIo>(
+        &self,
+        packet: &mut [u8],
+        meta: IncomingMeta,
+        snapshot: &IncomingSnapshot,
+        ctx: &mut IoContext<'_, R, S>,
+    ) -> Result<IncomingOutcome> {
         let Some(gro_size) = meta.gro_size else {
-            return self.handle_segment(packet, meta.source, ctx);
+            return self.handle_segment(packet, meta.source, snapshot, ctx);
         };
         if gro_size == 0 {
             return Ok(IncomingOutcome::Dropped);
@@ -957,7 +992,8 @@ impl Device {
         let mut offset = 0;
         while offset < packet.len() {
             let end = (offset + gro_size).min(packet.len());
-            let result = self.handle_segment(&mut packet[offset..end], meta.source, ctx)?;
+            let result =
+                self.handle_segment(&mut packet[offset..end], meta.source, snapshot, ctx)?;
             if !result.is_dropped() {
                 outcome = result;
             }
@@ -970,13 +1006,13 @@ impl Device {
         &self,
         packet: &mut [u8],
         source: SocketAddr,
+        snapshot: &IncomingSnapshot,
         ctx: &mut IoContext<'_, R, S>,
     ) -> Result<IncomingOutcome> {
         if packet.len() < MESSAGE_MINIMUM_LENGTH {
             return Ok(IncomingOutcome::Dropped);
         }
-        let params = self.obfuscation.load();
-        let obfuscator = Obfuscator::new(&params);
+        let obfuscator = Obfuscator::new(&snapshot.params);
         let Some(detected) = obfuscator.detect(packet) else {
             return Ok(IncomingOutcome::Dropped);
         };
@@ -984,7 +1020,9 @@ impl Device {
             return Ok(IncomingOutcome::Dropped);
         }
         match detected.kind {
-            MessageKind::Transport => self.handle_transport(packet, detected, source, ctx),
+            MessageKind::Transport => {
+                self.handle_transport(packet, detected, source, snapshot, ctx)
+            }
             MessageKind::Initiation => {
                 self.handle_initiation(packet, detected.padding, source, ctx)
             }
@@ -998,6 +1036,7 @@ impl Device {
         packet: &mut [u8],
         detected: DetectedPacket,
         source: SocketAddr,
+        snapshot: &IncomingSnapshot,
         ctx: &mut IoContext<'_, R, S>,
     ) -> Result<IncomingOutcome> {
         let padding = detected.padding;
@@ -1013,7 +1052,7 @@ impl Device {
         let Some(keypair) = entry.keypair else {
             return Ok(IncomingOutcome::Dropped);
         };
-        let timings = self.timings();
+        let timings = &snapshot.timings;
         if keypair.is_expired(ctx.now, timings.keychain_expire()) {
             return Ok(IncomingOutcome::Dropped);
         }
@@ -1030,10 +1069,7 @@ impl Device {
         let plaintext_len = plaintext.len();
         peer.observe_udp_window((header_end + plaintext_len) as u32);
         peer.add_rx((plaintext_len + MESSAGE_MINIMUM_LENGTH) as u64);
-        let promoted = {
-            let mut keypairs = peer.keypairs.write();
-            keypairs.received_with(&keypair)
-        };
+        let promoted = peer.promote_keypair(&keypair);
         let promoted = if let Some(removed) = promoted {
             self.index.remove_many(&removed);
             peer.set_endpoint_from_packet(source);
@@ -1048,7 +1084,7 @@ impl Device {
         }
         self.timers_any_authenticated_packet_traversal(&peer, ctx.rng, ctx.now);
         self.timers_any_authenticated_packet_received(&peer);
-        self.keep_key_fresh_receiving(&peer, &timings, ctx)?;
+        self.keep_key_fresh_receiving(&peer, timings, ctx)?;
         if plaintext.is_empty() || plaintext[0] == 0 {
             return Ok(IncomingOutcome::Keepalive);
         }
@@ -1058,8 +1094,7 @@ impl Device {
         if self.allowed_ips.lookup(address) != Some(peer.id()) {
             return Ok(IncomingOutcome::Dropped);
         }
-        self.keep_key_fresh_receiving(&peer, &timings, ctx)?;
-        self.timers_data_received(&peer, &timings, ctx.rng, ctx.now);
+        self.timers_data_received(&peer, timings, ctx.rng, ctx.now);
         ctx.io.deliver(&peer, &plaintext[..length]);
         Ok(IncomingOutcome::Delivered(length))
     }
@@ -1277,10 +1312,7 @@ impl Device {
             if !peer.running() {
                 continue;
             }
-            let count = {
-                let mut timers = peer.timers.lock();
-                timers.expire(ctx.now, &mut kinds)
-            };
+            let count = peer.with_timers(|timers| timers.expire(ctx.now, &mut kinds));
             for kind in kinds[..count].iter().copied() {
                 self.handle_timer(peer, kind, ctx)?;
                 handled += 1;
@@ -1302,36 +1334,35 @@ impl Device {
         let timings = self.timings();
         match kind {
             TimerKind::RetransmitHandshake => {
-                let (attempts, maximum) = {
-                    let timers = peer.timers.lock();
+                let (attempts, maximum) = peer.with_timers(|timers| {
                     (timers.handshake_attempts, timers.max_handshake_attempts)
-                };
+                });
                 if attempts > maximum {
-                    peer.timers.lock().disarm(TimerKind::SendKeepalive);
+                    peer.with_timers(|timers| timers.disarm(TimerKind::SendKeepalive));
                     peer.flush_staged_drop();
-                    let mut timers = peer.timers.lock();
-                    if !timers.is_pending(TimerKind::ZeroKeyMaterial) {
-                        timers.arm(
-                            TimerKind::ZeroKeyMaterial,
-                            ctx.now + timings.keychain_expire() * 3,
-                        );
-                    }
+                    peer.with_timers(|timers| {
+                        if !timers.is_pending(TimerKind::ZeroKeyMaterial) {
+                            timers.arm(
+                                TimerKind::ZeroKeyMaterial,
+                                ctx.now + timings.keychain_expire() * 3,
+                            );
+                        }
+                    });
                 } else {
-                    peer.timers.lock().handshake_attempts = attempts + 1;
+                    peer.with_timers(|timers| timers.handshake_attempts = attempts + 1);
                     self.send_handshake_initiation(peer, true, ctx)?;
                 }
             }
             TimerKind::SendKeepalive => {
                 self.send_keepalive(peer, ctx)?;
-                let again = {
-                    let mut timers = peer.timers.lock();
+                let again = peer.with_timers(|timers| {
                     let again = timers.need_another_keepalive;
                     timers.need_another_keepalive = false;
                     again
-                };
+                });
                 if again && self.timers_active(peer) {
                     let deadline = ctx.now + timings.send_keepalive(ctx.rng);
-                    peer.timers.lock().arm(TimerKind::SendKeepalive, deadline);
+                    peer.with_timers(|timers| timers.arm(TimerKind::SendKeepalive, deadline));
                 }
             }
             TimerKind::NewHandshake => {
@@ -1360,10 +1391,7 @@ impl Device {
             if !peer.running() {
                 continue;
             }
-            let expired = {
-                let mut timers = peer.timers.lock();
-                timers.expire(now, &mut kinds)
-            };
+            let expired = peer.with_timers(|timers| timers.expire(now, &mut kinds));
             for kind in kinds[..expired].iter().copied() {
                 if count == out.len() {
                     return count;
@@ -1384,11 +1412,12 @@ impl Device {
             return None;
         }
         let mut next: Option<Instant> = None;
-        for peer in self.peers.load().values() {
+        let peers = self.peers.load();
+        for peer in peers.values() {
             if !peer.running() {
                 continue;
             }
-            if let Some(deadline) = peer.timers.lock().next_deadline() {
+            if let Some(deadline) = peer.next_deadline() {
                 next = Some(match next {
                     Some(current) if current <= deadline => current,
                     _ => deadline,
@@ -1422,7 +1451,7 @@ impl Device {
         timings: &Timings,
         ctx: &mut IoContext<'_, R, S>,
     ) -> Result<()> {
-        let sent = peer.timers.lock().sent_last_minute_handshake;
+        let sent = peer.with_timers(|timers| timers.sent_last_minute_handshake);
         if sent {
             return Ok(());
         }
@@ -1430,7 +1459,7 @@ impl Device {
             return Ok(());
         };
         if keypair.is_initiator() && keypair.age(ctx.now) > timings.key_refresh_receiving() {
-            peer.timers.lock().sent_last_minute_handshake = true;
+            peer.with_timers(|timers| timers.sent_last_minute_handshake = true);
             self.send_handshake_initiation(peer, false, ctx)?;
         }
         Ok(())
@@ -1452,23 +1481,25 @@ impl Device {
         if let Some((lo, hi)) = peer.persistent_keepalive_range() {
             let seconds = Range16::new(lo, hi).pick(rng);
             if seconds > 0 {
-                peer.timers.lock().arm(
-                    TimerKind::PersistentKeepalive,
-                    now + Duration::from_secs(u64::from(seconds)),
-                );
+                peer.with_timers(|timers| {
+                    timers.arm(
+                        TimerKind::PersistentKeepalive,
+                        now + Duration::from_secs(u64::from(seconds)),
+                    );
+                });
             }
         }
     }
 
     fn timers_any_authenticated_packet_sent(&self, peer: &Peer) {
         if self.timers_active(peer) {
-            peer.timers.lock().disarm(TimerKind::SendKeepalive);
+            peer.with_timers(|timers| timers.disarm(TimerKind::SendKeepalive));
         }
     }
 
     fn timers_any_authenticated_packet_received(&self, peer: &Peer) {
         if self.timers_active(peer) {
-            peer.timers.lock().disarm(TimerKind::NewHandshake);
+            peer.with_timers(|timers| timers.disarm(TimerKind::NewHandshake));
         }
     }
 
@@ -1482,11 +1513,12 @@ impl Device {
         if !self.timers_active(peer) {
             return;
         }
-        let mut timers = peer.timers.lock();
-        if !timers.is_pending(TimerKind::NewHandshake) {
-            let deadline = now + timings.new_handshake(rng);
-            timers.arm(TimerKind::NewHandshake, deadline);
-        }
+        peer.with_timers(|timers| {
+            if !timers.is_pending(TimerKind::NewHandshake) {
+                let deadline = now + timings.new_handshake(rng);
+                timers.arm(TimerKind::NewHandshake, deadline);
+            }
+        });
     }
 
     fn timers_data_received<R: RngCore>(
@@ -1499,13 +1531,14 @@ impl Device {
         if !self.timers_active(peer) {
             return;
         }
-        let mut timers = peer.timers.lock();
-        if timers.is_pending(TimerKind::SendKeepalive) {
-            timers.need_another_keepalive = true;
-        } else {
-            let deadline = now + timings.send_keepalive(rng);
-            timers.arm(TimerKind::SendKeepalive, deadline);
-        }
+        peer.with_timers(|timers| {
+            if timers.is_pending(TimerKind::SendKeepalive) {
+                timers.need_another_keepalive = true;
+            } else {
+                let deadline = now + timings.send_keepalive(rng);
+                timers.arm(TimerKind::SendKeepalive, deadline);
+            }
+        });
     }
 
     fn timers_handshake_initiated<R: RngCore>(
@@ -1517,30 +1550,29 @@ impl Device {
     ) {
         if self.timers_active(peer) {
             let deadline = now + timings.retransmit_handshake(rng);
-            peer.timers
-                .lock()
-                .arm(TimerKind::RetransmitHandshake, deadline);
+            peer.with_timers(|timers| timers.arm(TimerKind::RetransmitHandshake, deadline));
         }
     }
 
     fn timers_handshake_complete(&self, peer: &Peer) {
         if self.timers_active(peer) {
-            peer.timers.lock().disarm(TimerKind::RetransmitHandshake);
+            peer.with_timers(|timers| timers.disarm(TimerKind::RetransmitHandshake));
         }
-        {
-            let mut timers = peer.timers.lock();
+        peer.with_timers(|timers| {
             timers.handshake_attempts = 0;
             timers.sent_last_minute_handshake = false;
-        }
+        });
         peer.mark_handshake_complete(SystemTime::now());
     }
 
     fn timers_session_derived(&self, peer: &Peer, timings: &Timings, now: Instant) {
         if self.timers_active(peer) {
-            peer.timers.lock().arm(
-                TimerKind::ZeroKeyMaterial,
-                now + timings.keychain_expire() * 3,
-            );
+            peer.with_timers(|timers| {
+                timers.arm(
+                    TimerKind::ZeroKeyMaterial,
+                    now + timings.keychain_expire() * 3,
+                );
+            });
         }
     }
 

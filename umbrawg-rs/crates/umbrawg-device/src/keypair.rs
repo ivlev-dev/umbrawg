@@ -242,12 +242,15 @@ impl Keypairs {
         removed
     }
 
-    pub fn received_with(&mut self, keypair: &Arc<Keypair>) -> Option<RemovedIndexes> {
-        let matches = self
-            .next
+    #[must_use]
+    pub fn is_next(&self, keypair: &Arc<Keypair>) -> bool {
+        self.next
             .as_ref()
-            .is_some_and(|next| Arc::ptr_eq(next, keypair));
-        if !matches {
+            .is_some_and(|next| Arc::ptr_eq(next, keypair))
+    }
+
+    pub fn received_with(&mut self, keypair: &Arc<Keypair>) -> Option<RemovedIndexes> {
+        if !self.is_next(keypair) {
             return None;
         }
         let mut removed = RemovedIndexes::new();

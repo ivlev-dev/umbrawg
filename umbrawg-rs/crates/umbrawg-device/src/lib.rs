@@ -19,7 +19,7 @@ pub mod timers;
 
 pub use allowedips::{AllowedIp, AllowedIpEntry, AllowedIps, PeerId};
 pub use buffer::{Buffer, BufferPool, DEFAULT_BUFFER_SIZE};
-pub use device::{Device, DeviceConfig, SendOutcome, SentBatch, TimerEvent};
+pub use device::{Device, DeviceConfig, IncomingSnapshot, SendOutcome, SentBatch, TimerEvent};
 pub use error::{DeviceError, Result};
 pub use gso::{BatchLayout, GroSegments, GsoGroup, MAX_GSO_GROUPS, MAX_GSO_SEGMENTS};
 pub use index::{IndexEntry, IndexTable};

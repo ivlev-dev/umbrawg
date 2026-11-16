@@ -869,3 +869,55 @@ fn send_batch_without_data_is_a_noop() {
     assert!(sent.layout.is_empty());
     assert!(pair.io_a.take_sent().is_empty());
 }
+
+#[test]
+fn for_each_peer_visits_every_peer() {
+    let a = device(1, ObfParams::default());
+    let mut expected: Vec<PublicKey> = Vec::new();
+    for byte in 1..4u8 {
+        let config = PeerConfig::new(PublicKey::from_bytes([byte; 32]));
+        expected.push(a.add_peer(config).unwrap().public_key());
+    }
+    expected.sort_by_key(PublicKey::to_bytes);
+
+    let mut visited = Vec::new();
+    a.for_each_peer(|peer| visited.push(peer.public_key()));
+    visited.sort_by_key(PublicKey::to_bytes);
+    assert_eq!(visited, expected);
+
+    let peers: Vec<PublicKey> = a.peers().iter().map(|peer| peer.public_key()).collect();
+    assert_eq!(peers, expected);
+}
+
+#[test]
+fn incoming_snapshot_matches_handle_incoming() {
+    let a = device(1, ObfParams::default());
+    let snapshot = a.incoming_snapshot();
+    let source: SocketAddr = "127.0.0.1:1000".parse().unwrap();
+    let packets = [
+        ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"snapshot"),
+        vec![0u8; 32],
+        vec![0xff; 148],
+    ];
+    for packet in packets {
+        let mut io = MemoryIo::new();
+        let mut rng = TestRng::new(3);
+        let mut scratch = vec![0u8; 65_535];
+        let mut ctx = IoContext::new(&mut rng, Instant::now(), &mut scratch, &mut io);
+        let mut with_snapshot = packet.clone();
+        let from_snapshot = a
+            .handle_incoming_with(
+                &mut with_snapshot,
+                IncomingMeta::new(source, None),
+                &snapshot,
+                &mut ctx,
+            )
+            .unwrap();
+        let mut plain = packet.clone();
+        let outcome = a
+            .handle_incoming(&mut plain, IncomingMeta::new(source, None), &mut ctx)
+            .unwrap();
+        assert_eq!(from_snapshot, outcome);
+        assert_eq!(from_snapshot, IncomingOutcome::Dropped);
+    }
+}
