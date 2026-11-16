@@ -15,7 +15,16 @@ use super::{
         SOCKET_ADDR_V6_LEN,
     },
 };
-use crate::UmbrawgAllowedIp;
+use crate::{
+    constants::{
+        UWGPEER_A_ADVANCED_SECURITY, UWGPEER_A_ALLOWEDIPS, UWGPEER_A_ENDPOINT,
+        UWGPEER_A_FLAGS, UWGPEER_A_LAST_HANDSHAKE_TIME,
+        UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL, UWGPEER_A_PRESHARED_KEY,
+        UWGPEER_A_PROTOCOL_VERSION, UWGPEER_A_PUBLIC_KEY, UWGPEER_A_RX_BYTES,
+        UWGPEER_A_TX_BYTES,
+    },
+    UmbrawgAllowedIp,
+};
 
 pub(crate) struct UmbrawgPeers(pub(crate) Vec<UmbrawgPeer>);
 
@@ -42,6 +51,27 @@ impl std::ops::Deref for UmbrawgPeers {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UmbrawgPeer(pub Vec<UmbrawgPeerAttribute>);
 
+impl UmbrawgPeer {
+    /// Length of the emitted attribute list without the enclosing header.
+    pub(crate) fn attributes_len(&self) -> usize {
+        self.0
+            .iter()
+            .filter(|attr| !is_omitted(attr))
+            .map(|attr| attr.buffer_len())
+            .sum()
+    }
+
+    /// Emits the attribute list without the enclosing header.
+    pub(crate) fn emit_attributes(&self, buffer: &mut [u8]) {
+        let mut offset = 0;
+        for attr in self.0.iter().filter(|attr| !is_omitted(attr)) {
+            let len = attr.buffer_len();
+            attr.emit(&mut buffer[offset..offset + len]);
+            offset += len;
+        }
+    }
+}
+
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>> for UmbrawgPeer {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let mut ret = Vec::new();
@@ -61,12 +91,16 @@ impl Nla for UmbrawgPeer {
     }
 
     fn value_len(&self) -> usize {
-        self.0.as_slice().buffer_len()
+        self.attributes_len()
     }
 
     fn emit_value(&self, buffer: &mut [u8]) {
-        self.0.as_slice().emit(buffer)
+        self.emit_attributes(buffer);
     }
+}
+
+fn is_omitted(attr: &UmbrawgPeerAttribute) -> bool {
+    matches!(attr, UmbrawgPeerAttribute::AdvancedSecurity(false))
 }
 
 impl std::ops::Deref for UmbrawgPeer {
@@ -120,17 +154,6 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
 const NOISE_PUBLIC_KEY_LEN: usize = 32;
 const NOISE_SYMMETRIC_KEY_LEN: usize = 32;
 
-const UWGPEER_A_PUBLIC_KEY: u16 = 1;
-const UWGPEER_A_PRESHARED_KEY: u16 = 2;
-const UWGPEER_A_FLAGS: u16 = 3;
-const UWGPEER_A_ENDPOINT: u16 = 4;
-const UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL: u16 = 5;
-const UWGPEER_A_LAST_HANDSHAKE_TIME: u16 = 6;
-const UWGPEER_A_RX_BYTES: u16 = 7;
-const UWGPEER_A_TX_BYTES: u16 = 8;
-const UWGPEER_A_ALLOWEDIPS: u16 = 9;
-const UWGPEER_A_PROTOCOL_VERSION: u16 = 10;
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UmbrawgPeerAttribute {
@@ -155,6 +178,15 @@ pub enum UmbrawgPeerAttribute {
     AllowedIps(Vec<UmbrawgAllowedIp>),
     ProtocolVersion(u32),
     Flags(u32),
+    /// `UWGPEER_A_ADVANCED_SECURITY`: a presence-only `NLA_FLAG` requesting
+    /// UmbraWG advanced security for the peer.
+    ///
+    /// The attribute carries no payload; parsing always yields `true`. A
+    /// `false` value is never emitted inside a [`UmbrawgPeer`]. The kernel
+    /// reports the setting in
+    /// [`Flags`](Self::Flags) via
+    /// [`UWGPEER_F_HAS_ADVANCED_SECURITY`](crate::constants::UWGPEER_F_HAS_ADVANCED_SECURITY).
+    AdvancedSecurity(bool),
     Other(DefaultNla),
 }
 
@@ -175,6 +207,7 @@ impl Nla for UmbrawgPeerAttribute {
             Self::AllowedIps(v) => v.as_slice().buffer_len(),
             Self::ProtocolVersion(v) => size_of_val(v),
             Self::Flags(v) => size_of_val(v),
+            Self::AdvancedSecurity(_) => 0,
             Self::Other(v) => v.value_len(),
         }
     }
@@ -194,6 +227,7 @@ impl Nla for UmbrawgPeerAttribute {
             Self::AllowedIps(_) => UWGPEER_A_ALLOWEDIPS | NLA_F_NESTED,
             Self::ProtocolVersion(_) => UWGPEER_A_PROTOCOL_VERSION,
             Self::Flags(_) => UWGPEER_A_FLAGS,
+            Self::AdvancedSecurity(_) => UWGPEER_A_ADVANCED_SECURITY,
             Self::Other(v) => v.kind(),
         }
     }
@@ -211,6 +245,7 @@ impl Nla for UmbrawgPeerAttribute {
             Self::AllowedIps(v) => v.as_slice().emit(buffer),
             Self::ProtocolVersion(v) => emit_u32(buffer, *v).unwrap(),
             Self::Flags(v) => emit_u32(buffer, *v).unwrap(),
+            Self::AdvancedSecurity(_) => {}
             Self::Other(v) => v.emit_value(buffer),
         }
     }
@@ -289,6 +324,7 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             UWGPEER_A_FLAGS => Self::Flags(
                 parse_u32(payload).context("invalid UWGPEER_A_FLAGS value")?,
             ),
+            UWGPEER_A_ADVANCED_SECURITY => Self::AdvancedSecurity(true),
             kind => Self::Other(
                 DefaultNla::parse(buf)
                     .context(format!("unknown NLA type {kind}"))?,

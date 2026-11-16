@@ -3,13 +3,15 @@
 use std::net::IpAddr;
 
 use netlink_packet_core::{
-    emit_u16, parse_ip, parse_u16, DecodeError, DefaultNla, Emitable,
-    ErrorContext, Nla, NlaBuffer, NlasIterator, Parseable, NLA_F_NESTED,
+    emit_u16, emit_u32, parse_ip, parse_u16, parse_u32, DecodeError,
+    DefaultNla, Emitable, ErrorContext, Nla, NlaBuffer, NlasIterator,
+    Parseable, NLA_F_NESTED,
 };
 
-const UWGALLOWEDIP_A_FAMILY: u16 = 1;
-const UWGALLOWEDIP_A_IPADDR: u16 = 2;
-const UWGALLOWEDIP_A_CIDR_MASK: u16 = 3;
+use crate::constants::{
+    UWGALLOWEDIP_A_CIDR_MASK, UWGALLOWEDIP_A_FAMILY, UWGALLOWEDIP_A_FLAGS,
+    UWGALLOWEDIP_A_IPADDR,
+};
 
 pub(crate) struct UmbrawgAllowedIps(pub(crate) Vec<UmbrawgAllowedIp>);
 
@@ -112,6 +114,13 @@ pub enum UmbrawgAllowedIpAttr {
     Family(UmbrawgAddressFamily),
     IpAddr(IpAddr),
     Cidr(u8),
+    /// `UWGALLOWEDIP_A_FLAGS`: `0` or
+    /// [`UWGALLOWEDIP_F_REMOVE_ME`](crate::constants::UWGALLOWEDIP_F_REMOVE_ME).
+    ///
+    /// Only meaningful in `UWG_CMD_SET_DEVICE` messages. Removing an address
+    /// requires `Family`, `IpAddr`, `Cidr` and this attribute; without the
+    /// flag the address is added if absent.
+    Flags(u32),
     Other(DefaultNla),
 }
 
@@ -124,6 +133,7 @@ impl Nla for UmbrawgAllowedIpAttr {
                 IpAddr::V6(_) => 16,
             },
             Self::Cidr(_) => 1,
+            Self::Flags(_) => 4,
             Self::Other(nla) => nla.value_len(),
         }
     }
@@ -133,6 +143,7 @@ impl Nla for UmbrawgAllowedIpAttr {
             Self::Family(_) => UWGALLOWEDIP_A_FAMILY,
             Self::IpAddr(_) => UWGALLOWEDIP_A_IPADDR,
             Self::Cidr(_) => UWGALLOWEDIP_A_CIDR_MASK,
+            Self::Flags(_) => UWGALLOWEDIP_A_FLAGS,
             Self::Other(nla) => nla.kind(),
         }
     }
@@ -145,6 +156,7 @@ impl Nla for UmbrawgAllowedIpAttr {
                 IpAddr::V6(ip) => buffer.copy_from_slice(&ip.octets()),
             },
             Self::Cidr(v) => buffer[0] = *v,
+            Self::Flags(v) => emit_u32(buffer, *v).unwrap(),
             Self::Other(nla) => nla.emit_value(buffer),
         }
     }
@@ -166,6 +178,10 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                     .context("invalid UWGALLOWEDIP_A_IPADDR value")?,
             ),
             UWGALLOWEDIP_A_CIDR_MASK => Self::Cidr(payload[0]),
+            UWGALLOWEDIP_A_FLAGS => Self::Flags(
+                parse_u32(payload)
+                    .context("invalid UWGALLOWEDIP_A_FLAGS value")?,
+            ),
             kind => Self::Other(
                 DefaultNla::parse(buf)
                     .context(format!("unknown NLA type {kind}"))?,

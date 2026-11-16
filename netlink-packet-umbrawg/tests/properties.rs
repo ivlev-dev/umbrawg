@@ -7,6 +7,7 @@ use std::net::{
 use netlink_packet_core::{Emitable, ParseableParametrized};
 use netlink_packet_generic::GenlHeader;
 use netlink_packet_umbrawg::{
+    constants::{UWGALLOWEDIP_F_REMOVE_ME, UWGPEER_F_HAS_ADVANCED_SECURITY},
     range::{u32_range_from_string, u32_range_pack, u32_range_unpack},
     UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
     UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
@@ -81,6 +82,7 @@ fn arb_allowed_ip_attr() -> impl Strategy<Value = UmbrawgAllowedIpAttr> {
         arb_addr_family().prop_map(UmbrawgAllowedIpAttr::Family),
         arb_ipaddr().prop_map(UmbrawgAllowedIpAttr::IpAddr),
         any::<u8>().prop_map(UmbrawgAllowedIpAttr::Cidr),
+        any::<u32>().prop_map(UmbrawgAllowedIpAttr::Flags),
     ]
 }
 
@@ -114,6 +116,7 @@ fn arb_peer_attr() -> impl Strategy<Value = UmbrawgPeerAttribute> {
             .prop_map(UmbrawgPeerAttribute::AllowedIps),
         any::<u32>().prop_map(UmbrawgPeerAttribute::ProtocolVersion),
         any::<u32>().prop_map(UmbrawgPeerAttribute::Flags),
+        Just(true).prop_map(UmbrawgPeerAttribute::AdvancedSecurity),
     ]
 }
 
@@ -159,6 +162,7 @@ fn arb_attr() -> impl Strategy<Value = UmbrawgAttribute> {
         any::<u32>().prop_map(UmbrawgAttribute::MaxHandshakeAttempts),
         any::<bool>().prop_map(UmbrawgAttribute::RandomTrailers),
         any::<bool>().prop_map(UmbrawgAttribute::DisableCookies),
+        arb_peer().prop_map(UmbrawgAttribute::Peer),
     ]
 }
 
@@ -167,8 +171,9 @@ fn arb_msg() -> impl Strategy<Value = UmbrawgMessage> {
         prop_oneof![
             Just(UmbrawgCmd::GetDevice),
             Just(UmbrawgCmd::SetDevice),
+            Just(UmbrawgCmd::UnknownPeer),
             any::<u8>()
-                .prop_filter("not 0/1", |v| *v != 0 && *v != 1)
+                .prop_filter("not 0/1/2", |v| *v > 2)
                 .prop_map(UmbrawgCmd::Other)
         ],
         prop::collection::vec(arb_attr(), 0..8),
@@ -273,6 +278,49 @@ proptest! {
         // from_string roundtrip for lo..hi when lo<=hi
         let spec = format!("{a}-{b}");
         prop_assert_eq!(u32_range_from_string(&spec), Some(u32_range_pack(a, b)));
+    }
+
+    #[test]
+    fn prop_flags_and_command_roundtrip(
+        cmd in 0u8..3,
+        peer_flags in any::<u32>(),
+        remove_allowed_ip in any::<bool>(),
+    ) {
+        let allowed_ip_flags = if remove_allowed_ip {
+            UWGALLOWEDIP_F_REMOVE_ME
+        } else {
+            0
+        };
+        let msg = UmbrawgMessage {
+            cmd: UmbrawgCmd::from(cmd),
+            attributes: vec![
+                UmbrawgAttribute::Peer(UmbrawgPeer(vec![
+                    UmbrawgPeerAttribute::PublicKey([7u8; 32]),
+                    UmbrawgPeerAttribute::Flags(
+                        peer_flags | UWGPEER_F_HAS_ADVANCED_SECURITY,
+                    ),
+                    UmbrawgPeerAttribute::AdvancedSecurity(true),
+                ])),
+                UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+                    UmbrawgPeerAttribute::PublicKey([8u8; 32]),
+                    UmbrawgPeerAttribute::AllowedIps(vec![UmbrawgAllowedIp(
+                        vec![
+                            UmbrawgAllowedIpAttr::Family(
+                                UmbrawgAddressFamily::Ipv4,
+                            ),
+                            UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(
+                                Ipv4Addr::new(10, 0, 0, 9),
+                            )),
+                            UmbrawgAllowedIpAttr::Cidr(32),
+                            UmbrawgAllowedIpAttr::Flags(allowed_ip_flags),
+                        ],
+                    )]),
+                ])]),
+            ],
+        };
+
+        prop_assert_eq!(u8::from(UmbrawgCmd::from(cmd)), cmd);
+        prop_assert_eq!(roundtrip_msg(msg.clone()), msg);
     }
 }
 

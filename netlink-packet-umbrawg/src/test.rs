@@ -560,3 +560,200 @@ fn test_keepalive_range_roundtrip() {
 
     assert_eq!(msg, roundtrip_msg(msg.clone()));
 }
+
+#[test]
+fn test_peer_advanced_security_roundtrip() {
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([9u8; 32]),
+            UmbrawgPeerAttribute::AdvancedSecurity(true),
+        ])])],
+    };
+
+    assert_eq!(msg, roundtrip_msg(msg.clone()));
+}
+
+#[test]
+fn test_peer_advanced_security_wire_format() {
+    use netlink_packet_core::NlaBuffer;
+
+    let attr = UmbrawgPeerAttribute::AdvancedSecurity(true);
+    let mut buf = vec![0xff; attr.buffer_len()];
+    attr.emit(&mut buf);
+    // NLA_FLAG: four-byte header, kind 11, empty payload.
+    assert_eq!(buf, vec![0x04, 0x00, 0x0b, 0x00]);
+
+    let parsed = UmbrawgPeerAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(parsed, UmbrawgPeerAttribute::AdvancedSecurity(true));
+}
+
+#[test]
+fn test_peer_advanced_security_false_is_not_emitted() {
+    let with_flag = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([9u8; 32]),
+            UmbrawgPeerAttribute::AdvancedSecurity(false),
+        ])])],
+    };
+    let without_flag = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([9u8; 32]),
+        ])])],
+    };
+
+    let mut buffer = vec![0; with_flag.buffer_len()];
+    with_flag.emit(&mut buffer);
+    assert!(!buffer.windows(4).any(|w| w == [0x04, 0x00, 0x0b, 0x00]));
+
+    let mut expected = vec![0; without_flag.buffer_len()];
+    without_flag.emit(&mut expected);
+    assert_eq!(buffer, expected);
+}
+
+#[test]
+fn test_parse_get_device_reply_with_has_advanced_security() {
+    let mut peer = Vec::new();
+    // UWGPEER_A_FLAGS (kind 3) = UWGPEER_F_HAS_ADVANCED_SECURITY (8)
+    peer.extend_from_slice(&[0x08, 0x00, 0x03, 0x00]);
+    peer.extend_from_slice(&8u32.to_le_bytes());
+    // UWGPEER_A_ADVANCED_SECURITY (kind 11), NLA_FLAG with empty payload
+    peer.extend_from_slice(&[0x04, 0x00, 0x0b, 0x00]);
+
+    // Peer element nested with type 0, as written by the kernel.
+    let mut peers = Vec::new();
+    peers.extend_from_slice(&((4 + peer.len()) as u16).to_le_bytes());
+    peers.extend_from_slice(&0u16.to_le_bytes());
+    peers.extend_from_slice(&peer);
+
+    // UWGDEVICE_A_PEERS (kind 8) nested.
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&((4 + peers.len()) as u16).to_le_bytes());
+    raw.extend_from_slice(&(8u16 | 0x8000).to_le_bytes());
+    raw.extend_from_slice(&peers);
+
+    let header = GenlHeader {
+        cmd: UmbrawgCmd::GetDevice.into(),
+        version: 3,
+    };
+    let parsed = UmbrawgMessage::parse_with_param(&raw, header).unwrap();
+    assert_eq!(
+        parsed,
+        UmbrawgMessage {
+            cmd: UmbrawgCmd::GetDevice,
+            attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::Flags(
+                    crate::constants::UWGPEER_F_HAS_ADVANCED_SECURITY
+                ),
+                UmbrawgPeerAttribute::AdvancedSecurity(true),
+            ])])],
+        }
+    );
+}
+
+#[test]
+fn test_allowed_ip_flags_remove_me_roundtrip() {
+    use netlink_packet_core::NlaBuffer;
+
+    let attr =
+        UmbrawgAllowedIpAttr::Flags(crate::constants::UWGALLOWEDIP_F_REMOVE_ME);
+    let mut buf = vec![0xff; attr.buffer_len()];
+    attr.emit(&mut buf);
+    // NLA header: len 8, kind 4, u32 little-endian 1.
+    assert_eq!(buf, vec![0x08, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00]);
+
+    let parsed = UmbrawgAllowedIpAttr::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(
+        parsed,
+        UmbrawgAllowedIpAttr::Flags(crate::constants::UWGALLOWEDIP_F_REMOVE_ME)
+    );
+
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([5u8; 32]),
+            UmbrawgPeerAttribute::AllowedIps(vec![UmbrawgAllowedIp(vec![
+                UmbrawgAllowedIpAttr::Family(UmbrawgAddressFamily::Ipv4),
+                UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(Ipv4Addr::new(
+                    10, 0, 0, 1,
+                ))),
+                UmbrawgAllowedIpAttr::Cidr(32),
+                UmbrawgAllowedIpAttr::Flags(
+                    crate::constants::UWGALLOWEDIP_F_REMOVE_ME,
+                ),
+            ])]),
+        ])])],
+    };
+
+    assert_eq!(msg, roundtrip_msg(msg.clone()));
+}
+
+#[test]
+fn test_unknown_peer_parse_and_emit() {
+    fn nla(kind: u16, payload: &[u8]) -> Vec<u8> {
+        let mut out = ((4 + payload.len()) as u16).to_le_bytes().to_vec();
+        out.extend_from_slice(&kind.to_le_bytes());
+        out.extend_from_slice(payload);
+        while !out.len().is_multiple_of(4) {
+            out.push(0);
+        }
+        out
+    }
+
+    let ifindex: u32 = 7;
+    let peer_key = [3u8; 32];
+    let sockaddr: Vec<u8> =
+        vec![0x02, 0x00, 0xca, 0x6c, 10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    let mut peer = Vec::new();
+    peer.extend_from_slice(&nla(1, &peer_key));
+    peer.extend_from_slice(&nla(4, &sockaddr));
+    peer.extend_from_slice(&nla(11, &[]));
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&nla(1, &ifindex.to_le_bytes()));
+    raw.extend_from_slice(&nla(2, b"uwg0\0"));
+    raw.extend_from_slice(&nla(0x8012, &peer));
+
+    let expected = UmbrawgMessage {
+        cmd: UmbrawgCmd::UnknownPeer,
+        attributes: vec![
+            UmbrawgAttribute::IfIndex(7),
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::Peer(UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PublicKey(peer_key),
+                UmbrawgPeerAttribute::Endpoint(
+                    "10.0.0.1:51820".parse().unwrap(),
+                ),
+                UmbrawgPeerAttribute::AdvancedSecurity(true),
+            ])),
+        ],
+    };
+
+    let header = GenlHeader {
+        cmd: UmbrawgCmd::UnknownPeer.into(),
+        version: 3,
+    };
+    assert_eq!(
+        expected,
+        UmbrawgMessage::parse_with_param(&raw, header).unwrap()
+    );
+
+    let mut buffer = vec![0; expected.buffer_len()];
+    expected.emit(&mut buffer);
+    assert_eq!(buffer, raw);
+}
+
+#[test]
+fn test_unknown_peer_command_conversion() {
+    assert_eq!(
+        u8::from(UmbrawgCmd::UnknownPeer),
+        crate::constants::UWG_CMD_UNKNOWN_PEER
+    );
+    assert_eq!(u8::from(UmbrawgCmd::UnknownPeer), 2);
+    assert_eq!(UmbrawgCmd::from(2), UmbrawgCmd::UnknownPeer);
+    assert_eq!(UmbrawgCmd::from(0), UmbrawgCmd::GetDevice);
+    assert_eq!(UmbrawgCmd::from(1), UmbrawgCmd::SetDevice);
+}

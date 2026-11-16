@@ -9,9 +9,7 @@ use netlink_packet_core::{
 };
 
 use super::peer::UmbrawgPeers;
-use crate::{range::u32_range_to_string, UmbrawgPeer};
-
-const UWG_KEY_LEN: usize = 32;
+use crate::{constants::UWG_KEY_LEN, range::u32_range_to_string, UmbrawgPeer};
 
 const UWGDEVICE_A_IFINDEX: u16 = 1;
 const UWGDEVICE_A_IFNAME: u16 = 2;
@@ -103,6 +101,11 @@ pub enum UmbrawgAttribute {
     Peers(Vec<UmbrawgPeer>),
     Flags(u32),
     // Umbra attributes
+    /// `UWGDEVICE_A_PEER` (`NLA_NESTED`): a single peer.
+    ///
+    /// Used by `UWG_CMD_UNKNOWN_PEER` notifications. The peer attributes are
+    /// nested directly, without the extra nesting level used by the
+    /// [`Peers`](Self::Peers) list.
     Peer(UmbrawgPeer),
     JC(u16),   // JunkCount
     Jmin(u16), // JunkPacketMinSize
@@ -186,7 +189,7 @@ impl Nla for UmbrawgAttribute {
             | Self::H4Range(_) => 8,
             Self::RandomTrailers(_) | Self::DisableCookies(_) => 1,
             // Umbra Specific Fields
-            Self::Peer(v) => v.buffer_len(),
+            Self::Peer(v) => v.attributes_len(),
             Self::JC(_)
             | Self::Jmax(_)
             | Self::Jmin(_)
@@ -265,7 +268,7 @@ impl Nla for UmbrawgAttribute {
             Self::Peers(v) => v.as_slice().emit(buffer),
             Self::Flags(v) => emit_u32(buffer, *v).unwrap(),
             // Umbra Specific
-            Self::Peer(v) => v.emit(buffer),
+            Self::Peer(v) => v.emit_attributes(buffer),
             Self::H1Range(v)
             | Self::H2Range(v)
             | Self::H3Range(v)

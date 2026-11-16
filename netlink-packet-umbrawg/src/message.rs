@@ -5,10 +5,10 @@ use netlink_packet_core::{
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 
-use crate::UmbrawgAttribute;
-
-const UWG_CMD_GET_DEVICE: u8 = 0;
-const UWG_CMD_SET_DEVICE: u8 = 1;
+use crate::{
+    constants::{UWG_CMD_GET_DEVICE, UWG_CMD_SET_DEVICE, UWG_CMD_UNKNOWN_PEER},
+    UmbrawgAttribute,
+};
 
 const UWG_FAMILY_NAME: &str = "umbrawg";
 const UWG_FAMILY_VERSION: u8 = 2;
@@ -20,8 +20,16 @@ const UWG_FAMILY_VERSION: u8 = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UmbrawgCmd {
+    /// Dumps the state of a device.
     GetDevice,
+    /// Modifies the state of a device.
     SetDevice,
+    /// Notification about an initiation message from an unknown peer.
+    ///
+    /// The kernel sends it on the `auth` multicast group; the message
+    /// carries [`UmbrawgAttribute::Peer`] with the public key, endpoint and
+    /// advanced-security flag of the unknown peer.
+    UnknownPeer,
     Other(u8),
 }
 
@@ -30,6 +38,7 @@ impl From<UmbrawgCmd> for u8 {
         match cmd {
             UmbrawgCmd::GetDevice => UWG_CMD_GET_DEVICE,
             UmbrawgCmd::SetDevice => UWG_CMD_SET_DEVICE,
+            UmbrawgCmd::UnknownPeer => UWG_CMD_UNKNOWN_PEER,
             UmbrawgCmd::Other(d) => d,
         }
     }
@@ -40,6 +49,7 @@ impl From<u8> for UmbrawgCmd {
         match v {
             UWG_CMD_GET_DEVICE => Self::GetDevice,
             UWG_CMD_SET_DEVICE => Self::SetDevice,
+            UWG_CMD_UNKNOWN_PEER => Self::UnknownPeer,
             x => Self::Other(x),
         }
     }
