@@ -3,6 +3,7 @@ use crate::{CONFIG_DIR, CONFIG_SUFFIX};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
+use umbrawg_config::{is_dns_address, parse_bool_value, split_list_value, QuickKey};
 
 /// Parsed wg-quick configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -175,48 +176,8 @@ fn parse_into(config: &mut QuickConfig, text: &str) -> QuickResult<()> {
         }
 
         if interface_section {
-            if key.eq_ignore_ascii_case("Address") {
-                config
-                    .addresses
-                    .extend(split_value_tokens(value).map(ToOwned::to_owned));
-                continue;
-            }
-            if key.eq_ignore_ascii_case("MTU") {
-                config.mtu = non_empty(value);
-                continue;
-            }
-            if key.eq_ignore_ascii_case("DNS") {
-                for token in split_value_tokens(value) {
-                    if is_dns_address(token) {
-                        config.dns.push(token.to_string());
-                    } else {
-                        config.dns_search.push(token.to_string());
-                    }
-                }
-                continue;
-            }
-            if key.eq_ignore_ascii_case("Table") {
-                config.table = non_empty(value);
-                continue;
-            }
-            if key.eq_ignore_ascii_case("PreUp") {
-                config.pre_up.push(value.to_string());
-                continue;
-            }
-            if key.eq_ignore_ascii_case("PreDown") {
-                config.pre_down.push(value.to_string());
-                continue;
-            }
-            if key.eq_ignore_ascii_case("PostUp") {
-                config.post_up.push(value.to_string());
-                continue;
-            }
-            if key.eq_ignore_ascii_case("PostDown") {
-                config.post_down.push(value.to_string());
-                continue;
-            }
-            if key.eq_ignore_ascii_case("SaveConfig") {
-                config.save_config = parse_bool(value)?;
+            if let Some(quick) = QuickKey::parse(key) {
+                config.apply_quick_key(quick, value)?;
                 continue;
             }
         }
@@ -225,6 +186,31 @@ fn parse_into(config: &mut QuickConfig, text: &str) -> QuickResult<()> {
         config.wg_config.push('\n');
     }
     Ok(())
+}
+
+impl QuickConfig {
+    fn apply_quick_key(&mut self, key: QuickKey, value: &str) -> QuickResult<()> {
+        match key {
+            QuickKey::Address => self.addresses.extend(split_list_value(value)),
+            QuickKey::Dns => {
+                for token in split_list_value(value) {
+                    if is_dns_address(&token) {
+                        self.dns.push(token);
+                    } else {
+                        self.dns_search.push(token);
+                    }
+                }
+            }
+            QuickKey::Mtu => self.mtu = non_empty(value),
+            QuickKey::Table => self.table = non_empty(value),
+            QuickKey::PreUp => self.pre_up.push(value.to_string()),
+            QuickKey::PostUp => self.post_up.push(value.to_string()),
+            QuickKey::PreDown => self.pre_down.push(value.to_string()),
+            QuickKey::PostDown => self.post_down.push(value.to_string()),
+            QuickKey::SaveConfig => self.save_config = parse_save_config(value)?,
+        }
+        Ok(())
+    }
 }
 
 fn non_empty(value: &str) -> Option<String> {
@@ -250,30 +236,9 @@ fn trim_posix_space(value: &str) -> &str {
     })
 }
 
-fn split_value_tokens(value: &str) -> impl Iterator<Item = &str> {
-    value
-        .split([',', ' ', '\t', '\n'])
-        .filter(|token| !token.is_empty())
-}
-
-fn is_dns_address(token: &str) -> bool {
-    (!token.is_empty()
-        && token
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || byte == b'.'))
-        || token.contains(':')
-}
-
-fn parse_bool(value: &str) -> QuickResult<bool> {
-    if value.eq_ignore_ascii_case("true") {
-        Ok(true)
-    } else if value.eq_ignore_ascii_case("false") {
-        Ok(false)
-    } else {
-        Err(QuickError::die(format!(
-            "`{value}' is neither true nor false"
-        )))
-    }
+fn parse_save_config(value: &str) -> QuickResult<bool> {
+    parse_bool_value(value)
+        .map_err(|_| QuickError::die(format!("`{value}' is neither true nor false")))
 }
 
 #[cfg(test)]

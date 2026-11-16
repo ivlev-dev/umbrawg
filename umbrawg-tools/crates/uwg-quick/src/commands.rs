@@ -299,6 +299,16 @@ fn set_dns(
     runner: &dyn CommandRunner,
     state: &mut RunState,
 ) -> QuickResult<()> {
+    set_dns_with(config, runner, state, dns::APPLY_ATTEMPTS, dns::APPLY_DELAY)
+}
+
+fn set_dns_with(
+    config: &QuickConfig,
+    runner: &dyn CommandRunner,
+    state: &mut RunState,
+    attempts: usize,
+    delay: std::time::Duration,
+) -> QuickResult<()> {
     if config.dns.is_empty() {
         return Ok(());
     }
@@ -314,7 +324,7 @@ fn set_dns(
         ],
     )
     .stdin(payload);
-    runner.run_checked(&spec)?;
+    dns::apply_with_retries(attempts, delay, || runner.run_checked(&spec))?;
     state.have_set_dns = true;
     Ok(())
 }
@@ -1192,5 +1202,56 @@ AllowedIPs=10.0.0.0/24
         assert_eq!(parse_fwmark("51820"), Some(51820));
         assert_eq!(parse_fwmark("0xca6c"), Some(51820));
         assert_eq!(parse_fwmark("off"), None);
+    }
+
+    #[test]
+    fn dns_retries_until_resolvconf_succeeds() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config_with(
+            directory.path(),
+            "wg0.conf",
+            "[Interface]\nPrivateKey = abc=\nDNS = 1.1.1.1\n",
+        );
+        let runner = mock_from(|command, count| match command {
+            "resolvconf -a wg0 -m 0 -x" if count < 3 => (1, String::new()),
+            _ => (0, String::new()),
+        });
+        let mut state = RunState::default();
+
+        set_dns_with(&config, &runner, &mut state, 3, std::time::Duration::ZERO).unwrap();
+
+        assert!(state.have_set_dns);
+        assert_eq!(
+            runner
+                .call_strings()
+                .iter()
+                .filter(|call| call.starts_with("resolvconf -a "))
+                .count(),
+            3
+        );
+    }
+
+    #[test]
+    fn dns_reports_a_clear_error_after_all_attempts() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config_with(
+            directory.path(),
+            "wg0.conf",
+            "[Interface]\nPrivateKey = abc=\nDNS = 1.1.1.1\n",
+        );
+        let runner = mock_from(|command, _| match command {
+            "resolvconf -a wg0 -m 0 -x" => (2, String::new()),
+            _ => (0, String::new()),
+        });
+        let mut state = RunState::default();
+
+        let error = set_dns_with(&config, &runner, &mut state, 3, std::time::Duration::ZERO)
+            .expect_err("resolvconf keeps failing");
+
+        assert_eq!(
+            error.to_string(),
+            "Failed to apply DNS settings after 3 attempts: command `resolvconf` failed with status 2"
+        );
+        assert!(!state.have_set_dns);
     }
 }

@@ -1,3 +1,5 @@
+use umbrawg_config::{Document, Entry, Section, SectionKind};
+
 /// Values written above the `uwg showconf` output.
 pub struct SaveInputs<'a> {
     pub addresses: &'a [String],
@@ -13,51 +15,51 @@ pub struct SaveInputs<'a> {
 
 /// Build the quick-specific `[Interface]` block.
 pub fn build_saved_config(inputs: &SaveInputs<'_>) -> String {
-    let mut text = String::from("[Interface]\n");
+    let mut section = Section {
+        name: "Interface".to_owned(),
+        kind: SectionKind::Interface,
+        line: 0,
+        entries: Vec::new(),
+    };
     for address in inputs.addresses {
-        text.push_str("Address = ");
-        text.push_str(address);
-        text.push('\n');
+        push_entry(&mut section, "Address", address);
     }
     for server in inputs.dns {
-        text.push_str("DNS = ");
-        text.push_str(server);
-        text.push('\n');
+        push_entry(&mut section, "DNS", server);
     }
     if let Some(mtu) = inputs.mtu {
-        text.push_str("MTU = ");
-        text.push_str(mtu);
-        text.push('\n');
+        push_entry(&mut section, "MTU", mtu);
     }
     if let Some(table) = inputs.table {
-        text.push_str("Table = ");
-        text.push_str(table);
-        text.push('\n');
+        push_entry(&mut section, "Table", table);
     }
     if inputs.save_config {
-        text.push_str("SaveConfig = true\n");
+        push_entry(&mut section, "SaveConfig", "true");
     }
     for hook in inputs.pre_up {
-        text.push_str("PreUp = ");
-        text.push_str(hook);
-        text.push('\n');
+        push_entry(&mut section, "PreUp", hook);
     }
     for hook in inputs.post_up {
-        text.push_str("PostUp = ");
-        text.push_str(hook);
-        text.push('\n');
+        push_entry(&mut section, "PostUp", hook);
     }
     for hook in inputs.pre_down {
-        text.push_str("PreDown = ");
-        text.push_str(hook);
-        text.push('\n');
+        push_entry(&mut section, "PreDown", hook);
     }
     for hook in inputs.post_down {
-        text.push_str("PostDown = ");
-        text.push_str(hook);
-        text.push('\n');
+        push_entry(&mut section, "PostDown", hook);
     }
-    text
+    Document {
+        sections: vec![section],
+    }
+    .to_string()
+}
+
+fn push_entry(section: &mut Section, key: &str, value: &str) {
+    section.entries.push(Entry {
+        key: key.to_owned(),
+        value: value.to_owned(),
+        line: 0,
+    });
 }
 
 /// Replace the first `[Interface]\n` of `uwg showconf` with the quick block.
