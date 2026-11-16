@@ -1,0 +1,12 @@
+[package]
+name = "umbrawg-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+zeroize.workspace = true
+base64.workspace = true
+hex.workspace = true

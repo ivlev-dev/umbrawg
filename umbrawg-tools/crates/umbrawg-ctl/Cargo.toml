@@ -1,0 +1,19 @@
+[package]
+name = "umbrawg-ctl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+umbrawg-config.workspace = true
+netlink-packet-umbrawg.workspace = true
+netlink-packet-generic.workspace = true
+netlink-packet-core.workspace = true
+netlink-proto.workspace = true
+genetlink.workspace = true
+tokio.workspace = true
+futures.workspace = true
+thiserror.workspace = true
+log.workspace = true
+libc.workspace = true

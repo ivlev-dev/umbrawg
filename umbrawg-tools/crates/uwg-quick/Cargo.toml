@@ -1,0 +1,19 @@
+[package]
+name = "uwg-quick"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "uwg-quick"
+path = "src/main.rs"
+
+[dependencies]
+umbrawg-config.workspace = true
+umbrawg-ctl.workspace = true
+clap.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+libc.workspace = true
