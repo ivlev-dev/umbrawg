@@ -1,7 +1,7 @@
 //! UmbraWG UAPI server.
 //!
 //! The crate implements the WireGuard-compatible control protocol used by
-//! `uwg` and `amneziawg-go`:
+//! `uwg` and the Go daemon:
 //!
 //! * a Unix-domain listener at `/var/run/umbrawg/<iface>.sock` protected by
 //!   file permissions and `SO_PEERCRED`;

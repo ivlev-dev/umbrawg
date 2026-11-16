@@ -1,6 +1,6 @@
 //! Public data model shared with the device implementation.
 //!
-//! The types mirror the WireGuard/AmneziaWG UAPI contract but keep the Rust
+//! The types mirror the WireGuard/UmbraWG UAPI contract but keep the Rust
 //! control-plane representation strongly typed: keys are decoded once, ranges
 //! are checked while parsing, and endpoints are resolved to numeric socket
 //! addresses.

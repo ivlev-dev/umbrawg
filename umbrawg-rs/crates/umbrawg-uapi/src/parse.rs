@@ -1,6 +1,6 @@
 //! Parser for `set=1` requests.
 //!
-//! The parser accepts the Go/AmneziaWG textual protocol and converts it into a
+//! The parser accepts the Go/UmbraWG textual protocol and converts it into a
 //! [`SetRequest`]. Unknown keys, malformed numbers and malformed ranges are
 //! rejected with the same errno values as the Go implementation.
 

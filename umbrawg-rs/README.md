@@ -1,7 +1,7 @@
 # UmbraWG userspace (Rust)
 
 Userspace daemon for the UmbraWG protocol (WireGuard-compatible Noise IK with
-AmneziaWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
+UmbraWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
 
 ## Workspace
 
