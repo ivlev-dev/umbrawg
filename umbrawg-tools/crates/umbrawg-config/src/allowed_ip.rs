@@ -24,6 +24,33 @@ impl AllowedIp {
     pub const fn max_prefix_len(&self) -> u8 {
         max_prefix_len(self.address)
     }
+
+    /// Reports whether bits outside the prefix are set.
+    ///
+    /// The kernel silently masks such addresses; `uwg` warns about them the
+    /// same way the legacy `awg` implementation does.
+    pub fn has_host_bits(&self) -> bool {
+        match self.address {
+            IpAddr::V4(address) => u32::from(address) & !ipv4_mask(self.cidr) != 0,
+            IpAddr::V6(address) => u128::from(address) & !ipv6_mask(self.cidr) != 0,
+        }
+    }
+}
+
+const fn ipv4_mask(cidr: u8) -> u32 {
+    if cidr == 0 {
+        0
+    } else {
+        u32::MAX << (32 - cidr)
+    }
+}
+
+const fn ipv6_mask(cidr: u8) -> u128 {
+    if cidr == 0 {
+        0
+    } else {
+        u128::MAX << (128 - cidr)
+    }
 }
 
 impl fmt::Display for AllowedIp {
@@ -125,5 +152,19 @@ mod tests {
         assert!("10.0.0.0/".parse::<AllowedIp>().is_err());
         assert!("300.0.0.0/8".parse::<AllowedIp>().is_err());
         assert!("10.0.0.0/8/9".parse::<AllowedIp>().is_err());
+    }
+
+    #[test]
+    fn detects_host_bits() {
+        let clean = |value: &str| !value.parse::<AllowedIp>().expect("valid").has_host_bits();
+        assert!(clean("10.0.0.0/8"));
+        assert!(clean("10.1.2.3/32"));
+        assert!(clean("0.0.0.0/0"));
+        assert!(clean("fd00::/64"));
+        assert!(clean("::/0"));
+        let dirty = |value: &str| value.parse::<AllowedIp>().expect("valid").has_host_bits();
+        assert!(dirty("10.1.2.3/8"));
+        assert!(dirty("10.0.0.1/24"));
+        assert!(dirty("fd00::1/64"));
     }
 }

@@ -113,6 +113,60 @@ pub struct QuickConfig {
     pub save_config: Option<bool>,
 }
 
+/// Keys of the `[Interface]` section that only `uwg-quick` understands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuickKey {
+    Address,
+    Dns,
+    Mtu,
+    Table,
+    PreUp,
+    PostUp,
+    PreDown,
+    PostDown,
+    SaveConfig,
+}
+
+impl QuickKey {
+    /// Classifies a configuration key (case-insensitively).
+    pub fn parse(key: &str) -> Option<Self> {
+        if key.eq_ignore_ascii_case("Address") {
+            Some(Self::Address)
+        } else if key.eq_ignore_ascii_case("DNS") {
+            Some(Self::Dns)
+        } else if key.eq_ignore_ascii_case("MTU") {
+            Some(Self::Mtu)
+        } else if key.eq_ignore_ascii_case("Table") {
+            Some(Self::Table)
+        } else if key.eq_ignore_ascii_case("PreUp") {
+            Some(Self::PreUp)
+        } else if key.eq_ignore_ascii_case("PostUp") {
+            Some(Self::PostUp)
+        } else if key.eq_ignore_ascii_case("PreDown") {
+            Some(Self::PreDown)
+        } else if key.eq_ignore_ascii_case("PostDown") {
+            Some(Self::PostDown)
+        } else if key.eq_ignore_ascii_case("SaveConfig") {
+            Some(Self::SaveConfig)
+        } else {
+            None
+        }
+    }
+
+    /// Every quick key, in the order `uwg-quick save` writes them.
+    pub const ALL: [Self; 9] = [
+        Self::Address,
+        Self::Dns,
+        Self::Mtu,
+        Self::Table,
+        Self::SaveConfig,
+        Self::PreUp,
+        Self::PostUp,
+        Self::PreDown,
+        Self::PostDown,
+    ];
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeviceConfig {
     pub private_key: Option<Key>,
@@ -519,6 +573,19 @@ impl Config {
     pub fn to_ini(&self, include_quick: bool) -> String {
         self.to_document(include_quick).to_string()
     }
+
+    /// Allowed IPs whose host bits are not zero.
+    ///
+    /// The kernel masks them silently, so `uwg` only warns about them.
+    pub fn allowed_ips_with_host_bits(&self) -> Vec<AllowedIp> {
+        self.peers
+            .iter()
+            .filter_map(|peer| peer.allowed_ips.as_ref())
+            .flatten()
+            .filter(|allowed_ip| allowed_ip.has_host_bits())
+            .copied()
+            .collect()
+    }
 }
 
 impl DeviceConfig {
@@ -587,34 +654,33 @@ impl DeviceConfig {
                 self.obfuscation.disable_cookies =
                     Some(parse_bool_at(entry, "DisableCookies", &entry.value)?);
             }
-            "address" if options.allow_quick_keys => {
-                self.quick.address.extend(split_list(&entry.value));
-            }
-            "dns" if options.allow_quick_keys => {
-                self.quick.dns.extend(split_list(&entry.value));
-            }
-            "mtu" if options.allow_quick_keys => {
-                self.quick.mtu = Some(parse_u32_at(entry, "MTU", &entry.value)?);
-            }
-            "table" if options.allow_quick_keys => {
-                self.quick.table = Some(RoutingTable::parse(&entry.value)?);
-            }
-            "preup" if options.allow_quick_keys => self.quick.pre_up = Some(entry.value.clone()),
-            "postup" if options.allow_quick_keys => self.quick.post_up = Some(entry.value.clone()),
-            "predown" if options.allow_quick_keys => {
-                self.quick.pre_down = Some(entry.value.clone())
-            }
-            "postdown" if options.allow_quick_keys => {
-                self.quick.post_down = Some(entry.value.clone());
-            }
-            "saveconfig" if options.allow_quick_keys => {
+            _ => match QuickKey::parse(&entry.key) {
+                Some(quick) if options.allow_quick_keys => {
+                    self.apply_quick_entry(quick, entry)?;
+                }
+                _ => {
+                    return Err(Error::UnrecognizedKey {
+                        line: entry.line,
+                        key: entry.key.clone(),
+                    });
+                }
+            },
+        }
+        Ok(())
+    }
+
+    fn apply_quick_entry(&mut self, key: QuickKey, entry: &Entry) -> Result<(), Error> {
+        match key {
+            QuickKey::Address => self.quick.address.extend(split_list(&entry.value)),
+            QuickKey::Dns => self.quick.dns.extend(split_list(&entry.value)),
+            QuickKey::Mtu => self.quick.mtu = Some(parse_u32_at(entry, "MTU", &entry.value)?),
+            QuickKey::Table => self.quick.table = Some(RoutingTable::parse(&entry.value)?),
+            QuickKey::PreUp => self.quick.pre_up = Some(entry.value.clone()),
+            QuickKey::PostUp => self.quick.post_up = Some(entry.value.clone()),
+            QuickKey::PreDown => self.quick.pre_down = Some(entry.value.clone()),
+            QuickKey::PostDown => self.quick.post_down = Some(entry.value.clone()),
+            QuickKey::SaveConfig => {
                 self.quick.save_config = Some(parse_bool_at(entry, "SaveConfig", &entry.value)?);
-            }
-            _ => {
-                return Err(Error::UnrecognizedKey {
-                    line: entry.line,
-                    key: entry.key.clone(),
-                });
             }
         }
         Ok(())
@@ -838,6 +904,25 @@ fn split_list(value: &str) -> Vec<String> {
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
         .collect()
+}
+
+/// Splits a comma- or whitespace-separated list value (`Address`, `DNS`).
+pub fn split_list_value(value: &str) -> Vec<String> {
+    split_list(value)
+}
+
+/// Classifies a `DNS` entry as a nameserver instead of a search domain.
+pub fn is_dns_address(token: &str) -> bool {
+    (!token.is_empty()
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || byte == b'.'))
+        || token.contains(':')
+}
+
+/// Parses a boolean configuration value (`on`/`off`, `true`/`false`, `0`/`1`).
+pub fn parse_bool_value(value: &str) -> Result<bool, Error> {
+    parse_bool("value", value)
 }
 
 fn table_text(value: &RoutingTable) -> String {
@@ -1069,5 +1154,69 @@ PersistentKeepalive = 25
         assert_eq!(RoutingTable::Id(7).to_string(), "7");
         assert_eq!(RoutingTable::Name("main".to_owned()).to_string(), "main");
         assert!(RoutingTable::parse("").is_err());
+    }
+
+    #[test]
+    fn classifies_quick_keys() {
+        assert_eq!(QuickKey::parse("Address"), Some(QuickKey::Address));
+        assert_eq!(QuickKey::parse("dns"), Some(QuickKey::Dns));
+        assert_eq!(QuickKey::parse("MTU"), Some(QuickKey::Mtu));
+        assert_eq!(QuickKey::parse("table"), Some(QuickKey::Table));
+        assert_eq!(QuickKey::parse("PreUp"), Some(QuickKey::PreUp));
+        assert_eq!(QuickKey::parse("postup"), Some(QuickKey::PostUp));
+        assert_eq!(QuickKey::parse("PreDown"), Some(QuickKey::PreDown));
+        assert_eq!(QuickKey::parse("postdown"), Some(QuickKey::PostDown));
+        assert_eq!(QuickKey::parse("SaveConfig"), Some(QuickKey::SaveConfig));
+        assert_eq!(QuickKey::parse("PrivateKey"), None);
+        assert_eq!(QuickKey::parse("AllowedIPs"), None);
+        assert_eq!(QuickKey::ALL.len(), 9);
+    }
+
+    #[test]
+    fn splits_quick_list_values() {
+        assert_eq!(
+            split_list_value("10.0.0.2/24, fd00::2/64  ,10.0.0.3/32"),
+            ["10.0.0.2/24", "fd00::2/64", "10.0.0.3/32"]
+        );
+        assert!(split_list_value("  ").is_empty());
+    }
+
+    #[test]
+    fn classifies_dns_entries() {
+        assert!(is_dns_address("1.1.1.1"));
+        assert!(is_dns_address("fd00::1"));
+        assert!(!is_dns_address("example.com"));
+        assert!(!is_dns_address("10.0.0.0/8"));
+        assert!(!is_dns_address(""));
+    }
+
+    #[test]
+    fn parses_boolean_values() {
+        assert!(parse_bool_value("on").expect("valid"));
+        assert!(parse_bool_value("TRUE").expect("valid"));
+        assert!(!parse_bool_value("off").expect("valid"));
+        assert!(!parse_bool_value("0").expect("valid"));
+        assert!(parse_bool_value("2").expect("valid"));
+        assert!(parse_bool_value("yes").is_err());
+    }
+
+    #[test]
+    fn finds_allowed_ips_with_host_bits() {
+        let mut config = Config::default();
+        config.peers.push(PeerConfig {
+            public_key: Key::from_base64(PUBLIC).expect("valid"),
+            preshared_key: None,
+            allowed_ips: Some(vec![
+                "10.0.0.0/8".parse().expect("valid"),
+                "10.1.2.3/8".parse().expect("valid"),
+            ]),
+            endpoint: None,
+            persistent_keepalive: None,
+            remove: false,
+        });
+        let dirty = config.allowed_ips_with_host_bits();
+        assert_eq!(dirty.len(), 1);
+        assert_eq!(dirty[0].to_string(), "10.1.2.3/8");
+        assert!(Config::default().allowed_ips_with_host_bits().is_empty());
     }
 }
