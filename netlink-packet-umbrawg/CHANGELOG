@@ -1,4 +1,36 @@
 # Changelog
+## [Unreleased]
+### New features
+ - Full rustdoc coverage: every public type, variant, field and constant is
+   documented, examples cover device, peer, allowed IP and range helpers;
+   the crate denies missing documentation.
+ - `UmbrawgDeviceConfig`: a validated builder for `UWG_CMD_SET_DEVICE`
+   messages. It accepts the private key, listen port, fwmark, `Jc/Jmin/Jmax`,
+   `S1`..`S4`, `H1`..`H4` as `u32` ranges, `I1`..`I5`, the header protection
+   key, the `u16` tuning ranges and the UmbraWG 3.1 switches, and rejects
+   invalid interface selectors, key lengths, inverted ranges, overlapping
+   magic headers and unsupported flags.
+ - `UmbrawgPeerConfig`: a validated builder for peer entries, covering the
+   public and preshared keys, IPv4/IPv6 endpoints, persistent keepalive in
+   both wire formats, allowed IPs including `UWGALLOWEDIP_F_REMOVE_ME`, peer
+   flags and advanced security.
+ - `UmbrawgConfigError`: typed, non-panicking errors for the builders, with
+   `Display` and `std::error::Error` implementations.
+ - `UmbrawgAllowedIp::new/remove/from_spec` and read accessors
+   (`ip_addr`, `cidr`, `family`, `is_remove`); `FromStr` parses
+   `"addr/prefix"` specs.
+ - `range::u16_range_pack/unpack/to_string/from_string` for the packed
+   `u16`-range wire format of the UmbraWG 3.x tuning knobs.
+ - Conversions from messages and peers back into configurations:
+   `UmbrawgDeviceConfig::from_message`, `UmbrawgPeerConfig::from_peer` and
+   the corresponding `TryFrom` implementations.
+ - 42 new integration tests covering happy paths, range boundaries, invalid
+   key lengths, empty lists, IPv4/IPv6 and wire round trips.
+
+### Other
+ - Constants in `constants.rs` are documented with their attribute kinds and
+   wire types.
+
 ## [0.3.0] - 2026-11-16
 ### New features
  - Full numeric parity with the UmbraWG 3.1 UAPI (`uapi/umbrawg.h`):

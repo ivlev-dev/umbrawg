@@ -85,6 +85,39 @@ let msg = UmbrawgMessage {
 };
 ```
 
+### Validated builders
+
+`UmbrawgDeviceConfig` and `UmbrawgPeerConfig` assemble `UWG_CMD_SET_DEVICE`
+messages and validate values the way the kernel module does: key lengths,
+inverted or overlapping ranges, unsupported flags and the header-protection
+padding minimum. Errors are typed (`UmbrawgConfigError`), never panics.
+
+```rust
+use std::net::Ipv4Addr;
+
+use netlink_packet_umbrawg::{UmbrawgDeviceConfig, UmbrawgPeerConfig};
+
+let peer = UmbrawgPeerConfig::new([7u8; 32])
+    .endpoint_v4(Ipv4Addr::new(10, 0, 0, 1), 51820)
+    .persistent_keepalive(25)
+    .allowed_ip("0.0.0.0".parse()?, 0)?;
+
+let msg = UmbrawgDeviceConfig::by_name("uwg0")
+    .private_key([1u8; 32])
+    .listen_port(51820)
+    .junk(4, 40, 70)
+    .padding(12, 12, 12, 12)
+    .h1(61220074, 118999195)
+    .header_protection_key([5u8; 32])
+    .content_padding_addition(51, 197)
+    .random_trailers(true)
+    .peer(peer)
+    .build()?;
+```
+
+Configurations can be parsed back from messages with
+`UmbrawgDeviceConfig::from_message` / `UmbrawgPeerConfig::from_peer`.
+
 ### Full examples
 
 See the [`examples/`](./examples) directory for complete async programs using `genetlink` and `tokio`.
