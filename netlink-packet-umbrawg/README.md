@@ -164,6 +164,33 @@ integration job is skipped with an explicit warning instead of silently
 passing. The tests themselves also soft-skip when run manually without root,
 so use the preflight when you need a trustworthy result.
 
+## Packages and releases
+
+`.github/workflows/packaging.yml` builds the distribution artifacts:
+
+| Job | Image | Contents |
+|---|---|---|
+| `тесты` | `ubuntu-latest` | `cargo test --all-targets` on stable |
+| `arch` | `archlinux:latest` | `makepkg -f --noconfirm --nodeps` for `contrib/arch/rust-netlink-packet-umbrawg-git`, then checks `/usr/share/cargo/registry/netlink-packet-umbrawg-<version>/` (`Cargo.toml`, `src/*.rs`, `LICENSE`, `.cargo-checksum.json`) and compiles a probe crate **offline** from that directory through `[source.crates-io] replace-with` |
+| `crate` | `ubuntu-latest` | `cargo package --locked`, the `.crate` is uploaded as an artifact |
+| `publish dry-run` | `ubuntu-latest` | `cargo publish --dry-run --locked` — catches packaging mistakes without a registry token |
+| `релиз` | `ubuntu-latest` | on a `v*` tag: `.pkg.tar.zst`, `.crate` and `SHA256SUMS` in the GitHub Release |
+
+Release mechanics:
+
+- the tag has to match `v<version>` from `Cargo.toml` (`v0.3.0` right now);
+  otherwise the `версия` job fails before anything is built;
+- `workflow_dispatch` takes an optional `version` input for a manual dry check;
+- no secrets are required: nothing is pushed to crates.io or the AUR. Publishing
+  the crate stays manual (`cargo publish` with `CARGO_REGISTRY_TOKEN`), and the
+  AUR packages are still copied by hand;
+- `concurrency` is `packaging-<ref>` for builds (a manual run cancels the
+  previous one) and `release-<ref>` for the release job (`cancel-in-progress:
+  false`), so two runs never write the same release at once;
+- the stable Arch package `contrib/arch/rust-netlink-packet-umbrawg` is **not**
+  built in CI: `sha256sums` is the `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` placeholder
+  and has to be recalculated with `updpkgsums` after the first tag.
+
 ## License
 
 This project is licensed under the [MIT License](./LICENSE).
