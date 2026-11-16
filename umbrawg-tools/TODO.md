@@ -59,22 +59,22 @@ iperf3 на `IPERF_CPU`.
 ## Известные проблемы
 
 - `uwg-quick` пока частично дублирует парсинг конфига (переход на `umbrawg-config` сделан не везде).
-- Нет `addconf`/`syncconf`, позиционных `version`/`help`, ретраев DNS, предупреждения о
-  ненулевых host-битах `AllowedIPs`.
-- AdvancedSecurity пира не поддержан в клиенте (ядро 3.1 выставляет его само).
-- Пакеты (`debian/`, spec) переименованы, но собираются ещё не из Rust-дерева.
-- Нет CI-сборки под ARM.
+- AdvancedSecurity пира доступен только для чтения: ядро 3.1 выставляет флаг само.
+- Пакеты (`debian/`, spec) собираются из Rust-дерева; для source-upload в Debian
+  нужен vendor `netlink-packet-umbrawg`.
+- CI собирает ARM-тарболы, но не запускает тесты на ARM-хостах.
 - UDP-замеры упираются в cap `-b` — профиль замера требует доработки.
 - Go-эталон с обфускацией показывает аномально низкий TCP; сравнение нужно валидировать.
 
 ## Что делать дальше (по приоритету)
 
-1. Довести `uwg` до паритета с `legacy-c`: `addconf`, `syncconf`, DNS-ретраи, хост-биты.
-2. Убрать дублирование `uwg-quick` → `umbrawg-config`/`umbrawg-ctl`.
-3. Упаковка: spec/debian из `cargo build --release`, man-страницы, completions, systemd.
-4. CI: fmt, clippy, тесты, релизные сборки x86_64/aarch64/armv7.
-5. Интеграция стенда: матрица ≤ 30 минут, отчёты CSV → Markdown, полная матрица с потерями.
-6. Добавить interop-тест Rust↔ядро в CI (в netns, с автоскипом без root).
+1. Убрать дублирование `uwg-quick` → `umbrawg-config`/`umbrawg-ctl`.
+2. Интеграция стенда: матрица ≤ 30 минут, отчёты CSV → Markdown, полная матрица с потерями.
+3. Добавить interop-тест Rust↔ядро в CI (в netns, с автоскипом без root).
+4. Vendor `netlink-packet-umbrawg` для source-upload в Debian.
+
+Сделано в 0.2.0: упаковка Debian/RPM из `cargo build --release`, man-страницы,
+completions, systemd-юниты, CI fmt/clippy/test и релизные сборки x86_64/aarch64/armv7.
 
 ## Соглашения
 

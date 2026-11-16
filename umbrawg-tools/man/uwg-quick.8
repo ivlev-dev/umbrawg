@@ -1,0 +1,126 @@
+.TH UWG-QUICK 8 "2026-11-16" "UmbraWG" "System Administration"
+
+.SH NAME
+uwg-quick \- set up a UmbraWG interface from a configuration file
+
+.SH SYNOPSIS
+.B uwg-quick
+[ \fBup\fP | \fBdown\fP | \fBsave\fP | \fBstrip\fP ] [ \fICONFIG_FILE\fP | \fIINTERFACE\fP ]
+
+.SH DESCRIPTION
+.B uwg-quick
+is a wrapper around
+.BR uwg (8)
+that creates an interface, assigns addresses, adds routes, configures DNS and
+firewall rules, and executes hooks. It is a Linux port of the classic
+\fBwg-quick\fP script.
+
+\fICONFIG_FILE\fP is the path to a configuration file. If only
+\fIINTERFACE\fP is given, the configuration is read from
+.IR /etc/umbrawg/INTERFACE.conf .
+The file uses the format documented in
+.BR uwg (8),
+plus the extra \fB[Interface]\fP keys listed below.
+
+.SH COMMANDS
+.TP
+\fBup\fP \fI<interface>\fP
+Creates and configures the interface. If the kernel module is not loaded and
+a userspace implementation is available, the daemon named by
+.B UWG_QUICK_USERSPACE_IMPLEMENTATION
+(default \fBumbrawg\fP) is started with the interface name as its argument.
+.TP
+\fBdown\fP \fI<interface>\fP
+Removes firewall rules and routes, runs \fBPreDown\fP and \fBPostDown\fP, and
+deletes the interface. If \fBSaveConfig\fP is true, the current configuration
+is written back to the configuration file first.
+.TP
+\fBsave\fP \fI<interface>\fP
+Writes the current configuration of the interface to its configuration file.
+.TP
+\fBstrip\fP \fI<interface>\fP
+Prints the configuration with \fBuwg-quick\fP-only keys removed, suitable for
+.B uwg setconf
+or for comparing configurations.
+
+.SH CONFIGURATION
+In addition to the keys accepted by
+.BR uwg (8),
+the \fB[Interface]\fP section accepts:
+.TP
+\fBAddress\fP
+Address with optional CIDR mask; may be specified multiple times or as a
+comma-separated list.
+.TP
+\fBDNS\fP
+DNS server or search domain. DNS is configured with
+.BR resolvconf (8)
+when available.
+.TP
+\fBMTU\fP
+Explicit MTU. If omitted, the MTU is derived from the route to the first
+peer endpoint or from the system default route, minus the tunnel overhead.
+.TP
+\fBTable\fP
+Routing table for added routes. \fBauto\fP (default) uses the main table and
+policy routing for default routes; \fBoff\fP disables route creation; any
+number or name selects a table explicitly.
+.TP
+\fBPreUp\fP, \fBPostUp\fP, \fBPreDown\fP, \fBPostDown\fP
+Shell snippets executed by
+.BR bash (1)
+at the corresponding phases. The string \fB%i\fP is replaced with the
+interface name. Each key may appear multiple times and runs in order.
+.TP
+\fBSaveConfig\fP
+If \fBtrue\fP, the interface configuration is saved on \fBdown\fP.
+
+.SH ENVIRONMENT
+.TP
+.B UWG_QUICK_USERSPACE_IMPLEMENTATION
+Userspace daemon used when the kernel module is unavailable. Default:
+\fBumbrawg\fP.
+.TP
+.B WG_COLOR_MODE
+Passed through to
+.BR uwg (8).
+.TP
+.B WG_HIDE_KEYS
+Passed through to
+.BR uwg (8).
+
+.SH FILES
+.TP
+.I /etc/umbrawg/*.conf
+Configuration files. The directory is readable only by root.
+.TP
+.I /var/run/umbrawg/*.sock
+UAPI sockets of the userspace implementation.
+
+.SH EXAMPLES
+A simple client configuration in \fI/etc/umbrawg/uwg0.conf\fP:
+.PP
+.nf
+[Interface]
+Address = 10.200.100.8/24
+DNS = 10.200.100.1
+PrivateKey = oK56DE9Ue9zK76rAc8pBl6opph+1v36lm7cXXsQKrQM=
+
+[Peer]
+PublicKey = GtL7fZc/bLnqZldpVofMCD6hDjrK28SsdLxevJ+qtKU=
+AllowedIPs = 0.0.0.0/0
+Endpoint = demo.example.net:51820
+.fi
+.PP
+Bring it up and down with:
+.PP
+.nf
+uwg-quick up uwg0
+uwg-quick down uwg0
+.fi
+
+.SH SEE ALSO
+.BR uwg (8),
+.BR ip (8),
+.BR resolvconf (8),
+.BR systemd (1)

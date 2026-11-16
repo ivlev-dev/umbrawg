@@ -1,0 +1,3 @@
+[Unit]
+Description=UmbraWG Tunnels via uwg-quick(8)
+Documentation=man:uwg-quick(8)

@@ -1,0 +1,97 @@
+name: Rust CI
+
+on:
+  push:
+    branches:
+      - master
+      - "feature/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ivlev-dev/netlink-packet-umbrawg
+          path: netlink-packet-umbrawg
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ivlev-dev/netlink-packet-umbrawg
+          path: netlink-packet-umbrawg
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools -> tools/target
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ivlev-dev/netlink-packet-umbrawg
+          path: netlink-packet-umbrawg
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools -> tools/target
+
+      - name: Run tests
+        run: cargo test --workspace
