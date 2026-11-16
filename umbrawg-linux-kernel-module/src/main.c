@@ -51,7 +51,7 @@ static int __init uwg_mod_init(void)
 	if (ret < 0)
 		goto err_netlink;
 
-	pr_info("UmbraWG " UMBRAWG_VERSION " loaded. See amnezia.org for information.\n");
+	pr_info("UmbraWG " UMBRAWG_VERSION " loaded. See github.com/ivlev-dev/umbrawg-linux-kernel-module for information.\n");
 	pr_info("Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.\n");
 	pr_info("Copyright (C) 2024-2025 AmneziaVPN <admin@amnezia.org>. All Rights Reserved.\n");
 

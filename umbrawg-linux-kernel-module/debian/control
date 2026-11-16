@@ -1,14 +1,14 @@
 Source: umbrawg-linux-kmod
 Section: net
 Priority: optional
-Maintainer: unidentified attacker <ua@amnezia.org>
+Maintainer: Alex Ivlev <ai@itegroup.ru>
 Build-Depends:
  debhelper,
  dkms
 Standards-Version: 4.5.1
-Homepage: https://amnezia.org
-Vcs-Git: https://github.com/amnezia-vpn/awg-linux-kernel-module.git
-Vcs-Browser: https://github.com/amnezia-vpn/awg-linux-kernel-module
+Homepage: https://github.com/ivlev-dev/umbrawg-linux-kernel-module
+Vcs-Git: https://github.com/ivlev-dev/umbrawg-linux-kernel-module.git
+Vcs-Browser: https://github.com/ivlev-dev/umbrawg-linux-kernel-module
 Rules-Requires-Root: no
 
 Package: umbrawg-dkms
