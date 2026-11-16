@@ -185,6 +185,39 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  dataplane:
+    name: data-plane e2e
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release daemon
+        run: cargo build --release --locked -p umbrawg
+
+      - name: Build uwg
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/ivlev-dev/umbrawg-tools ../umbrawg-tools
+          cargo build --release --locked --manifest-path ../umbrawg-tools/Cargo.toml -p uwg
+
+      - name: Install test tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends iperf3 iproute2 netcat-openbsd
+
+      - name: Run data-plane e2e
+        run: |
+          sudo -E env \
+            UWG="$PWD/../umbrawg-tools/target/release/uwg" \
+            DAEMON="$PWD/target/release/umbrawg" \
+            bash scripts/test-dataplane-e2e.sh
+
   release:
     name: GitHub Release
     needs: build
