@@ -22,7 +22,8 @@ AUR-совместимые заготовки пакетов CLI UmbraWG. Каж
 
 ## Зависимости
 
-- `depends`: `glibc`, `iproute2` (`uwg-quick` вызывает `ip`).
+- `depends`: `glibc`, `gcc-libs` (`libgcc_s` нужен Rust-бинарникам),
+  `iproute2` (`uwg-quick` вызывает `ip`).
 - `optdepends`: `nftables`/`iptables` (firewall-правила `uwg-quick`),
   `openresolv`/`systemd-resolvconf` (DNS через `resolvconf`), `procps-ng`
   (`sysctl`), `umbrawg-dkms` (ядерный бэкенд), `umbrawg-daemon`
@@ -70,10 +71,17 @@ bsdtar -xpf umbrawg-tools-git-*.pkg.tar.zst -C /tmp/pkg
 ldd /tmp/pkg/usr/bin/uwg
 ```
 
-Проверено на хосте: `umbrawg-tools-git` и `umbrawg-tools` собираются
-(`makepkg -f --nodeps --skipinteg`), тесты воркспейса проходят, `uwg v0.2.0`
-и `uwg-quick --help` запускаются из распакованного пакета, man-страницы
-сжимаются в `.gz`, права на `/etc/umbrawg` — `0700`.
+Проверено на хосте: `umbrawg-tools-git` собирается из деревьев tools `0.2.0`
+и netlink `0.3.0` (`makepkg -f --nodeps --skipinteg`), `check()` проходит
+212 тестов в 12 наборах, `uwg v0.2.0` и `uwg-quick --help` запускаются из
+распакованного пакета, man-страницы проходят `gzip -t` и `groff -man`,
+автодополнения — `bash -n` и `fish -n`, `systemd-analyze verify` для
+`uwg-quick@.service` и `uwg-quick.target` ошибок не находит (только
+предупреждение об отсутствии `/usr/bin/uwg-quick` в распакованном дереве),
+права на `/etc/umbrawg` — `0700`. `makepkg` предупреждает, что `usr/bin/uwg`
+содержит строки с `$srcdir` (panic-локации Rust); на работу пакета это не
+влияет. Стабильный `umbrawg-tools` — шаблон до появления тегов, в этой
+проверке не собирался.
 
 ## Публикация в AUR
 

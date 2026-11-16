@@ -8,7 +8,7 @@ pkgdesc="UmbraWG command line tools: uwg and uwg-quick (git master)"
 arch=('x86_64' 'aarch64')
 url="https://github.com/ivlev-dev/umbrawg-tools"
 license=('GPL-2.0-only')
-depends=('glibc' 'iproute2')
+depends=('glibc' 'gcc-libs' 'iproute2')
 makedepends=('cargo' 'rust')
 optdepends=(
   'nftables: предпочтительный бэкенд firewall-правил uwg-quick'

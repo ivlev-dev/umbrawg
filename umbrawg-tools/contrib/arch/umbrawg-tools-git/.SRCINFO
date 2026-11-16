@@ -9,6 +9,7 @@ pkgbase = umbrawg-tools-git
 	makedepends = cargo
 	makedepends = rust
 	depends = glibc
+	depends = gcc-libs
 	depends = iproute2
 	optdepends = nftables: предпочтительный бэкенд firewall-правил uwg-quick
 	optdepends = iptables: запасной бэкенд firewall-правил uwg-quick
