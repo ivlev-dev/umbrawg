@@ -1,4 +1,13 @@
 # Changelog
+## [Unreleased]
+### CI
+ - Run property tests as a separate job.
+ - Build both `cargo fuzz` targets on nightly.
+ - Add a preflight probe for the UmbraWG kernel family; integration tests are
+   skipped as a job (with an explicit warning) when the module is unavailable.
+ - Use nightly for rustfmt and clippy so unstable `.rustfmt.toml` options are
+   applied consistently.
+
 ## [0.2.1] - 2026-08-25
 ### New features
  - Added UmbraWG 3.1 device attributes: `RandomTrailers` and
