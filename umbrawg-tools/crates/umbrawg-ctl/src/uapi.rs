@@ -106,10 +106,9 @@ pub async fn set_device_at(path: &Path, config: &SetDevice) -> Result<(), Error>
 
 /// Serializes a set request for the userspace UAPI socket.
 ///
-/// Peer `AdvancedSecurity` is a kernel-only setting: the daemon has no such
-/// key, so it is not written here. The kernel module reports and accepts it
-/// through `UWGPEER_A_ADVANCED_SECURITY` instead; `uwg` warns when a
-/// configuration carrying the key is applied to a userspace interface.
+/// Peer `AdvancedSecurity` travels as `advanced_security=1|0`; the daemon
+/// stores and reports the value without enforcing it. The kernel module
+/// accepts the same setting as `UWGPEER_A_ADVANCED_SECURITY`.
 pub fn build_set_request(config: &SetDevice) -> Result<String, Error> {
     let mut output = String::new();
     output.push_str("set=1\n");
@@ -203,6 +202,9 @@ pub fn build_set_request(config: &SetDevice) -> Result<String, Error> {
                 "persistent_keepalive_interval",
                 &keepalive.to_string(),
             )?;
+        }
+        if let Some(value) = peer.advanced_security {
+            write_line(&mut output, "advanced_security", bool_number(value))?;
         }
         if let Some(allowed_ips) = &peer.allowed_ips {
             write_line(&mut output, "replace_allowed_ips", "true")?;
@@ -343,6 +345,7 @@ fn apply_peer_line(peer: &mut Peer, key: &str, value: &str) -> Result<(), Error>
         "persistent_keepalive_interval" => {
             peer.persistent_keepalive = parse_u16_range(key, value)?;
         }
+        "advanced_security" => peer.advanced_security = Some(parse_bool(key, value)?),
         "allowed_ip" | "allowed_ips" => {
             if !value.contains('/') {
                 return Err(Error::Protocol(format!(
@@ -608,6 +611,51 @@ errno=0
         assert!(parse_get_response("listen_port=bad\nerrno=0\n\n", "test0").is_err());
     }
 
+    fn get_response_with_advanced_security(value: &str) -> String {
+        format!(
+            "public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\n\
+             advanced_security={value}\nerrno=0\n\n"
+        )
+    }
+
+    #[test]
+    fn parses_advanced_security_from_get_response() {
+        for value in ["1", "on", "true"] {
+            let device = parse_get_response(&get_response_with_advanced_security(value), "test0")
+                .expect("valid response");
+            assert_eq!(device.peers[0].advanced_security, Some(true), "{value}");
+        }
+        for value in ["0", "off", "false"] {
+            let device = parse_get_response(&get_response_with_advanced_security(value), "test0")
+                .expect("valid response");
+            assert_eq!(device.peers[0].advanced_security, Some(false), "{value}");
+        }
+        let device = parse_get_response(GET_RESPONSE, "test0").expect("valid response");
+        assert_eq!(device.peers[0].advanced_security, None);
+        assert!(
+            parse_get_response(&get_response_with_advanced_security("maybe"), "test0").is_err()
+        );
+    }
+
+    #[test]
+    fn showconf_round_trips_advanced_security() {
+        for (value, enabled, expected) in [
+            ("1", true, "AdvancedSecurity = on\n"),
+            ("0", false, "AdvancedSecurity = off\n"),
+        ] {
+            let device = parse_get_response(&get_response_with_advanced_security(value), "test0")
+                .expect("valid response");
+            let config = device.to_config();
+            assert_eq!(config.peers[0].advanced_security, Some(enabled), "{value}");
+            assert!(config.to_ini(false).contains(expected), "{value}");
+        }
+        let device = parse_get_response(GET_RESPONSE, "test0").expect("valid response");
+        assert!(!device
+            .to_config()
+            .to_ini(false)
+            .contains("AdvancedSecurity"));
+    }
+
     #[test]
     fn builds_set_request() {
         let request = build_set_request(&set_device()).expect("valid request");
@@ -632,9 +680,19 @@ errno=0
     }
 
     #[test]
-    fn does_not_send_advanced_security_to_the_daemon() {
-        let config = set_device();
+    fn sends_advanced_security_to_the_daemon() {
+        let mut config = set_device();
         assert_eq!(config.peers[0].advanced_security, Some(true));
+        let request = build_set_request(&config).expect("valid request");
+        assert!(request.contains("advanced_security=1\n"));
+        assert!(!request.contains("advanced_security=0\n"));
+
+        config.peers[0].advanced_security = Some(false);
+        let request = build_set_request(&config).expect("valid request");
+        assert!(request.contains("advanced_security=0\n"));
+        assert!(!request.contains("advanced_security=1\n"));
+
+        config.peers[0].advanced_security = None;
         let request = build_set_request(&config).expect("valid request");
         assert!(!request.contains("advanced_security"));
         assert!(!request.contains("advanced-security"));
