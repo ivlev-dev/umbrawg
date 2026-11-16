@@ -115,6 +115,64 @@ jobs:
           bash bench/tests/test-bench-lib.sh
           python3 -m unittest discover -s bench/tests -p 'test_*.py'
 
+  e2e-daemon:
+    name: e2e daemon (UAPI)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ivlev-dev/netlink-packet-umbrawg
+          path: netlink-packet-umbrawg
+
+      - name: Checkout umbrawg-rs
+        uses: actions/checkout@v4
+        with:
+          repository: ivlev-dev/umbrawg-rs
+          path: rust
+        continue-on-error: true
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools -> tools/target
+
+      - name: Build uwg
+        run: cargo build --release -p uwg
+
+      - name: Build umbrawg daemon
+        working-directory: rust
+        continue-on-error: true
+        run: cargo build --release -p umbrawg
+
+      - name: Check script syntax
+        run: bash -n scripts/test-daemon-e2e.sh
+
+      - name: Run e2e against the userspace daemon
+        run: |
+          set -euo pipefail
+          if [ ! -x ../rust/target/release/umbrawg ]; then
+            echo "SKIP: umbrawg daemon is not built"
+            exit 0
+          fi
+          if ! grep -rq "advanced_security" ../rust/crates/umbrawg-uapi/src/ 2>/dev/null; then
+            echo "SKIP: daemon UAPI does not support AdvancedSecurity yet"
+            exit 0
+          fi
+          sudo -E env \
+            DAEMON="$PWD/../rust/target/release/umbrawg" \
+            UWG="$PWD/target/release/uwg" \
+            scripts/test-daemon-e2e.sh
+
   packaging:
     name: packaging
     runs-on: ubuntu-latest
