@@ -9,3 +9,7 @@ repository.workspace = true
 thiserror.workspace = true
 log.workspace = true
 libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+libc = "0.2"

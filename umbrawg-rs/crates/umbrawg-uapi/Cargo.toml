@@ -4,11 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "UmbraWG UAPI parser, serializer and Unix-socket server"
 
 [dependencies]
 umbrawg-crypto.workspace = true
 umbrawg-proto.workspace = true
-umbrawg-device.workspace = true
 thiserror.workspace = true
 log.workspace = true
 libc = "0.2"
