@@ -160,6 +160,26 @@ static inline void uwg_prev_queue_drop_peeked(struct prev_queue *queue)
 	queue->peeked = NULL;
 }
 
+static inline bool uwg_queue_wakeup_arm(struct multicore_worker *worker, int cpu,
+					struct workqueue_struct *wq)
+{
+	if (atomic_xchg(&worker->pending, 1))
+		return false;
+	queue_work_on(cpu, wq, &worker->work);
+	return true;
+}
+
+static inline bool uwg_queue_wakeup_drained(struct multicore_worker *worker,
+					    struct crypt_queue *queue)
+{
+	atomic_set(&worker->pending, 0);
+	smp_mb();
+	if (likely(__ptr_ring_empty(&queue->ring)))
+		return true;
+	atomic_set(&worker->pending, 1);
+	return false;
+}
+
 static inline int uwg_queue_enqueue_per_device_and_peer(
 	struct crypt_queue *device_queue, struct prev_queue *peer_queue,
 	struct sk_buff *skb, struct workqueue_struct *wq)
@@ -183,7 +203,7 @@ static inline int uwg_queue_enqueue_per_device_and_peer(
 	queue = worker->ptr;
 	if (unlikely(ptr_ring_produce_bh(&queue->ring, skb)))
 		return -EPIPE;
-	queue_work_on(cpu, wq, &worker->work);
+	uwg_queue_wakeup_arm(worker, cpu, wq);
 	return 0;
 }
 
@@ -214,6 +234,7 @@ static inline void uwg_queue_enqueue_per_peer_rx(struct sk_buff *skb, enum packe
 
 #ifdef DEBUG
 bool uwg_packet_counter_selftest(void);
+bool uwg_queueing_selftest(void);
 #endif
 
 #endif /* _UWG_QUEUEING_H */

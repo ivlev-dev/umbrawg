@@ -587,17 +587,23 @@ next:
 
 void uwg_packet_decrypt_worker(struct work_struct *work)
 {
-	struct crypt_queue *queue = container_of(work, struct multicore_worker,
-						 work)->ptr;
+	struct multicore_worker *worker = container_of(work,
+						       struct multicore_worker,
+						       work);
+	struct crypt_queue *queue = worker->ptr;
 	struct sk_buff *skb;
 
-	while ((skb = ptr_ring_consume_bh(&queue->ring)) != NULL) {
-		enum packet_state state =
-			likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
-				PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
-		uwg_queue_enqueue_per_peer_rx(skb, state);
-		if (need_resched())
-			cond_resched();
+	for (;;) {
+		while ((skb = ptr_ring_consume_bh(&queue->ring)) != NULL) {
+			enum packet_state state =
+				likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
+					PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
+			uwg_queue_enqueue_per_peer_rx(skb, state);
+			if (need_resched())
+				cond_resched();
+		}
+		if (uwg_queue_wakeup_drained(worker, queue))
+			break;
 	}
 }
 

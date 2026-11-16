@@ -26,6 +26,7 @@ struct uwg_device;
 struct multicore_worker {
 	void *ptr;
 	struct work_struct work;
+	atomic_t pending;
 };
 
 struct crypt_queue {

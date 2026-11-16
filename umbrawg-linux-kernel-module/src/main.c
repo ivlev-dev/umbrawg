@@ -34,7 +34,7 @@ static int __init uwg_mod_init(void)
 #ifdef DEBUG
 	ret = -ENOTRECOVERABLE;
 	if (!uwg_allowedips_selftest() || !uwg_packet_counter_selftest() ||
-	    !uwg_ratelimiter_selftest())
+	    !uwg_queueing_selftest() || !uwg_ratelimiter_selftest())
 		goto err_peer;
 #endif
 	uwg_noise_init();
