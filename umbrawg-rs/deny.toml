@@ -1,0 +1,28 @@
+# Конфигурация cargo-deny (формат cargo-deny 0.21).
+
+[advisories]
+# Уязвимых, yanked и unmaintained-крейтов в графе нет; список оставлен для точечных исключений.
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-1-Clause",
+    "BSD-3-Clause",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Дубликаты (syn, thiserror, getrandom) не схлопываются без мажорных обновлений, поэтому только warn.
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
