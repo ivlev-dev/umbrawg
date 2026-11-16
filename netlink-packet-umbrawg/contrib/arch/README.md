@@ -53,10 +53,11 @@ directory = "/usr/share/cargo/registry"
 
 Дальше в проекте достаточно `netlink-packet-umbrawg = "0.3"`.
 
-`provides`/`conflicts` не объявляются: пакет не подменяет другой пакет и не
-конфликтует с ним, имя совпадает с именем крейта. Две версии между собой
-конфликтуют (`rust-netlink-packet-umbrawg` vs `-git`), одновременно ставить их
-нельзя.
+Стабильный пакет не объявляет `provides`/`conflicts`: его имя совпадает с
+именем крейта. `-git`-пакет объявляет `provides`/`conflicts` для
+`rust-netlink-packet-umbrawg`, поэтому одновременно две версии поставить
+нельзя; конфликт срабатывает и при установке стабильного пакета поверх
+`-git`.
 
 ## Сборка и проверка
 
@@ -73,8 +74,9 @@ ls /tmp/pkg/usr/share/cargo/registry/netlink-packet-umbrawg-*/
 создать тестовый проект с `netlink-packet-umbrawg = "0.3"`,
 `[source.crates-io] replace-with = "vendored-sources"`,
 `directory = .../usr/share/cargo/registry` и выполнить `cargo build --offline`.
-Проверено на хосте: пакет собирается, `cargo` находит крейт в каталоге-реестре
-и компилирует пример, использующий `UmbrawgMessage`.
+Проверено на хосте: `rust-netlink-packet-umbrawg-git` (`0.3.0`) собирается,
+`cargo` находит крейт в каталоге-реестре из пакета и собирает тестовый
+бинарник с `cargo build --offline` при подмене crates.io на этот каталог.
 
 ## Публикация в AUR
 
