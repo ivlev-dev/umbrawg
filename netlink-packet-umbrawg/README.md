@@ -1,5 +1,6 @@
 # netlink-packet-umbrawg
 
+[![CI](https://github.com/ivlev-dev/netlink-packet-umbrawg/actions/workflows/main.yml/badge.svg)](https://github.com/ivlev-dev/netlink-packet-umbrawg/actions/workflows/main.yml)
 [![Crates.io](https://img.shields.io/crates/v/netlink-packet-umbrawg)](https://crates.io/crates/netlink-packet-umbrawg)
 [![Docs.rs](https://docs.rs/netlink-packet-umbrawg/badge.svg)](https://docs.rs/netlink-packet-umbrawg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
