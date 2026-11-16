@@ -8,7 +8,8 @@ pub const PROGRAM: &str = "uwg";
 #[command(
     name = PROGRAM,
     version = concat!("v", env!("CARGO_PKG_VERSION")),
-    about = "UmbraWG configuration utility"
+    about = "UmbraWG configuration utility",
+    disable_help_subcommand = true
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -25,12 +26,20 @@ pub enum Command {
     Set(SetArgs),
     #[command(about = "Applies a configuration file to an interface")]
     Setconf(SetconfArgs),
+    #[command(about = "Appends a configuration file to an interface")]
+    Addconf(SetconfArgs),
+    #[command(about = "Synchronizes a configuration file to an interface")]
+    Syncconf(SetconfArgs),
     #[command(about = "Generates a new private key and writes it to stdout")]
     Genkey,
     #[command(about = "Generates a new preshared key and writes it to stdout")]
     Genpsk,
     #[command(about = "Reads a private key from stdin and writes a public key to stdout")]
     Pubkey,
+    #[command(about = "Shows the version and exits")]
+    Version,
+    #[command(about = "Shows this help message and exits")]
+    Help,
 }
 
 #[derive(Debug, Args)]
@@ -70,8 +79,12 @@ pub struct SetconfArgs {
 
 pub fn show_usage() -> String {
     format!(
-        "Usage: {PROGRAM} show {{ <interface> | all | interfaces }} [public-key | private-key | listen-port | fwmark | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | dump | jc | jmin | jmax | s1 | s2 | s3 | s4 | h1 | h2 | h3 | h4 | i1 | i2 | i3 | i4 | i5 | header-protection-key | content-padding-addition | rekey-after-time | rekey-timeout | reject-after-time | keepalive-timeout | max-handshake-attempts | random-trailers | disable-cookies]"
+        "Usage: {PROGRAM} show {{ <interface> | all | interfaces }} [public-key | private-key | listen-port | fwmark | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | advanced-security | dump | jc | jmin | jmax | s1 | s2 | s3 | s4 | h1 | h2 | h3 | h4 | i1 | i2 | i3 | i4 | i5 | header-protection-key | content-padding-addition | rekey-after-time | rekey-timeout | reject-after-time | keepalive-timeout | max-handshake-attempts | random-trailers | disable-cookies]"
     )
+}
+
+pub fn setconf_usage(command: &str) -> String {
+    format!("Usage: {PROGRAM} {command} <interface> <configuration filename>")
 }
 
 pub fn set_usage() -> String {
@@ -161,6 +174,46 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_addconf_and_syncconf() {
+        let cli = Cli::try_parse_from(["uwg", "addconf", "uwg0", "test.conf"]).expect("valid");
+        match cli.command {
+            Some(Command::Addconf(args)) => {
+                assert_eq!(args.interface, "uwg0");
+                assert_eq!(args.filename, PathBuf::from("test.conf"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        let cli = Cli::try_parse_from(["uwg", "syncconf", "uwg0", "/tmp/a.conf"]).expect("valid");
+        match cli.command {
+            Some(Command::Syncconf(args)) => {
+                assert_eq!(args.interface, "uwg0");
+                assert_eq!(args.filename, PathBuf::from("/tmp/a.conf"));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(Cli::try_parse_from(["uwg", "addconf", "uwg0"]).is_err());
+        assert!(Cli::try_parse_from(["uwg", "syncconf"]).is_err());
+        assert_eq!(
+            setconf_usage("addconf"),
+            "Usage: uwg addconf <interface> <configuration filename>"
+        );
+    }
+
+    #[test]
+    fn parses_positional_version_and_help() {
+        assert!(matches!(
+            Cli::try_parse_from(["uwg", "version"])
+                .expect("valid")
+                .command,
+            Some(Command::Version)
+        ));
+        assert!(matches!(
+            Cli::try_parse_from(["uwg", "help"]).expect("valid").command,
+            Some(Command::Help)
+        ));
     }
 
     #[test]

@@ -285,6 +285,12 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
                 peer.persistent_keepalive
             );
         }
+        let _ = writeln!(
+            output,
+            "  {}: {}",
+            style.bold("advanced security"),
+            advanced_security_text(peer)
+        );
         if index + 1 < peers.len() {
             output.push('\n');
         }
@@ -600,6 +606,16 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
                 }
             }
         }
+        "advanced-security" => {
+            for peer in &device.peers {
+                let _ = writeln!(
+                    output,
+                    "{prefix}{}\t{}",
+                    peer.public_key.to_base64(),
+                    advanced_security_text(peer)
+                );
+            }
+        }
         "preshared-keys" => {
             for peer in &device.peers {
                 let key = maybe_key(peer.preshared_key.as_ref());
@@ -679,6 +695,14 @@ fn bool_text(value: bool) -> &'static str {
         "on"
     } else {
         "off"
+    }
+}
+
+fn advanced_security_text(peer: &Peer) -> &'static str {
+    match peer.advanced_security {
+        Some(true) => "yes",
+        Some(false) => "no",
+        None => "unsupported",
     }
 }
 
@@ -782,6 +806,7 @@ mod tests {
             rx_bytes: 2048,
             tx_bytes: 10,
             allowed_ips: vec!["10.0.0.0/8".parse::<AllowedIp>().expect("valid")],
+            advanced_security: Some(true),
         });
         device
     }
@@ -854,6 +879,26 @@ mod tests {
             format!("uwg0\t{}\n", device.peers[0].public_key.to_base64())
         );
         assert!(ugly(&device, "bogus", false).is_err());
+    }
+
+    #[test]
+    fn shows_advanced_security_state() {
+        let mut device = sample_device();
+        assert!(pretty_at(&device, false, 1_700_000_060).contains("  advanced security: yes\n"));
+        assert_eq!(
+            ugly(&device, "advanced-security", false).expect("valid"),
+            format!("{}\tyes\n", device.peers[0].public_key.to_base64())
+        );
+        device.peers[0].advanced_security = Some(false);
+        assert!(pretty_at(&device, false, 1_700_000_060).contains("  advanced security: no\n"));
+        device.peers[0].advanced_security = None;
+        assert!(
+            pretty_at(&device, false, 1_700_000_060).contains("  advanced security: unsupported\n")
+        );
+        assert_eq!(
+            ugly(&device, "advanced-security", false).expect("valid"),
+            format!("{}\tunsupported\n", device.peers[0].public_key.to_base64())
+        );
     }
 
     #[test]
