@@ -66,6 +66,11 @@ impl QuickConfig {
     }
 
     /// Output of the `strip` subcommand (`echo "$WG_CONFIG"`).
+    /// Convert the stored WireGuard configuration into the shared `umbrawg-config` model.
+    pub fn to_umbrawg_config(&self) -> Result<umbrawg_config::Config, umbrawg_config::Error> {
+        umbrawg_config::Config::parse_with(&self.wg_config, umbrawg_config::ParseOptions::default())
+    }
+
     pub fn strip_output(&self) -> String {
         let mut output = self.wg_config.clone();
         output.push('\n');

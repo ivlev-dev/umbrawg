@@ -73,6 +73,16 @@ The `contrib/` subdirectory contains various scripts and examples. Most of these
 are not immediately useful for production use, but should provide inspiration for
 creating fully-featured tools. See the `README` in each directory.
 
+## Testing integration scripts
+
+Integration scripts live in `scripts/`:
+
+- `scripts/test-kernel.sh` — builds and tests the kernel module and `uwg` against kernel backend.
+- `scripts/test-userspace.sh` — tests `uwg` against userspace daemon UAPI socket (skips if binary is missing).
+- `scripts/test-two-nodes.sh` — builds a two-node tunnel and runs ping plus 3-second TCP/UDP iperf3 tests with and without obfuscation.
+
+Run on the target host as root.
+
 ## License
 
 This project is released under the [GPLv2](COPYING).

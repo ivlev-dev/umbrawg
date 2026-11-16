@@ -67,3 +67,6 @@ pub const UWG_PROGRAM: &str = "uwg";
 
 /// `ip` executable name.
 pub const IP_PROGRAM: &str = "ip";
+
+/// Re-export controller socket directory to use `umbrawg-ctl` instead of hardcoding.
+pub const CONTROLLER_SOCKET_DIR: &str = umbrawg_ctl::DEFAULT_SOCKET_DIR;
