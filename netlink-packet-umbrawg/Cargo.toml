@@ -1,6 +1,6 @@
 [package]
 name = "netlink-packet-umbrawg"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 homepage = "https://github.com/ivlev-dev/netlink-packet-umbrawg"
 repository = "https://github.com/ivlev-dev/netlink-packet-umbrawg"

@@ -1,4 +1,29 @@
 # Changelog
+## [0.3.0] - 2026-11-16
+### New features
+ - Full numeric parity with the UmbraWG 3.1 UAPI (`uapi/umbrawg.h`):
+   - `UmbrawgPeerAttribute::AdvancedSecurity` for
+     `UWGPEER_A_ADVANCED_SECURITY` (kind 11, `NLA_FLAG`, empty payload).
+   - `UmbrawgAllowedIpAttr::Flags` for `UWGALLOWEDIP_A_FLAGS` (kind 4,
+     `u32`).
+   - `UmbrawgCmd::UnknownPeer` for `UWG_CMD_UNKNOWN_PEER` (command 2),
+     including messages that carry `UWGDEVICE_A_PEER`.
+   - `constants::UWGPEER_F_HAS_ADVANCED_SECURITY`,
+     `constants::UWGALLOWEDIP_F_REMOVE_ME`, `constants::UWG_CMD_*` and
+     `constants::UWG_KEY_LEN`.
+ - `scripts/check-uapi-parity.sh` compares `src/constants.rs` with the
+   kernel header and fails on any mismatch.
+ - Round-trip, wire-format and property tests for the new attributes,
+   flags and command.
+
+### Bug fixes
+ - `UmbrawgAttribute::Peer` no longer emits an extra nesting level. The
+   peer attributes of `UWGDEVICE_A_PEER` (`UWG_CMD_UNKNOWN_PEER`
+   notifications) are nested directly, the way the kernel writes them.
+
+### Other
+ - The crate is formatted with nightly `rustfmt` and its `.rustfmt.toml`.
+
 ## [0.2.1] - 2026-08-25
 ### New features
  - Added UmbraWG 3.1 device attributes: `RandomTrailers` and
