@@ -109,10 +109,11 @@ systemctl enable --now umbrawg@wg0.service
 
 Демон требует `CAP_NET_ADMIN` (создание TUN, настройка маршрутов/адресов через
 Netlink). Юнит выдаёт только эту capability (`AmbientCapabilities`/
-`CapabilityBoundingSet`) и включает `NoNewPrivileges`. Доступ к `/dev/net/tun`
-разрешён через `DeviceAllow=/dev/net/tun rw` при `PrivateDevices=yes`; при
-проблемах с TUN в конкретном окружении можно отключить `PrivateDevices`, но это
-ослабляет изоляцию устройства.
+`CapabilityBoundingSet`) и включает `NoNewPrivileges`. Доступ к устройствам
+ограничен `DevicePolicy=closed`; единственное разрешённое физическое устройство —
+`/dev/net/tun` (`DeviceAllow`), псевдо-устройства (`/dev/null`, `/dev/urandom`)
+разрешаются политикой `closed`. `PrivateDevices` намеренно не используется:
+приватный `/dev` не содержит `/dev/net/tun`, и демон не смог бы открыть TUN.
 
 Ограничения: `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`,
 только Unix/IPv4/IPv6/Netlink сокеты, запись разрешена в `/run/umbrawg` и
