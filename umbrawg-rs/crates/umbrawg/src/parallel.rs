@@ -947,15 +947,14 @@ mod tests {
         };
 
         for _ in 0..100 {
-            let mut slot = None;
-            for _ in 0..10_000 {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let slot = loop {
                 if let Some(free) = channel.allocate() {
-                    slot = Some(free);
-                    break;
+                    break free;
                 }
-                std::hint::spin_loop();
-            }
-            let slot = slot.expect("buffer is available");
+                assert!(Instant::now() < deadline, "buffer is available");
+                std::thread::yield_now();
+            };
             let (published, _) = channel.publish(job(slot));
             assert!(published);
         }
