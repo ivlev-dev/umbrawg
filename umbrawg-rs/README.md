@@ -99,6 +99,25 @@ umbrawg uwg0
 Configure with `uwg` from `umbrawg-tools` (kernel module and userspace share the
 same CLI and configuration format).
 
+## systemd
+
+Юнит-шаблон `systemd/umbrawg@.service` запускает демон для интерфейса `%i`:
+
+```sh
+systemctl enable --now umbrawg@wg0.service
+```
+
+Демон требует `CAP_NET_ADMIN` (создание TUN, настройка маршрутов/адресов через
+Netlink). Юнит выдаёт только эту capability (`AmbientCapabilities`/
+`CapabilityBoundingSet`) и включает `NoNewPrivileges`. Доступ к `/dev/net/tun`
+разрешён через `DeviceAllow=/dev/net/tun rw` при `PrivateDevices=yes`; при
+проблемах с TUN в конкретном окружении можно отключить `PrivateDevices`, но это
+ослабляет изоляцию устройства.
+
+Ограничения: `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`,
+только Unix/IPv4/IPv6/Netlink сокеты, запись разрешена в `/run/umbrawg` и
+`/etc/umbrawg`. Бинарник ожидается в `/usr/bin/umbrawg`.
+
 ## Status
 
 The Go implementation that this workspace replaces remains in the git history
