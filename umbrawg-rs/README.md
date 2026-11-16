@@ -77,6 +77,7 @@ qemu-arm-static -L /usr/arm-linux-gnueabihf target/armv7-unknown-linux-gnueabihf
 | `test stable` | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, `cargo doc -D warnings` |
 | `msrv 1.88` | `cargo build --workspace` and `cargo test --no-run` on the declared minimum toolchain |
 | `build <target>` | release build of `umbrawg` for all three targets, tests compiled for the target, `file`/`readelf` architecture check, qemu smoke run of the binary and unit tests under qemu, packaged `tar.gz` artifact |
+| `data-plane e2e` | two daemons in two network namespaces over a veth pair: handshake, ping, iperf3, 32 MiB integrity check in the obfuscation × parallel-RX matrix; `SKIP` when TUN, `unshare -Urn` or `uwg` is unavailable |
 | `GitHub Release` | on a `v*` tag: `SHA256SUMS` and the archives are published |
 
 The build job runs on Ubuntu 22.04 to keep the produced binaries usable on older
@@ -168,6 +169,67 @@ same CLI and configuration format).
 Отключить: не задавать `UMBRAWG_PARALLEL_RX` или установить значение, отличное
 от `1`/`true`/`yes`/`on` (по умолчанию однопоточный режим, который не деградирует
 на одном соединении).
+
+## Data-plane E2E
+
+`scripts/test-dataplane-e2e.sh` проверяет не UAPI, а сам путь данных: два
+демона в двух network namespace, соединённых veth-парой, поднимают TUN
+`uwgA` (`10.71.0.1/24`) и `uwgB` (`10.71.0.2/24`), обмениваются рукопожатием
+и гоняют трафик через туннель.
+
+Что проверяется в каждом прогоне:
+
+- рукопожатие по `uwg show <iface> latest-handshakes` (инициируется пингом);
+- `ping` между `10.71.0.1` и `10.71.0.2`;
+- `iperf3` TCP 3 с и UDP 200 Мбит/с 2 с, фиксируются скорость и потери;
+- целостность: файл 32 МиБ передаётся через туннель (`nc`), sha256 источника
+  и получателя сравниваются;
+- в логах демонов нет `ERROR`, `panicked`, `worker stopped`, `parallel rx failure`;
+- при `UMBRAWG_RX_STATS=1` (счётчики печатаются только в параллельном режиме)
+  дропы нулевые или объяснимые: `prepared` на отвечающей стороне — это
+  pre-handshake specials `I1-I5` и Jc-джанк (по 9 пакетов на инициацию),
+  `queue` — переполнение приёмной очереди под нагрузкой (не более 1 %
+  дейтаграмм).
+
+Матрица: `UMBRAWG_PARALLEL_RX=0|1` × `obf=0|1`, четыре прогона. `obf=1` — полный
+профиль 3.1: `Jc/Jmin/Jmax`, `S1-S4`, `H1-H4`, `I1-I5`,
+`HeaderProtectionKey`, `ContentPaddingAddition`, `RandomTrailers`. `obf=0` —
+чистый WireGuard-совместимый режим.
+
+```sh
+cargo build --release -p umbrawg
+# uwg из umbrawg-tools
+UWG=../umbrawg-tools/target/release/uwg \
+  DAEMON=target/release/umbrawg \
+  bash scripts/test-dataplane-e2e.sh
+```
+
+Root не нужен: скрипт перезапускает себя через `unshare -Urn`. Если TUN,
+veth, `unshare`, `nsenter` или `uwg` недоступны, печатается `SKIP` и код
+возврата 0 — это поведение использует job `data-plane e2e` в CI.
+
+Переменные: `UWG`, `DAEMON`, `FILE_MIB` (32), `HANDSHAKE_TIMEOUT` (20),
+`MIN_TCP_MBIT` (0 — без порога), `UWB_DP_QUICK=1` (только два прогона с
+`obf=1`), `KEEP_ARTIFACTS=1` (оставить каталог с логами и файлами),
+`IFACE_A`/`IFACE_B`, `PORT_A`/`PORT_B`, `UNDERLAY_*`, `TUN_*`.
+
+Пример прогона на 12-ядерном хосте (veth, без реального NIC):
+
+| Прогон | parallel | obf | iperf3 TCP | iperf3 UDP | Дропы |
+|---|---|---|---|---|---|
+| `obf1-par0` | 0 | 1 | 1333 Мбит/с | 200 Мбит/с, 0/36561 | n/a (нет stats) |
+| `obf1-par1` | 1 | 1 | 1448 Мбит/с | 200 Мбит/с, 0/36555 | `prepared=9` (specials) |
+| `obf0-par0` | 0 | 0 | 2683 Мбит/с | 200 Мбит/с, 0/36568 | n/a (нет stats) |
+| `obf0-par1` | 1 | 0 | 6277 Мбит/с | 200 Мбит/с, 0/36563 | 0 |
+
+Во всех прогонах ping без потерь, sha256 файла 32 МиБ совпал.
+
+Наблюдение по перестановкам: в параллельном режиме на насыщении канала TCP
+видит перестановку сегментов между воркерами и ретрансмиты (`iperf3` показывал
+109 000 ретрансмитов за 3 с при 1.35 Гбит/с с `obf=1` и 17 000 при 6.3 Гбит/с
+с `obf=0`), а в режиме `UMBRAWG_PARALLEL_RX=0` — 0 ретрансмитов при 2.7 Гбит/с.
+Дропов в счётчиках при этом нет, sha256 совпадает, поэтому тест не считает
+ретрансмиты ошибкой — это известный компромисс параллельного приёма.
 
 ## Сеть
 
