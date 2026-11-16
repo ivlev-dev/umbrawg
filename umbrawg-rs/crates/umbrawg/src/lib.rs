@@ -30,7 +30,7 @@ use tx::TxBatch;
 
 const MAX_PACKET: usize = 65_535;
 const RECV_BATCH: usize = 64;
-const TUN_BATCH: usize = 64;
+const TUN_BATCH: usize = 128;
 const TUN_PACKET_MARGIN: usize = 256;
 const IDLE_TIMEOUT_MS: i32 = 10;
 

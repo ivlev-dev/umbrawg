@@ -846,6 +846,17 @@ mod tests {
     }
 
     #[test]
+    fn split_handles_more_than_64_segments() {
+        let packet = tcp4_packet(12_200, 1, 0x10);
+        let mut header = tcp4_header(100);
+        let mut storage = vec![vec![0u8; 200]; 128];
+        let mut bufs: Vec<&mut [u8]> = storage.iter_mut().map(|buf| buf.as_mut_slice()).collect();
+        let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
+        assert!(count > 64, "expected more than 64 segments, got {count}");
+        assert!(count <= 128);
+    }
+
+    #[test]
     fn split_reports_small_output_buffer() {
         let packet = tcp4_packet(200, 1, 0x10);
         let mut header = tcp4_header(100);
