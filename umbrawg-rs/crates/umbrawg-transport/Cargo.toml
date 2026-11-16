@@ -7,6 +7,4 @@ repository.workspace = true
 
 [dependencies]
 thiserror.workspace = true
-log.workspace = true
 libc = "0.2"
-socket2 = "0.5"
