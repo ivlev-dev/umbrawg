@@ -280,6 +280,10 @@ impl WorkerChannel {
         self.jobs.is_empty()
     }
 
+    fn pending(&self) -> usize {
+        self.jobs.len()
+    }
+
     fn wait(&self, tun_fd: RawFd) {
         self.sleeping.store(true, Ordering::SeqCst);
         if !self.jobs.is_empty() {
@@ -480,6 +484,18 @@ pub(crate) fn rx_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Result<
     Ok(())
 }
 
+/// Выбирает воркера с наименьшей очередью, начиная обход с `start`.
+pub(crate) fn select_worker(pending: &[usize], start: usize) -> usize {
+    let mut best = start % pending.len();
+    for attempt in 1..pending.len() {
+        let candidate = (start + attempt) % pending.len();
+        if pending[candidate] < pending[best] {
+            best = candidate;
+        }
+    }
+    best
+}
+
 #[allow(clippy::too_many_arguments)]
 fn enqueue_segments(
     device: &Device,
@@ -549,10 +565,14 @@ fn enqueue_segments(
     let channels = shared.channels.len();
     let start = *cursor % channels;
     *cursor = cursor.wrapping_add(1);
-    let mut target = start;
+    let mut pending = [0usize; MAX_WORKERS];
+    for (slot, channel) in pending.iter_mut().zip(&shared.channels) {
+        *slot = channel.pending();
+    }
+    let mut target = select_worker(&pending[..channels], start);
     let mut slot = None;
     for attempt in 0..channels {
-        let candidate = (start + attempt) % channels;
+        let candidate = (target + attempt) % channels;
         if let Some(free) = shared.channels[candidate].allocate() {
             target = candidate;
             slot = Some(free);
@@ -827,6 +847,14 @@ mod tests {
         let received = channel.pop().unwrap();
         channel.release(received.slot);
         assert!(channel.allocate().is_some());
+    }
+
+    #[test]
+    fn least_loaded_worker_is_preferred() {
+        assert_eq!(super::select_worker(&[3, 0, 1], 0), 1);
+        assert_eq!(super::select_worker(&[2, 1, 1], 0), 1);
+        assert_eq!(super::select_worker(&[2, 2, 2], 1), 1);
+        assert_eq!(super::select_worker(&[4, 4, 0], 2), 2);
     }
 
     #[test]
