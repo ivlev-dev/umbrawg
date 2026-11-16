@@ -18,7 +18,9 @@
   против bash-версии).
 - CI: fmt/clippy/test, тесты стенда (`bench`) и статические проверки упаковки
   (`packaging`), релизные сборки x86_64/aarch64/armv7; упаковка
-  deb/rpm/man/completions/systemd из Rust-дерева.
+  deb/rpm/man/completions/systemd из Rust-дерева; на тег `v*` —
+  `.github/workflows/packaging.yml` собирает `.deb`, `.rpm` и Arch `-git` и
+  публикует их в релиз вместе с `SHA256SUMS`.
 - Интеграционные скрипты: `scripts/test-kernel.sh`, `scripts/test-userspace.sh`,
   `scripts/test-two-nodes.sh` — проходят на сервере.
 - Стенд замеров: `bench/bench.sh` (матрица, повторы, MTU-guard, CPU-профиль),
@@ -101,7 +103,8 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # 17 тестов �
 
 1. Добавить interop-тест Rust↔ядро в CI (в netns, с автоскипом без root).
 2. Vendor `netlink-packet-umbrawg` для source-upload в Debian.
-3. Проверить реальные сборки `.deb`/`.rpm` и ARM-рантайм.
+3. Проверить первую CI-сборку пакетов на тег `v*` (Arch ждёт версию netlink
+   из `Cargo.lock` в ветке `main`) и ARM-рантайм.
 
 Сделано в 0.2.0: упаковка Debian/RPM из `cargo build --release`, man-страницы,
 completions, systemd-юниты, CI fmt/clippy/test и релизные сборки x86_64/aarch64/armv7.
