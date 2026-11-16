@@ -473,7 +473,7 @@ async fn test_set_and_get_all_3_1_parameters() {
     assert_eq!(rtb, Some(true));
     let dc = attrs.iter().find_map(|a| if let UmbrawgAttribute::DisableCookies(v)=a {Some(*v)} else {None});
     assert_eq!(dc, Some(false));
-    let hpk = attrs.iter().find_map(|a| if let UmbrawgAttribute::HeaderProtectionKey(v)=a {Some(v.clone())} else {None});
+    let hpk = attrs.iter().find_map(|a| if let UmbrawgAttribute::HeaderProtectionKey(v)=a {Some(*v)} else {None});
     assert_eq!(hpk, Some(header_key));
 
     delete_interface(&ifname);

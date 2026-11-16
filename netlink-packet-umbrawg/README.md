@@ -11,7 +11,7 @@ For plain WireGuard, use the original [`netlink-packet-wireguard`](https://crate
 
 ## What is UmbraWG?
 
-[UmbraWG](https://docs.umbra.org/documentation/umbra-wg/) is a fork of WireGuard that adds junk-packet padding and magic headers to mask WireGuard traffic from Deep Packet Inspection (DPI). This crate allows you to configure UmbraWG interfaces via the kernel netlink API the same way `wg` / `uwg` tools do.
+[UmbraWG](https://github.com/ivlev-dev/umbrawg-linux-kernel-module) is a fork of WireGuard that adds junk-packet padding and magic headers to mask WireGuard traffic from Deep Packet Inspection (DPI). This crate allows you to configure UmbraWG interfaces via the kernel netlink API the same way `wg` / `uwg` tools do.
 
 ## Installation
 
