@@ -90,6 +90,31 @@ umbrawg-<version>-<target>/
 The `umbrawg@.service` unit currently ships with the `umbrawg-tools` package
 (`systemd/umbrawg@.service`), so the daemon archive contains only the binary.
 
+### Packaging (`packaging.yml`)
+
+`.github/workflows/packaging.yml` builds distribution packages and does not
+duplicate the `tar.gz` archives from `ci.yml`:
+
+| Job | Image | Contents |
+|---|---|---|
+| `arch` | `archlinux:latest` | `makepkg -f --noconfirm --nodeps` for `contrib/arch/umbrawg-daemon-git` (runs the PKGBUILD `check()`), then verifies the package: `/usr/bin/umbrawg`, `usr/lib/systemd/system/umbrawg@.service`, `usr/lib/tmpfiles.d/umbrawg.conf` (`d /run/umbrawg 0700 root root -`), `/etc/umbrawg` mode `0700`, and `umbrawg --version` executed straight from the unpacked tree |
+| `релиз` | `ubuntu-latest` | on a `v*` tag: `.pkg.tar.zst` and `SHA256SUMS.pkg` in the GitHub Release |
+
+Release mechanics:
+
+- the tag has to match `v<version>` from `Cargo.toml` (`v0.1.0` right now);
+  `workflow_dispatch` takes an optional `version` input for a manual check;
+- no secrets are needed — the AUR upload stays manual;
+- the release job uses `concurrency: release-<ref>` with `cancel-in-progress:
+  false`. The `GitHub Release` job in `ci.yml` still has no concurrency group,
+  so a single tag can start both release steps at once; adding the same group
+  there is tracked in `TODO.md`;
+- checksum files are kept apart: `ci.yml` publishes `SHA256SUMS` for the
+  `tar.gz` archives, `packaging.yml` publishes `SHA256SUMS.pkg` for the Arch
+  package, so neither step overwrites the other's asset;
+- the stable Arch package `contrib/arch/umbrawg-daemon` is not built in CI: its
+  `sha256sums` is a placeholder and needs `updpkgsums` after the first tag.
+
 ## Run
 
 ```sh

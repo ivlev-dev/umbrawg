@@ -72,6 +72,30 @@ UDP-замеры упирались в `-b 1000M`, профиль замера �
    `armv7-unknown-linux-gnueabihf`.
 7. Interop-тесты как cargo-тесты с автоскипом без root (сейчас — shell-скрипты в tools/bench).
 
+## Пакетирование и релиз
+
+- `.github/workflows/packaging.yml` собирает Arch-пакет демона и не дублирует
+  `tar.gz` из `ci.yml`:
+  - job `arch` (`archlinux:latest`) — `makepkg -f --noconfirm --nodeps` для
+    `contrib/arch/umbrawg-daemon-git` (вместе с `check()` из PKGBUILD), затем
+    проверка содержимого: `/usr/bin/umbrawg`, `umbrawg@.service`,
+    `tmpfiles.d/umbrawg.conf` (`d /run/umbrawg 0700 root root -`), `/etc/umbrawg`
+    с правами `0700`, и запуск `umbrawg --version` из распакованного пакета;
+  - job `релиз` на тег `v*` — `.pkg.tar.zst` + `SHA256SUMS.pkg` в GitHub Release.
+- Тег должен совпадать с версией workspace (`v0.1.0`); секреты не нужны,
+  публикация в AUR остаётся ручной.
+- Контрольные суммы разделены: `ci.yml` публикует `SHA256SUMS` для `tar.gz`,
+  `packaging.yml` — `SHA256SUMS.pkg` для Arch-пакета, чтобы не перезаписывать
+  ассет друг друга.
+- В `ci.yml` у job `GitHub Release` нет `concurrency`-группы: при теге оба
+  релизных job могут стартовать одновременно. Добавить туда
+  `group: release-${{ github.ref }}` — отдельная задача.
+- Стабильный `contrib/arch/umbrawg-daemon` в CI не собирается: в `sha256sums`
+  заглушка `TODO_UPDPKGSUMS_AFTER_FIRST_TAG`, после тега нужны `updpkgsums` и
+  `makepkg --printsrcinfo > .SRCINFO`.
+- Workflow проверен в Docker (makepkg, содержимое пакета, `--version`), в GitHub
+  Actions ещё не запускался.
+
 ## Соглашения
 
 - Байты на проводе и UAPI-формат совместимы с модулем ядра и Go-эталоном.
