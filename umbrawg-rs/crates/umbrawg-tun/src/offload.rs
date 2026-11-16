@@ -301,6 +301,7 @@ pub fn split_gso(
 
         dst[hdr_len..total_len].copy_from_slice(&input[segment_start..segment_end]);
 
+        dst[csum_at..csum_at + 2].fill(0);
         let transport_len = ((hdr_len - ip_header_len) + (segment_end - segment_start)) as u16;
         let pseudo = pseudo_header_checksum_no_fold(
             protocol,
@@ -795,6 +796,37 @@ mod tests {
             split_gso(&packet, &mut header, &mut bufs),
             Err(GsoError::NotGso)
         );
+    }
+
+    #[test]
+    fn split_ignores_the_pseudo_header_checksum_field() {
+        let mut packet = tcp4_packet(200, 1000, TCP_FLAG_PSH | 0x10);
+        packet[36..38].copy_from_slice(&0x2F07u16.to_be_bytes());
+        let mut header = tcp4_header(100);
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
+        let mut bufs = [&mut first[..], &mut second[..]];
+        let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
+
+        assert_eq!(count, 2);
+        assert_valid_transport_checksum(&first[..140], 20, IPPROTO_TCP);
+        assert_valid_transport_checksum(&second[..140], 20, IPPROTO_TCP);
+    }
+
+    #[test]
+    fn split_udp_ignores_the_partial_checksum_field() {
+        let mut packet = udp4_packet(200);
+        packet[26..28].copy_from_slice(&0x1234u16.to_be_bytes());
+        let mut header = udp4_header(100);
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
+        let mut bufs = [&mut first[..], &mut second[..]];
+        let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
+
+        assert_eq!(count, 2);
+        for segment in [&first[..128], &second[..128]] {
+            assert_valid_transport_checksum(segment, 20, IPPROTO_UDP);
+        }
     }
 
     #[test]

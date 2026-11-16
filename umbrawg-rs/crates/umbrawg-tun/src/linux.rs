@@ -903,20 +903,26 @@ fn get_vnet_hdr_size(fd: RawFd) -> io::Result<usize> {
 }
 
 fn set_offload_fd(fd: RawFd, offload: Offload) -> io::Result<()> {
-    let mut bits = offload.bits() as libc::c_int;
-    ioctl(
-        fd,
-        libc::TUNSETOFFLOAD,
-        (&mut bits as *mut libc::c_int).cast::<libc::c_void>(),
-    )
+    let bits = offload.bits() as libc::c_ulong;
+    let result = unsafe { libc::ioctl(fd, libc::TUNSETOFFLOAD, bits) };
+    if result < 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+fn offload_candidates() -> [Offload; 4] {
+    [
+        Offload::TCP | Offload::USO,
+        Offload::TCP,
+        Offload::TCP.without_ufo(),
+        Offload::CSUM,
+    ]
 }
 
 fn enable_offload(fd: RawFd) -> TunResult<Offload> {
-    let candidates = [
-        Offload::LEGACY_TCP,
-        Offload::LEGACY_TCP.without_ufo(),
-        Offload::CSUM,
-    ];
+    let candidates = offload_candidates();
 
     for candidate in candidates {
         match set_offload_fd(fd, candidate) {
@@ -1183,6 +1189,15 @@ mod tests {
             Offload::TCP | Offload::USO,
             Offload::from_bits(Offload::TCP.bits() | Offload::USO.bits())
         );
+    }
+
+    #[test]
+    fn offload_candidates_never_request_legacy_udp_offload() {
+        let candidates = offload_candidates();
+        assert!(candidates.iter().all(|candidate| !candidate.ufo));
+        assert_eq!(candidates[0], Offload::TCP | Offload::USO);
+        assert_eq!(candidates[1], Offload::TCP);
+        assert_eq!(candidates[3], Offload::CSUM);
     }
 
     #[test]

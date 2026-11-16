@@ -13,3 +13,4 @@ rustix = { version = "1", features = ["fs"] }
 
 [dev-dependencies]
 libc = "0.2"
+umbrawg-transport.workspace = true

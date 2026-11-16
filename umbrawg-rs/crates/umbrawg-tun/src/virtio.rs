@@ -132,17 +132,17 @@ impl VirtioNetHdr {
             });
         }
         let num_buffers = if header_len == Self::LEN_WITH_NUM_BUFFERS {
-            u16::from_be_bytes([bytes[10], bytes[11]])
+            u16::from_le_bytes([bytes[10], bytes[11]])
         } else {
             0
         };
         Ok(Self {
             flags: bytes[0],
             gso_type: bytes[1],
-            hdr_len: u16::from_be_bytes([bytes[2], bytes[3]]),
-            gso_size: u16::from_be_bytes([bytes[4], bytes[5]]),
-            csum_start: u16::from_be_bytes([bytes[6], bytes[7]]),
-            csum_offset: u16::from_be_bytes([bytes[8], bytes[9]]),
+            hdr_len: u16::from_le_bytes([bytes[2], bytes[3]]),
+            gso_size: u16::from_le_bytes([bytes[4], bytes[5]]),
+            csum_start: u16::from_le_bytes([bytes[6], bytes[7]]),
+            csum_offset: u16::from_le_bytes([bytes[8], bytes[9]]),
             num_buffers,
         })
     }
@@ -176,17 +176,17 @@ impl VirtioNetHdr {
         out[..Self::LEN].copy_from_slice(&self.to_bytes());
         if header_len == Self::LEN_WITH_NUM_BUFFERS {
             out[Self::LEN..Self::LEN_WITH_NUM_BUFFERS]
-                .copy_from_slice(&self.num_buffers.to_be_bytes());
+                .copy_from_slice(&self.num_buffers.to_le_bytes());
         }
         Ok(())
     }
 
     /// Returns the legacy wire representation of the header.
     pub const fn to_bytes(self) -> [u8; Self::LEN] {
-        let hdr_len = self.hdr_len.to_be_bytes();
-        let gso_size = self.gso_size.to_be_bytes();
-        let csum_start = self.csum_start.to_be_bytes();
-        let csum_offset = self.csum_offset.to_be_bytes();
+        let hdr_len = self.hdr_len.to_le_bytes();
+        let gso_size = self.gso_size.to_le_bytes();
+        let csum_start = self.csum_start.to_le_bytes();
+        let csum_offset = self.csum_offset.to_le_bytes();
         [
             self.flags,
             self.gso_type,
@@ -204,7 +204,7 @@ impl VirtioNetHdr {
     /// Returns the `virtio_net_hdr_v1` wire representation of the header.
     pub const fn to_bytes_v1(self) -> [u8; Self::LEN_WITH_NUM_BUFFERS] {
         let legacy = self.to_bytes();
-        let num_buffers = self.num_buffers.to_be_bytes();
+        let num_buffers = self.num_buffers.to_le_bytes();
         [
             legacy[0],
             legacy[1],
@@ -457,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn encode_uses_network_byte_order() {
+    fn encode_uses_little_endian_order() {
         let header = VirtioNetHdr {
             flags: 1,
             gso_type: 4,
@@ -469,11 +469,11 @@ mod tests {
         };
         assert_eq!(
             header.to_bytes(),
-            [1, 4, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]
+            [1, 4, 0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A, 0xF0, 0xDE]
         );
         assert_eq!(
             header.to_bytes_v1(),
-            [1, 4, 0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0, 0x0F, 0x1E]
+            [1, 4, 0x34, 0x12, 0x78, 0x56, 0xBC, 0x9A, 0xF0, 0xDE, 0x1E, 0x0F]
         );
     }
 }

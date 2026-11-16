@@ -14,11 +14,13 @@ use umbrawg_device::{DatagramSink, Device, DeviceConfig, IncomingMeta, IoContext
 use umbrawg_transport::{
     AddressFamily, Endpoint, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
 };
-use umbrawg_tun::{Tun, TunConfig, TunError, TunSet};
+use umbrawg_tun::{Tun, TunConfig, TunError, TunSet, VirtioNetHdr};
 use umbrawg_uapi::{socket_dir, UapiListener};
 
 const MAX_PACKET: usize = 65_535;
 const RECV_BATCH: usize = 64;
+const TUN_BATCH: usize = 64;
+const TUN_PACKET_MARGIN: usize = 256;
 const IDLE_TIMEOUT_MS: i32 = 10;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -183,12 +185,18 @@ fn is_socket_would_block(error: &TransportError) -> bool {
 
 fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
     let mut rng = rand_core::OsRng;
-    let mut packet = vec![0u8; MAX_PACKET];
     let mut scratch = vec![0u8; MAX_PACKET + 512];
     let mut tx_buffer = vec![0u8; MAX_PACKET + 512];
     let mut recv_queue =
         RecvQueue::new(RECV_BATCH).map_err(|error| io::Error::other(error.to_string()))?;
     let mut recv_buffers: Vec<Vec<u8>> = (0..RECV_BATCH).map(|_| vec![0u8; MAX_PACKET]).collect();
+    let slot = tun.mtu() as usize + TUN_PACKET_MARGIN;
+    let mut tun_bufs: Vec<Vec<u8>> = (0..TUN_BATCH).map(|_| vec![0u8; slot]).collect();
+    let mut tun_slices: Vec<&mut [u8]> = tun_bufs
+        .iter_mut()
+        .map(|buffer| buffer.as_mut_slice())
+        .collect();
+    let mut tun_sizes = [0usize; TUN_BATCH];
     let mut socket: Option<Socket> = None;
 
     while !shutdown_requested() {
@@ -215,28 +223,39 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
         let mut busy = false;
 
         loop {
-            match tun.read(&mut packet) {
-                Ok(length) if length > 0 => {
+            match tun.read_batch_sizes(&mut tun_slices, &mut tun_sizes) {
+                Ok(0) => break,
+                Ok(count) => {
                     busy = true;
-                    let Some(destination) = packet_destination(&packet[..length]) else {
-                        continue;
-                    };
-                    let Some(peer) = device.route(destination) else {
-                        log::debug!("no peer for {destination}");
-                        continue;
-                    };
-                    let mut io = WorkerIo {
-                        socket: active,
-                        tun: &tun,
-                    };
-                    let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
-                    if let Err(error) =
-                        device.send_packet(&peer, &packet[..length], &mut tx_buffer, &mut context)
-                    {
-                        log::debug!("encrypt failed: {error}");
+                    log::debug!("tun batch of {count} segments");
+                    for index in 0..count {
+                        let length = tun_sizes[index];
+                        if length == 0 {
+                            continue;
+                        }
+                        let Some(destination) = packet_destination(&tun_slices[index][..length])
+                        else {
+                            continue;
+                        };
+                        let Some(peer) = device.route(destination) else {
+                            log::debug!("no peer for {destination}");
+                            continue;
+                        };
+                        let mut io = WorkerIo {
+                            socket: active,
+                            tun: &tun,
+                        };
+                        let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
+                        if let Err(error) = device.send_packet(
+                            &peer,
+                            &tun_slices[index][..length],
+                            &mut tx_buffer,
+                            &mut context,
+                        ) {
+                            log::debug!("encrypt failed: {error}");
+                        }
                     }
                 }
-                Ok(_) => break,
                 Err(error) if is_tun_would_block(&error) => break,
                 Err(error) => {
                     log::debug!("tun read failed: {error}");
@@ -388,10 +407,18 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
 
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
-        .with_offload(false)
+        .with_offload(true)
+        .with_vnet_hdr_size(VirtioNetHdr::LEN)
         .with_nonblocking(true)
         .with_mtu(u32::from(device.mtu()));
-    let tun_set = TunSet::open(&config, workers)?;
+    let tun_set = match TunSet::open(&config, workers) {
+        Ok(set) => set,
+        Err(TunError::Unsupported(feature)) => {
+            log::warn!("tun offload is unavailable ({feature}); falling back to packet mode");
+            TunSet::open(&config.clone().with_offload(false), workers)?
+        }
+        Err(error) => return Err(error.into()),
+    };
 
     let listener = UapiListener::bind(&socket_dir(), ifname)?;
     let server = listener.spawn(Arc::clone(&device))?;
