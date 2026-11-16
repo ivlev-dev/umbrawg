@@ -5,7 +5,7 @@ Maintainer: Yuri Egorov <ye@umbra.org>
 Build-Depends:
  cargo,
  debhelper-compat (= 13),
- rustc (>= 1.85),
+ rustc (>= 1.85)
 Standards-Version: 4.6.2
 Homepage: https://github.com/ivlev-dev/umbrawg-tools
 Vcs-Git: https://github.com/ivlev-dev/umbrawg-tools
@@ -17,13 +17,13 @@ Architecture: linux-any
 Depends:
  iproute2,
  ${misc:Depends},
- ${shlibs:Depends},
+ ${shlibs:Depends}
 Recommends:
  nftables | iptables,
  resolvconf,
- umbrawg-modules | umbrawg-dkms,
+ umbrawg-modules | umbrawg-dkms
 Suggests:
- umbrawg,
+ umbrawg
 Description: Rust command-line tools for UmbraWG
  UmbraWG is a WireGuard-compatible VPN protocol with an additional
  obfuscation layer.
