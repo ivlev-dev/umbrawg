@@ -820,6 +820,20 @@ fn shutdown_closes_idle_connection() {
 }
 
 #[test]
+fn shutdown_after_listener_exit_is_ok() {
+    let directory = TempDir::new("shutdown-again");
+    let control = MockControl::new();
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        control,
+    );
+
+    handle.shutdown().expect("first shutdown");
+    std::thread::sleep(Duration::from_millis(200));
+    handle.shutdown().expect("shutdown after listener exit");
+}
+
+#[test]
 fn refuses_non_socket_path() {
     let directory = TempDir::new("non-socket");
     let socket_path = directory.path().join("uwg0.sock");

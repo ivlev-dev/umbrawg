@@ -1,4 +1,5 @@
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use rand_core::RngCore;
@@ -72,5 +73,41 @@ impl IncomingOutcome {
     #[must_use]
     pub const fn is_dropped(self) -> bool {
         matches!(self, Self::Dropped)
+    }
+}
+
+#[derive(Default, Debug)]
+pub struct IncomingDropCounters {
+    open_failed: AtomicU64,
+    replay: AtomicU64,
+    allowed_ips: AtomicU64,
+}
+
+impl IncomingDropCounters {
+    #[must_use]
+    pub fn open_failed(&self) -> u64 {
+        self.open_failed.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn replay(&self) -> u64 {
+        self.replay.load(Ordering::Relaxed)
+    }
+
+    #[must_use]
+    pub fn allowed_ips(&self) -> u64 {
+        self.allowed_ips.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn note_open_failed(&self) {
+        self.open_failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_replay(&self) {
+        self.replay.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn note_allowed_ips(&self) {
+        self.allowed_ips.fetch_add(1, Ordering::Relaxed);
     }
 }

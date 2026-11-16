@@ -299,6 +299,7 @@ impl ServerHandle {
         match wake.write_all(b"x") {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
             Err(error) => Err(error.into()),
         }
     }

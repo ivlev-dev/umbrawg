@@ -129,6 +129,7 @@ struct WorkerIo<'a> {
     socket: &'a Socket,
     tun: &'a Tun,
     rx: &'a mut RxBatch,
+    stats: Option<&'a parallel::RxStats>,
 }
 
 impl DatagramSink for WorkerIo<'_> {
@@ -160,6 +161,9 @@ impl PacketIo for WorkerIo<'_> {
             return;
         }
         if let Err(error) = self.tun.write(packet) {
+            if let Some(stats) = self.stats {
+                stats.drops_tun.fetch_add(1, Ordering::Relaxed);
+            }
             log::debug!("tun write failed: {error}");
         }
     }
@@ -225,7 +229,12 @@ fn send_run<R: rand_core::RngCore>(
         batch.flush(socket, batch_buffer);
     }
     let offset = batch.used();
-    let mut io = WorkerIo { socket, tun, rx };
+    let mut io = WorkerIo {
+        socket,
+        tun,
+        rx,
+        stats: None,
+    };
     let mut context = IoContext::new(rng, now, scratch, &mut io);
     match device.send_batch(peer, plaintexts, &mut batch_buffer[offset..], &mut context) {
         Ok(sent) => {
@@ -452,6 +461,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                 socket: active,
                 tun: &tun,
                 rx: &mut rx,
+                stats: None,
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             if let Err(error) = device.after_batch_sent(peer, &mut context) {
@@ -482,6 +492,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                             socket: active,
                             tun: &tun,
                             rx: &mut rx,
+                            stats: None,
                         };
                         let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
                         match device.handle_incoming_with(
@@ -511,6 +522,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                 socket: active,
                 tun: &tun,
                 rx: &mut rx,
+                stats: None,
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             if let Err(error) = device.flush_staged(peer, &mut context) {
@@ -529,6 +541,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                 socket: active,
                 tun: &tun,
                 rx: &mut rx,
+                stats: None,
             };
             let started = Instant::now();
             let mut context = IoContext::new(&mut rng, started, &mut scratch, &mut io);
@@ -654,7 +667,6 @@ fn wait_for_shutdown(server: ServerHandle) -> Result<(), Box<dyn std::error::Err
         thread::sleep(Duration::from_millis(100));
     }
     let server = server;
-    server.shutdown()?;
     server.join()?;
     Ok(())
 }
@@ -686,32 +698,58 @@ fn run_parallel(
 
     let rx_device = Arc::clone(&device);
     let rx_shared = Arc::clone(&shared);
+    let rx_failure = Arc::clone(&shared);
     let rx_handle = thread::Builder::new()
         .name("umbrawg-rx".to_owned())
         .spawn(move || {
             if let Err(error) = parallel::rx_loop(rx_device, rx_shared) {
-                log::error!("rx thread stopped: {error}");
+                rx_failure.register_failure(format!("rx thread stopped: {error}"));
             }
         })?;
 
     let mut handles = Vec::with_capacity(workers);
     for (index, tun) in tun_set.into_queues().into_iter().enumerate() {
         let device = Arc::clone(&device);
-        let shared = Arc::clone(&shared);
+        let worker_shared = Arc::clone(&shared);
+        let worker_failure = Arc::clone(&shared);
         let handle = thread::Builder::new()
             .name(format!("umbrawg-crypto-{index}"))
             .spawn(move || {
-                if let Err(error) = parallel::worker_loop(device, tun, shared, index) {
-                    log::error!("crypto worker stopped: {error}");
+                if let Err(error) = parallel::worker_loop(device, tun, worker_shared, index) {
+                    worker_failure
+                        .register_failure(format!("crypto worker {index} stopped: {error}"));
                 }
             })?;
         handles.push(handle);
     }
 
+    while !shutdown_requested() {
+        let stopped = parallel::supervise(
+            rx_handle.is_finished(),
+            handles.iter().any(|handle| handle.is_finished()),
+        );
+        if let Some(reason) = stopped {
+            shared.register_failure(reason.to_owned());
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+
     wait_for_shutdown(server)?;
-    let _ = rx_handle.join();
+    if rx_handle.join().is_err() {
+        shared.register_failure("rx thread panicked".to_owned());
+    }
+    let mut worker_panicked = false;
     for handle in handles {
-        let _ = handle.join();
+        if handle.join().is_err() {
+            worker_panicked = true;
+        }
+    }
+    if worker_panicked {
+        shared.register_failure("crypto worker panicked".to_owned());
+    }
+    if let Some(message) = shared.failure() {
+        return Err(io::Error::other(message).into());
     }
 
     Ok(())
