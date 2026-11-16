@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+uwg --version
+
+key="$(uwg genkey)"
+[ -n "$key" ]
+[ "${#key}" -eq 44 ]
+
+pub1="$(printf '%s\n' "$key" | uwg pubkey)"
+pub2="$(printf '%s\n' "$key" | uwg pubkey)"
+[ -n "$pub1" ]
+[ "$pub1" = "$pub2" ]
+
+psk1="$(uwg genpsk)"
+psk2="$(uwg genpsk)"
+[ "$psk1" != "$psk2" ]
+
+uwg-quick --help >/dev/null

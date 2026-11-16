@@ -1,0 +1,129 @@
+name: Rust release build
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            packages: ""
+          - target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          - target: armv7-unknown-linux-gnueabihf
+            packages: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ivlev-dev/netlink-packet-umbrawg
+          path: netlink-packet-umbrawg
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools -> tools/target
+          key: ${{ matrix.target }}
+
+      - name: Install cross toolchain
+        if: matrix.packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+              ;;
+            armv7-unknown-linux-gnueabihf)
+              export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+              ;;
+          esac
+          cargo build --release --target "${{ matrix.target }}" -p uwg -p uwg-quick
+
+      - name: Stage release tree
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "uwg") | .version')"
+          name="umbrawg-tools-${version}-${{ matrix.target }}"
+          root="dist/${name}"
+          install -Dm755 "target/${{ matrix.target }}/release/uwg" "${root}/usr/bin/uwg"
+          install -Dm755 "target/${{ matrix.target }}/release/uwg-quick" "${root}/usr/bin/uwg-quick"
+          install -Dm644 man/uwg.8 "${root}/usr/share/man/man8/uwg.8"
+          install -Dm644 man/uwg-quick.8 "${root}/usr/share/man/man8/uwg-quick.8"
+          install -Dm644 completions/uwg.bash "${root}/usr/share/bash-completion/completions/uwg"
+          install -Dm644 completions/uwg-quick.bash "${root}/usr/share/bash-completion/completions/uwg-quick"
+          install -Dm644 completions/_uwg "${root}/usr/share/zsh/vendor-completions/_uwg"
+          install -Dm644 completions/_uwg-quick "${root}/usr/share/zsh/vendor-completions/_uwg-quick"
+          install -Dm644 completions/uwg.fish "${root}/usr/share/fish/vendor_completions.d/uwg.fish"
+          install -Dm644 completions/uwg-quick.fish "${root}/usr/share/fish/vendor_completions.d/uwg-quick.fish"
+          install -Dm644 systemd/uwg-quick@.service "${root}/usr/lib/systemd/system/uwg-quick@.service"
+          install -Dm644 systemd/uwg-quick.target "${root}/usr/lib/systemd/system/uwg-quick.target"
+          install -Dm644 systemd/umbrawg@.service "${root}/usr/lib/systemd/system/umbrawg@.service"
+          install -Dm644 README.md "${root}/usr/share/doc/umbrawg-tools/README.md"
+          install -Dm644 CHANGELOG.md "${root}/usr/share/doc/umbrawg-tools/CHANGELOG.md"
+          install -Dm644 COPYING "${root}/usr/share/doc/umbrawg-tools/COPYING"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-tools-${{ matrix.target }}
+          path: tools/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: umbrawg-tools-*
+          path: dist
+          merge-multiple: true
+
+      - name: Calculate checksums
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true

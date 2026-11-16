@@ -1,3 +1,2 @@
-src/*.o
-src/*.d
-src/wg
+target/
+debian/cargo-home/

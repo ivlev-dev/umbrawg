@@ -1,0 +1,26 @@
+#compdef uwg-quick
+
+_arguments -C \
+  '1:command:(up down save strip)' \
+  '2:interface or config file:->target'
+
+case $state in
+  target)
+    case $words[1] in
+      up)
+        local -a names
+        local file
+        for file in /etc/umbrawg/*.conf(N); do
+          names+=("${${file:t}%.conf}")
+        done
+        compadd -a names
+        _files -g '*.conf'
+        ;;
+      down|save|strip)
+        local -a found
+        found=(${(z)"$(uwg show interfaces 2>/dev/null)"})
+        compadd -a found
+        ;;
+    esac
+    ;;
+esac

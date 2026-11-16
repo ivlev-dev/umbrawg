@@ -1,0 +1,24 @@
+[Unit]
+Description=UmbraWG userspace daemon for %I
+Documentation=man:uwg(8)
+After=network-pre.target
+Wants=network-pre.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/umbrawg --foreground %i
+Restart=on-failure
+RestartSec=2s
+RuntimeDirectory=umbrawg
+RuntimeDirectoryMode=0700
+Environment=UMBRAWG_LOG_LEVEL=info
+LimitNOFILE=1048576
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_IPC_LOCK
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_IPC_LOCK
+NoNewPrivileges=true
+ProtectHome=true
+ProtectSystem=strict
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

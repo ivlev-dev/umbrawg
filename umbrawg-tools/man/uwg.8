@@ -1,0 +1,174 @@
+.TH UWG 8 "2026-11-16" "UmbraWG" "System Administration"
+
+.SH NAME
+uwg \- set and retrieve configuration of UmbraWG interfaces
+
+.SH SYNOPSIS
+.B uwg
+[\fICOMMAND\fP] [\fIOPTIONS\fP]... [\fIARGS\fP]...
+
+.SH DESCRIPTION
+.B uwg
+is the configuration utility for UmbraWG tunnel interfaces. The interfaces
+themselves are created and removed with
+.BR ip-link (8);
+addresses and routes are configured with
+.BR ip-address (8)
+and
+.BR ip-route (8).
+.B uwg
+changes only UmbraWG-specific settings.
+
+The utility talks to the
+.B umbrawg
+kernel module over generic netlink. When the interface is served by the
+userspace
+.B umbrawg
+daemon, it uses the UAPI socket
+.IR /var/run/umbrawg/<interface>.sock
+instead. The transport is selected automatically.
+
+If no \fICOMMAND\fP is given, \fBshow\fP is assumed.
+
+.SH COMMANDS
+.TP
+\fBshow\fP {\fI<interface>\fP | \fIall\fP | \fIinterfaces\fP} [\fIPARAMETER\fP]
+Shows the configuration and runtime state. With \fIinterfaces\fP, prints the
+names of all UmbraWG interfaces separated by spaces. With a \fIPARAMETER\fP,
+prints one tab-separated value per line, intended for scripts. With
+\fIall\fP and a \fIPARAMETER\fP, every line is prefixed with the interface name.
+.PP
+\fIPARAMETER\fP is one of:
+\fIpublic-key\fP, \fIprivate-key\fP, \fIlisten-port\fP, \fIfwmark\fP,
+\fIpeers\fP, \fIpreshared-keys\fP, \fIendpoints\fP, \fIallowed-ips\fP,
+\fIlatest-handshakes\fP, \fIpersistent-keepalive\fP, \fItransfer\fP,
+\fIdump\fP, \fIjc\fP, \fIjmin\fP, \fIjmax\fP, \fIs1\fP, \fIs2\fP, \fIs3\fP,
+\fIs4\fP, \fIh1\fP, \fIh2\fP, \fIh3\fP, \fIh4\fP, \fIi1\fP, \fIi2\fP,
+\fIi3\fP, \fIi4\fP, \fIi5\fP, \fIheader-protection-key\fP,
+\fIcontent-padding-addition\fP, \fIrekey-after-time\fP, \fIrekey-timeout\fP,
+\fIreject-after-time\fP, \fIkeepalive-timeout\fP,
+\fImax-handshake-attempts\fP, \fIrandom-trailers\fP, \fIdisable-cookies\fP,
+\fIadvanced-security\fP.
+.TP
+\fBshowconf\fP \fI<interface>\fP
+Shows the current configuration in the format described by
+\fICONFIGURATION FILE FORMAT\fP.
+.TP
+\fBset\fP \fI<interface>\fP [\fIARGUMENT\fP]...
+Changes the configuration. Device arguments:
+.RS
+.TP
+\fBlisten-port\fP \fI<port>\fP
+UDP listen port; 0 or omission selects a random port.
+.TP
+\fBfwmark\fP \fI<mark>\fP
+Firewall mark as a decimal value or \fB0x\fP-prefixed hexadecimal value.
+.TP
+\fBprivate-key\fP \fI<file>\fP
+Reads the private key from a file. A device or empty file removes the key.
+.TP
+\fBjc\fP, \fBjmin\fP, \fBjmax\fP, \fBs1\fP, \fBs2\fP, \fBs3\fP, \fBs4\fP \fI<value>\fP
+Obfuscation parameters from 0 to 65535.
+.TP
+\fBh1\fP, \fBh2\fP, \fBh3\fP, \fBh4\fP \fI<value>\fP[\fB-\fP\fI<value>\fP]
+Magic header value or inclusive range of 32-bit values.
+.TP
+\fBi1\fP, \fBi2\fP, \fIi3\fP, \fIi4\fP, \fIi5\fP \fI<descriptor>\fP
+Intermediate header descriptor.
+.TP
+\fBheader-protection-key\fP \fI<file>\fP
+Reads the 32-byte header protection key from a file.
+.TP
+\fBcontent-padding-addition\fP, \fBrekey-after-time\fP, \fBrekey-timeout\fP,
+\fBreject-after-time\fP, \fBkeepalive-timeout\fP, \fBmax-handshake-attempts\fP \fI<value>\fP[\fB-\fP\fI<value>\fP]
+Numeric parameter or inclusive 16-bit range.
+.TP
+\fBrandom-trailers\fP, \fBdisable-cookies\fP \fI<on|off>\fP
+Boolean UmbraWG 3.1 parameters.
+.RE
+.IP
+Peer arguments are introduced by \fBpeer\fP \fI<base64-public-key>\fP and accept
+\fBremove\fP, \fBpreshared-key\fP \fI<file>\fP, \fBendpoint\fP
+\fI<address>:<port>\fP, \fBpersistent-keepalive\fP \fI<value>\fP, and
+\fBallowed-ips\fP \fI<cidr>[,<cidr>]...\fP. Repeating \fBpeer\fP starts a new
+peer. An empty \fBallowed-ips\fP value removes all allowed IPs.
+.TP
+\fBsetconf\fP \fI<interface>\fP \fI<file>\fP
+Applies a configuration file. Existing peers not present in the file are
+removed.
+.TP
+\fBaddconf\fP \fI<interface>\fP \fI<file>\fP
+Appends a configuration file. Peers already present on the interface are kept
+and updated, and peers absent from the file are not removed.
+.TP
+\fBsyncconf\fP \fI<interface>\fP \fI<file>\fP
+Synchronizes the interface with a configuration file: peers that are missing
+from the file are removed explicitly, while unchanged peers keep their active
+sessions.
+.TP
+\fBversion\fP
+Prints the program name and version.
+.TP
+\fBhelp\fP
+Prints usage information.
+.TP
+\fBgenkey\fP
+Generates a private key and writes it to standard output.
+.TP
+\fBgenpsk\fP
+Generates a preshared key and writes it to standard output.
+.TP
+\fBpubkey\fP
+Reads a private key from standard input and writes the public key to standard
+output.
+
+.SH CONFIGURATION FILE FORMAT
+The file is INI-like and case-insensitive. Comments start with \fB#\fP.
+The \fB[Interface]\fP section accepts:
+.PP
+\fBPrivateKey\fP, \fBListenPort\fP, \fBFwMark\fP, \fBJc\fP, \fBJmin\fP,
+\fBJmax\fP, \fBS1\fP, \fBS2\fP, \fBS3\fP, \fBS4\fP, \fBH1\fP, \fBH2\fP,
+\fBH3\fP, \fBH4\fP, \fBI1\fP, \fBI2\fP, \fBI3\fP, \fBI4\fP, \fBI5\fP,
+\fBHeaderProtectionKey\fP, \fBContentPaddingAddition\fP,
+\fBRekeyAfterTime\fP, \fBRekeyTimeout\fP, \fBRejectAfterTime\fP,
+\fBKeepaliveTimeout\fP, \fBMaxHandshakeAttempts\fP, \fBRandomTrailers\fP,
+\fBDisableCookies\fP.
+.PP
+Each \fB[Peer]\fP section accepts \fBPublicKey\fP, \fBPresharedKey\fP,
+\fBAllowedIPs\fP, \fBEndpoint\fP, and \fBPersistentKeepalive\fP.
+.PP
+The \fBuwg-quick\fP-only keys \fBAddress\fP, \fBDNS\fP, \fBMTU\fP, \fBTable\fP,
+\fBPreUp\fP, \fBPostUp\fP, \fBPreDown\fP, \fBPostDown\fP, and \fBSaveConfig\fP
+are rejected by \fBuwg\fP and are documented in
+.BR uwg-quick (8).
+
+.SH ENVIRONMENT
+.TP
+.B WG_COLOR_MODE
+\fBalways\fP or \fBnever\fP; otherwise color is enabled only on a terminal.
+.TP
+.B WG_HIDE_KEYS
+When set to \fBnever\fP, private and preshared keys are printed in
+\fBshow\fP output; by default they are hidden.
+.TP
+.B UWG_RUNTIME_DIR
+Directory containing userspace UAPI sockets. Defaults to
+.IR /var/run/umbrawg .
+
+.SH FILES
+.TP
+.I /etc/umbrawg/*.conf
+Configuration files used by
+.BR uwg-quick (8).
+.TP
+.I /var/run/umbrawg/*.sock
+UAPI sockets of the userspace daemon.
+
+.SH EXIT STATUS
+Zero on success, non-zero on error. Errors are written to standard error.
+
+.SH SEE ALSO
+.BR uwg-quick (8),
+.BR ip-link (8),
+.BR ip-address (8),
+.BR ip-route (8)
