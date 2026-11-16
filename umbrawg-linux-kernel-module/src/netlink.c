@@ -725,6 +725,12 @@ static int set_peer(struct uwg_device *uwg, struct nlattr **attrs)
 	if (attrs[UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL]) {
 		const u16_range_t persistent_keepalive_interval = nla_get_u32(
 				attrs[UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL]);
+		if (persistent_keepalive_interval &&
+		    u16_range_lo(persistent_keepalive_interval) >
+			    u16_range_hi(persistent_keepalive_interval)) {
+			ret = -EINVAL;
+			goto out;
+		}
 		const bool send_keepalive =
 			u16_range_is_zero(peer->persistent_keepalive_interval) &&
 			!u16_range_is_zero(persistent_keepalive_interval) &&
@@ -796,14 +802,28 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			goto out;
 	}
 
-	if (info->attrs[UWGDEVICE_A_JC])
-		uwg->jc = nla_get_u16(info->attrs[UWGDEVICE_A_JC]);
-
-	if (info->attrs[UWGDEVICE_A_JMIN])
-		uwg->jmin = nla_get_u16(info->attrs[UWGDEVICE_A_JMIN]);
-
-	if (info->attrs[UWGDEVICE_A_JMAX])
-		uwg->jmax = nla_get_u16(info->attrs[UWGDEVICE_A_JMAX]);
+	if (info->attrs[UWGDEVICE_A_JC] ||
+	    info->attrs[UWGDEVICE_A_JMIN] ||
+	    info->attrs[UWGDEVICE_A_JMAX]) {
+		u16 new_jc = info->attrs[UWGDEVICE_A_JC] ?
+			nla_get_u16(info->attrs[UWGDEVICE_A_JC]) : uwg->jc;
+		u16 new_jmin = info->attrs[UWGDEVICE_A_JMIN] ?
+			nla_get_u16(info->attrs[UWGDEVICE_A_JMIN]) : uwg->jmin;
+		u16 new_jmax = info->attrs[UWGDEVICE_A_JMAX] ?
+			nla_get_u16(info->attrs[UWGDEVICE_A_JMAX]) : uwg->jmax;
+		if (new_jmin > new_jmax) {
+			net_dbg_ratelimited("%s: Jmin must not be greater than Jmax\n",
+					uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		if (info->attrs[UWGDEVICE_A_JC])
+			uwg->jc = new_jc;
+		if (info->attrs[UWGDEVICE_A_JMIN])
+			uwg->jmin = new_jmin;
+		if (info->attrs[UWGDEVICE_A_JMAX])
+			uwg->jmax = new_jmax;
+	}
 
 	if (info->attrs[UWGDEVICE_A_S1]) {
 		val16 = nla_get_u16(info->attrs[UWGDEVICE_A_S1]);
@@ -981,29 +1001,100 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			nla_data(info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY]));
 	}
 
-	if (info->attrs[UWGDEVICE_A_CONTENT_PADDING_ADDITION])
-		uwg->content_padding_addition = nla_get_u32(info->attrs[UWGDEVICE_A_CONTENT_PADDING_ADDITION]);
+	if (info->attrs[UWGDEVICE_A_CONTENT_PADDING_ADDITION]) {
+		u32 val32 = nla_get_u32(
+			info->attrs[UWGDEVICE_A_CONTENT_PADDING_ADDITION]);
+		if (val32 && u16_range_lo(val32) > u16_range_hi(val32)) {
+			net_dbg_ratelimited(
+				"%s: ContentPaddingAddition range invalid\n",
+				uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->content_padding_addition = val32;
+	}
 
-	if (info->attrs[UWGDEVICE_A_REKEY_AFTER_TIME])
-		uwg->rekey_after_time = nla_get_u32(info->attrs[UWGDEVICE_A_REKEY_AFTER_TIME]);
+	if (info->attrs[UWGDEVICE_A_REKEY_AFTER_TIME]) {
+		u32 val32 = nla_get_u32(
+			info->attrs[UWGDEVICE_A_REKEY_AFTER_TIME]);
+		if (val32 && u16_range_lo(val32) > u16_range_hi(val32)) {
+			net_dbg_ratelimited("%s: RekeyAfterTime range invalid\n",
+					uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->rekey_after_time = val32;
+	}
 
-	if (info->attrs[UWGDEVICE_A_REKEY_TIMEOUT])
-		uwg->rekey_timeout = nla_get_u32(info->attrs[UWGDEVICE_A_REKEY_TIMEOUT]);
+	if (info->attrs[UWGDEVICE_A_REKEY_TIMEOUT]) {
+		u32 val32 = nla_get_u32(info->attrs[UWGDEVICE_A_REKEY_TIMEOUT]);
+		if (val32 && u16_range_lo(val32) > u16_range_hi(val32)) {
+			net_dbg_ratelimited("%s: RekeyTimeout range invalid\n",
+					uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->rekey_timeout = val32;
+	}
 
-	if (info->attrs[UWGDEVICE_A_REJECT_AFTER_TIME])
-		uwg->reject_after_time = nla_get_u32(info->attrs[UWGDEVICE_A_REJECT_AFTER_TIME]);
+	if (info->attrs[UWGDEVICE_A_REJECT_AFTER_TIME]) {
+		u32 val32 = nla_get_u32(
+			info->attrs[UWGDEVICE_A_REJECT_AFTER_TIME]);
+		if (val32 && u16_range_lo(val32) > u16_range_hi(val32)) {
+			net_dbg_ratelimited("%s: RejectAfterTime range invalid\n",
+					uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->reject_after_time = val32;
+	}
 
-	if (info->attrs[UWGDEVICE_A_KEEPALIVE_TIMEOUT])
-		uwg->keepalive_timeout = nla_get_u32(info->attrs[UWGDEVICE_A_KEEPALIVE_TIMEOUT]);
+	if (info->attrs[UWGDEVICE_A_KEEPALIVE_TIMEOUT]) {
+		u32 val32 = nla_get_u32(
+			info->attrs[UWGDEVICE_A_KEEPALIVE_TIMEOUT]);
+		if (val32 && u16_range_lo(val32) > u16_range_hi(val32)) {
+			net_dbg_ratelimited("%s: KeepaliveTimeout range invalid\n",
+					uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->keepalive_timeout = val32;
+	}
 
-	if (info->attrs[UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS])
-		uwg->max_handshake_attempts = nla_get_u32(info->attrs[UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS]);
+	if (info->attrs[UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS]) {
+		u32 val32 = nla_get_u32(
+			info->attrs[UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS]);
+		if (val32 && u16_range_lo(val32) > u16_range_hi(val32)) {
+			net_dbg_ratelimited(
+				"%s: MaxHandshakeAttempts range invalid\n",
+				uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->max_handshake_attempts = val32;
+	}
 
-	if (info->attrs[UWGDEVICE_A_RANDOM_TRAILERS])
-		uwg->random_trailers = nla_get_u8(info->attrs[UWGDEVICE_A_RANDOM_TRAILERS]);
+	if (info->attrs[UWGDEVICE_A_RANDOM_TRAILERS]) {
+		u8 val8 = nla_get_u8(info->attrs[UWGDEVICE_A_RANDOM_TRAILERS]);
+		if (val8 > 1) {
+			net_dbg_ratelimited(
+				"%s: RandomTrailers must be 0 or 1\n", uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->random_trailers = val8;
+	}
 
-	if (info->attrs[UWGDEVICE_A_DISABLE_COOKIES])
-		uwg->disable_cookies = nla_get_u8(info->attrs[UWGDEVICE_A_DISABLE_COOKIES]);
+	if (info->attrs[UWGDEVICE_A_DISABLE_COOKIES]) {
+		u8 val8 = nla_get_u8(info->attrs[UWGDEVICE_A_DISABLE_COOKIES]);
+		if (val8 > 1) {
+			net_dbg_ratelimited(
+				"%s: DisableCookies must be 0 or 1\n", uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->disable_cookies = val8;
+	}
 
 	if (flags & UWGDEVICE_F_REPLACE_PEERS)
 		uwg_peer_remove_all(uwg);
