@@ -196,11 +196,28 @@ impl UapiListener {
     where
         C: DeviceControl + Send + Sync + 'static,
     {
+        self.spawn_with_authorizer(control, |uid| uid == 0)
+    }
+
+    /// Spawns a dedicated listener thread with a custom authorization predicate.
+    ///
+    /// The predicate receives the uid reported by `SO_PEERCRED`; [`Self::spawn`]
+    /// uses the root-only policy of [`Self::run`], so this entry point exists for
+    /// tests and for deployments that delegate access to another user.
+    pub fn spawn_with_authorizer<C, F>(
+        self,
+        control: Arc<C>,
+        authorizer: F,
+    ) -> Result<ServerHandle, UapiError>
+    where
+        C: DeviceControl + Send + Sync + 'static,
+        F: Fn(u32) -> bool + Send + 'static,
+    {
         let mut handle = self.handle()?;
         let join = thread::Builder::new()
             .name("umbrawg-uapi".to_owned())
             .spawn(move || {
-                if let Err(error) = self.run(control.as_ref()) {
+                if let Err(error) = self.run_with_authorizer(control.as_ref(), authorizer) {
                     log::error!("UAPI listener failed: {error}");
                 }
             })?;

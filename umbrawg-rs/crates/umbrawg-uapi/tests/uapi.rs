@@ -15,8 +15,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use umbrawg_crypto::{Key, PublicKey};
 use umbrawg_uapi::{
     format_get_response, AllowedIp, AllowedIpChange, DeviceControl, DeviceSnapshot,
-    ObfuscationSnapshot, PeerSnapshot, SetRequest, SpecialPacketUpdate, TimingSnapshot, U16Range,
-    UapiError, UapiListener,
+    ObfuscationSnapshot, PeerSnapshot, ServerHandle, SetRequest, SpecialPacketUpdate,
+    TimingSnapshot, U16Range, UapiError, UapiListener,
 };
 
 const SET_REQUEST: &str = "\
@@ -84,6 +84,17 @@ impl Drop for TempDir {
     fn drop(&mut self) {
         let _ = fs::remove_dir_all(&self.0);
     }
+}
+
+fn spawn_as_current_user<C>(listener: UapiListener, control: Arc<C>) -> ServerHandle
+where
+    C: DeviceControl + Send + Sync + 'static,
+{
+    // SAFETY: `geteuid` has no memory-safety preconditions.
+    let uid = unsafe { libc::geteuid() };
+    listener
+        .spawn_with_authorizer(control, move |peer| peer == uid)
+        .expect("spawn")
 }
 
 #[derive(Clone, Debug)]
@@ -379,10 +390,10 @@ fn missing_socket_is_not_connectable() {
 fn round_trips_every_31_field() {
     let directory = TempDir::new("round-trip");
     let control = MockControl::new();
-    let handle = UapiListener::bind(directory.path(), "uwg0")
-        .expect("bind")
-        .spawn(Arc::clone(&control))
-        .expect("spawn");
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        Arc::clone(&control),
+    );
     let socket_path = directory.path().join("uwg0.sock");
 
     let mut stream = UnixStream::connect(&socket_path).expect("connect");
@@ -455,10 +466,10 @@ fn round_trips_every_31_field() {
 fn reports_protocol_errors_over_the_socket() {
     let directory = TempDir::new("errors");
     let control = MockControl::new();
-    let handle = UapiListener::bind(directory.path(), "uwg0")
-        .expect("bind")
-        .spawn(control)
-        .expect("spawn");
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        control,
+    );
     let socket_path = directory.path().join("uwg0.sock");
 
     let mut stream = UnixStream::connect(&socket_path).expect("connect");
@@ -509,10 +520,10 @@ fn rejects_unauthorized_peer() {
 fn closes_on_unknown_operation() {
     let directory = TempDir::new("unknown-op");
     let control = MockControl::new();
-    let handle = UapiListener::bind(directory.path(), "uwg0")
-        .expect("bind")
-        .spawn(control)
-        .expect("spawn");
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        control,
+    );
     let socket_path = directory.path().join("uwg0.sock");
 
     let mut stream = UnixStream::connect(&socket_path).expect("connect");
@@ -615,10 +626,10 @@ allowed_ip=::/0
 
     let directory = TempDir::new("boundary");
     let control = MockControl::new();
-    let handle = UapiListener::bind(directory.path(), "uwg0")
-        .expect("bind")
-        .spawn(control)
-        .expect("spawn");
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        control,
+    );
     let socket_path = directory.path().join("uwg0.sock");
 
     let mut stream = UnixStream::connect(&socket_path).expect("connect");
@@ -638,10 +649,10 @@ allowed_ip=::/0
 fn clears_optional_fields() {
     let directory = TempDir::new("clear");
     let control = MockControl::new();
-    let handle = UapiListener::bind(directory.path(), "uwg0")
-        .expect("bind")
-        .spawn(control)
-        .expect("spawn");
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        control,
+    );
     let socket_path = directory.path().join("uwg0.sock");
 
     let mut stream = UnixStream::connect(&socket_path).expect("connect");
@@ -680,10 +691,10 @@ fn clears_optional_fields() {
 fn rejects_invalid_merged_obfuscation() {
     let directory = TempDir::new("semantic");
     let control = MockControl::new();
-    let handle = UapiListener::bind(directory.path(), "uwg0")
-        .expect("bind")
-        .spawn(control)
-        .expect("spawn");
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        control,
+    );
     let socket_path = directory.path().join("uwg0.sock");
 
     let mut stream = UnixStream::connect(&socket_path).expect("connect");
@@ -722,10 +733,10 @@ fn rejects_invalid_merged_obfuscation() {
 fn shutdown_closes_idle_connection() {
     let directory = TempDir::new("shutdown");
     let control = MockControl::new();
-    let handle = UapiListener::bind(directory.path(), "uwg0")
-        .expect("bind")
-        .spawn(control)
-        .expect("spawn");
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        control,
+    );
     let socket_path = directory.path().join("uwg0.sock");
 
     let mut stream = UnixStream::connect(&socket_path).expect("connect");
