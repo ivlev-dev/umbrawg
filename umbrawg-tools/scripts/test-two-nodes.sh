@@ -8,7 +8,12 @@ fi
 
 command -v ip >/dev/null 2>&1 || { echo "ERROR: ip not found" >&2; exit 1; }
 IFACE="${IFACE:-uwg0}"
-UWG_BIN="${UWG_BIN:-/root/umbrawg/tools/target/debug/uwg}"
+TOOLS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "$TOOLS_DIR/.." && pwd)}"
+BENCH_DIR="${BENCH_DIR:-$TOOLS_DIR/bench}"
+BENCH_CONF="${BENCH_CONF:-$BENCH_DIR/obf-params.conf}"
+. "$BENCH_DIR/bench-lib.sh"
+UWG_BIN="${UWG_BIN:-$TOOLS_DIR/target/debug/uwg}"
 [ -x "$UWG_BIN" ] || { echo "SKIP: uwg binary not found" >&2; exit 0; }
 
 IPERF="${IPERF:-iperf3}"
@@ -17,7 +22,8 @@ if ! command -v "$IPERF" >/dev/null 2>&1; then
     exit 0
 fi
 
-MODULE_DIR="/root/umbrawg/module/src"
+MODULE_DIR="${MODULE_DIR:-${MODDIR:-$(first_existing_dir "$WORKSPACE_ROOT/umbrawg-linux-kernel-module/src" "$WORKSPACE_ROOT/module/src")}}"
+[ -n "$MODULE_DIR" ] || { echo "SKIP: module dir not found, задай MODULE_DIR" >&2; exit 0; }
 if ! lsmod | grep -q '^umbrawg '; then
     make -C "$MODULE_DIR" LLVM=1 >/dev/null
     insmod "$MODULE_DIR/umbrawg.ko"
@@ -69,8 +75,8 @@ run_scenario() {
     cfg2="$TMPDIR/node2_$obf.conf"
 
     if [ "$obf" = "1" ]; then
-        cp /root/umbrawg/bench/obf-params.conf "$cfg1"
-        cp /root/umbrawg/bench/obf-params.conf "$cfg2"
+        cp "$BENCH_CONF" "$cfg1"
+        cp "$BENCH_CONF" "$cfg2"
         python3 - "$cfg1" "$priv1" "$pub2" <<PY
 import sys
 p,priv,peer=sys.argv[1],sys.argv[2],sys.argv[3]

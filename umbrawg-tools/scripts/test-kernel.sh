@@ -7,12 +7,16 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 IFACE="${IFACE:-uwg0}"
-MODULE_DIR="${MODULE_DIR:-/root/umbrawg/module/src}"
-BENCH_CONF="${BENCH_CONF:-/root/umbrawg/bench/obf-params.conf}"
-UWG_BIN="${UWG_BIN:-/root/umbrawg/tools/target/debug/uwg}"
+TOOLS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "$TOOLS_DIR/.." && pwd)}"
+BENCH_DIR="${BENCH_DIR:-$TOOLS_DIR/bench}"
+. "$BENCH_DIR/bench-lib.sh"
+MODULE_DIR="${MODULE_DIR:-${MODDIR:-$(first_existing_dir "$WORKSPACE_ROOT/umbrawg-linux-kernel-module/src" "$WORKSPACE_ROOT/module/src")}}"
+BENCH_CONF="${BENCH_CONF:-$BENCH_DIR/obf-params.conf}"
+UWG_BIN="${UWG_BIN:-$TOOLS_DIR/target/debug/uwg}"
 
 if [ ! -x "$UWG_BIN" ]; then
-    for candidate in uwg /root/umbrawg/tools/target/release/uwg; do
+    for candidate in uwg "$TOOLS_DIR/target/release/uwg"; do
         if command -v "$candidate" >/dev/null 2>&1; then
             UWG_BIN="$(command -v "$candidate")"
             break
@@ -21,10 +25,11 @@ if [ ! -x "$UWG_BIN" ]; then
 fi
 if [ ! -x "$UWG_BIN" ]; then
     echo "building uwg..."
-    (cd /root/umbrawg/tools && cargo build -p uwg >/dev/null)
-    UWG_BIN=/root/umbrawg/tools/target/debug/uwg
+    (cd "$TOOLS_DIR" && cargo build -p uwg >/dev/null)
+    UWG_BIN="$TOOLS_DIR/target/debug/uwg"
 fi
 [ -x "$UWG_BIN" ] || { echo "ERROR: uwg binary not found" >&2; exit 1; }
+[ -n "$MODULE_DIR" ] || { echo "ERROR: module dir not found, задай MODULE_DIR" >&2; exit 1; }
 [ -f "$BENCH_CONF" ] || { echo "ERROR: bench config not found: $BENCH_CONF" >&2; exit 1; }
 
 TMPDIR="$(mktemp -d)"

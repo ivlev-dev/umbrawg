@@ -7,11 +7,16 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 
 IFACE="${IFACE:-uwg0}"
-UWG_BIN="${UWG_BIN:-/root/umbrawg/tools/target/debug/uwg}"
-DAEMON="${DAEMON:-/root/umbrawg/rust/umbrawg}"
+TOOLS_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+WORKSPACE_ROOT="${WORKSPACE_ROOT:-$(cd "$TOOLS_DIR/.." && pwd)}"
+BENCH_DIR="${BENCH_DIR:-$TOOLS_DIR/bench}"
+. "$BENCH_DIR/bench-lib.sh"
+RUSTDIR="${RUSTDIR:-$(first_existing_dir "$WORKSPACE_ROOT/umbrawg-rs" "$WORKSPACE_ROOT/rust")}"
+UWG_BIN="${UWG_BIN:-$TOOLS_DIR/target/debug/uwg}"
+DAEMON="${DAEMON:-$(first_existing_file "$RUSTDIR/target/release/umbrawg" "$RUSTDIR/umbrawg")}"
 
 if [ ! -x "$UWG_BIN" ]; then
-    for candidate in uwg /root/umbrawg/tools/target/release/uwg; do
+    for candidate in uwg "$TOOLS_DIR/target/release/uwg"; do
         if command -v "$candidate" >/dev/null 2>&1; then
             UWG_BIN="$(command -v "$candidate")"
             break
