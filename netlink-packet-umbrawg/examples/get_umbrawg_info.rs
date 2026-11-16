@@ -96,6 +96,44 @@ fn print_wg_payload(wg: UmbrawgMessage) {
             UmbrawgAttribute::Jmax(v) => {
                 println!("JunkPacketMaxSize: {}", v)
             }
+            UmbrawgAttribute::S3(v) => println!("S3: {}", v),
+            UmbrawgAttribute::S4(v) => println!("S4: {}", v),
+            UmbrawgAttribute::H1(v) => println!("H1: {}", v),
+            UmbrawgAttribute::H1Range(v) => println!("H1: {}", v),
+            UmbrawgAttribute::H2(v) => println!("H2: {}", v),
+            UmbrawgAttribute::H2Range(v) => println!("H2: {}", v),
+            UmbrawgAttribute::H3(v) => println!("H3: {}", v),
+            UmbrawgAttribute::H3Range(v) => println!("H3: {}", v),
+            UmbrawgAttribute::H4(v) => println!("H4: {}", v),
+            UmbrawgAttribute::H4Range(v) => println!("H4: {}", v),
+            UmbrawgAttribute::I1(v) => println!("I1: {}", v),
+            UmbrawgAttribute::ContentPaddingAddition(v) => {
+                println!("ContentPaddingAddition: {}", v)
+            }
+            UmbrawgAttribute::RekeyAfterTime(v) => {
+                println!("RekeyAfterTime: {}", v)
+            }
+            UmbrawgAttribute::RekeyTimeout(v) => {
+                println!("RekeyTimeout: {}", v)
+            }
+            UmbrawgAttribute::RejectAfterTime(v) => {
+                println!("RejectAfterTime: {}", v)
+            }
+            UmbrawgAttribute::KeepaliveTimeout(v) => {
+                println!("KeepaliveTimeout: {}", v)
+            }
+            UmbrawgAttribute::MaxHandshakeAttempts(v) => {
+                println!("MaxHandshakeAttempts: {}", v)
+            }
+            UmbrawgAttribute::RandomTrailers(v) => {
+                println!("RandomTrailers: {}", v)
+            }
+            UmbrawgAttribute::DisableCookies(v) => {
+                println!("DisableCookies: {}", v)
+            }
+            UmbrawgAttribute::HeaderProtectionKey(_) => {
+                println!("HeaderProtectionKey: (hidden)")
+            }
             _ => (),
         }
     }

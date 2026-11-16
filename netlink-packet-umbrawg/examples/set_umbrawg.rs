@@ -64,7 +64,24 @@ async fn main() {
         UmbrawgAttribute::Jmin(40),
         UmbrawgAttribute::Jmax(70),
         UmbrawgAttribute::S1(0x5566),
-        UmbrawgAttribute::H1("61220074".into()),
+        // Umbra obfuscation parameters (example)
+        UmbrawgAttribute::H1Range(
+            netlink_packet_umbrawg::range::u32_range_from_string(
+                "712026294-712074283",
+            )
+            .unwrap(),
+        ),
+        UmbrawgAttribute::S3(31),
+        UmbrawgAttribute::S4(28),
+        UmbrawgAttribute::I1("<r 149>".into()),
+        UmbrawgAttribute::ContentPaddingAddition(51 | (197 << 16)),
+        UmbrawgAttribute::RekeyAfterTime(104 | (149 << 16)),
+        UmbrawgAttribute::RekeyTimeout(5 | (8 << 16)),
+        UmbrawgAttribute::RejectAfterTime(184 | (199 << 16)),
+        UmbrawgAttribute::KeepaliveTimeout(9 | (12 << 16)),
+        UmbrawgAttribute::MaxHandshakeAttempts(18 | (23 << 16)),
+        UmbrawgAttribute::RandomTrailers(true),
+        UmbrawgAttribute::DisableCookies(false),
         UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
             UmbrawgPeerAttribute::PublicKey(peer_pub_key),
             UmbrawgPeerAttribute::Endpoint(SocketAddr::new(

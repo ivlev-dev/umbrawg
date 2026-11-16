@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5209fe696b4c6881ce1a8efb6a525b13e7e7bc1009fd1bac1b2912e0b0c4448b # shrinks to msg = UmbrawgMessage { cmd: GetDevice, attributes: [H1Range(0)] }
+cc 51c293f219eb1889a3f0412c3e0d0e1b2f65b139edd56fb324c3d123d10f694f # shrinks to msg = UmbrawgMessage { cmd: GetDevice, attributes: [] }, cut = 1
+cc 12c389c334a11ceea6f859c4b51c1395972f1e431a920927b5d97d47135c9ac1 # shrinks to msg = UmbrawgMessage { cmd: Other(0), attributes: [] }
+cc f8d9038e7c5c8a0d035b4d11e053385420172cc52bf204d8765b26352d61b27f # shrinks to msg = UmbrawgMessage { cmd: GetDevice, attributes: [Peer(UmbrawgPeer([]))] }
