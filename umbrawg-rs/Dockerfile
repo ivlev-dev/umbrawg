@@ -21,4 +21,4 @@ COPY --from=tools /amneziawg-tools/src/wg-quick/linux.bash /usr/bin/awg-quick
 RUN chmod +x /usr/bin/awg /usr/bin/awg-quick && \
     ln -s /usr/bin/awg /usr/bin/wg && \
     ln -s /usr/bin/awg-quick /usr/bin/wg-quick
-COPY --from=awg /usr/bin/amneziawg-go /usr/bin/amneziawg-go
+COPY --from=awg /usr/bin/umbrawg /usr/bin/umbrawg

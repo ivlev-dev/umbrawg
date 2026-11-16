@@ -12,7 +12,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
+	"github.com/ivlev-dev/umbrawg-rs/conn"
 )
 
 type Peer struct {

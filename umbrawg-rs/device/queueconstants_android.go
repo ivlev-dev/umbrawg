@@ -5,7 +5,7 @@
 
 package device
 
-import "github.com/amnezia-vpn/amneziawg-go/v3/conn"
+import "github.com/ivlev-dev/umbrawg-rs/conn"
 
 /* Reduce memory consumption for Android */
 

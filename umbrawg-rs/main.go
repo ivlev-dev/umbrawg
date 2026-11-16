@@ -14,10 +14,10 @@ import (
 	"runtime"
 	"strconv"
 
-	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
-	"github.com/amnezia-vpn/amneziawg-go/v3/device"
-	"github.com/amnezia-vpn/amneziawg-go/v3/ipc"
-	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
+	"github.com/ivlev-dev/umbrawg-rs/conn"
+	"github.com/ivlev-dev/umbrawg-rs/device"
+	"github.com/ivlev-dev/umbrawg-rs/ipc"
+	"github.com/ivlev-dev/umbrawg-rs/tun"
 	"golang.org/x/sys/unix"
 )
 
@@ -27,9 +27,9 @@ const (
 )
 
 const (
-	ENV_WG_TUN_FD             = "WG_TUN_FD"
-	ENV_WG_UAPI_FD            = "WG_UAPI_FD"
-	ENV_WG_PROCESS_FOREGROUND = "WG_PROCESS_FOREGROUND"
+	ENV_UMBRAWG_TUN_FD             = "UMBRAWG_TUN_FD"
+	ENV_UMBRAWG_UAPI_FD            = "UMBRAWG_UAPI_FD"
+	ENV_UMBRAWG_PROCESS_FOREGROUND = "UMBRAWG_PROCESS_FOREGROUND"
 )
 
 func printUsage() {
@@ -39,7 +39,7 @@ func printUsage() {
 func warning() {
 	switch runtime.GOOS {
 	case "linux", "freebsd", "openbsd":
-		if os.Getenv(ENV_WG_PROCESS_FOREGROUND) == "1" {
+		if os.Getenv(ENV_UMBRAWG_PROCESS_FOREGROUND) == "1" {
 			return
 		}
 	default:
@@ -48,18 +48,18 @@ func warning() {
 
 	fmt.Fprintln(os.Stderr, "┌──────────────────────────────────────────────────────────────┐")
 	fmt.Fprintln(os.Stderr, "│                                                              │")
-	fmt.Fprintln(os.Stderr, "│       Running amneziawg-go is not required because this      │")
-	fmt.Fprintln(os.Stderr, "│       kernel has first class support for AmneziaWG. For      │")
+	fmt.Fprintln(os.Stderr, "│       Running umbrawg is not required because this      │")
+	fmt.Fprintln(os.Stderr, "│       kernel has first class support for UmbraWG. For      │")
 	fmt.Fprintln(os.Stderr, "│       information on installing the kernel module,           │")
 	fmt.Fprintln(os.Stderr, "│       please visit:                                          │")
-	fmt.Fprintln(os.Stderr, "| https://github.com/amnezia-vpn/amneziawg-linux-kernel-module │")
+	fmt.Fprintln(os.Stderr, "| https://github.com/amnezia-vpn/amneziawg-linux-kernel-module |")
 	fmt.Fprintln(os.Stderr, "│                                                              │")
 	fmt.Fprintln(os.Stderr, "└──────────────────────────────────────────────────────────────┘")
 }
 
 func main() {
 	if len(os.Args) == 2 && os.Args[1] == "--version" {
-		fmt.Printf("amneziawg-go %s\n\nUserspace AmneziaWG daemon for %s-%s.\nInformation available at https://amnezia.org\n", Version, runtime.GOOS, runtime.GOARCH)
+		fmt.Printf("umbrawg %s\n\nUserspace UmbraWG daemon for %s-%s.\nInformation available at https://amnezia.org\n", Version, runtime.GOOS, runtime.GOARCH)
 		return
 	}
 
@@ -92,7 +92,7 @@ func main() {
 	}
 
 	if !foreground {
-		foreground = os.Getenv(ENV_WG_PROCESS_FOREGROUND) == "1"
+		foreground = os.Getenv(ENV_UMBRAWG_PROCESS_FOREGROUND) == "1"
 	}
 
 	// get log level (default: info)
@@ -112,7 +112,7 @@ func main() {
 	// open TUN device (or use supplied fd)
 
 	tdev, err := func() (tun.Device, error) {
-		tunFdStr := os.Getenv(ENV_WG_TUN_FD)
+		tunFdStr := os.Getenv(ENV_UMBRAWG_TUN_FD)
 		if tunFdStr == "" {
 			return tun.CreateTUN(interfaceName, device.DefaultMTU)
 		}
@@ -145,7 +145,7 @@ func main() {
 		fmt.Sprintf("(%s) ", interfaceName),
 	)
 
-	logger.Verbosef("Starting amneziawg-go version %s", Version)
+	logger.Verbosef("Starting umbrawg version %s", Version)
 
 	if err != nil {
 		logger.Errorf("Failed to create TUN device: %v", err)
@@ -155,7 +155,7 @@ func main() {
 	// open UAPI file (or use supplied fd)
 
 	fileUAPI, err := func() (*os.File, error) {
-		uapiFdStr := os.Getenv(ENV_WG_UAPI_FD)
+		uapiFdStr := os.Getenv(ENV_UMBRAWG_UAPI_FD)
 		if uapiFdStr == "" {
 			return ipc.UAPIOpen(interfaceName)
 		}
@@ -178,9 +178,9 @@ func main() {
 
 	if !foreground {
 		env := os.Environ()
-		env = append(env, fmt.Sprintf("%s=3", ENV_WG_TUN_FD))
-		env = append(env, fmt.Sprintf("%s=4", ENV_WG_UAPI_FD))
-		env = append(env, fmt.Sprintf("%s=1", ENV_WG_PROCESS_FOREGROUND))
+		env = append(env, fmt.Sprintf("%s=3", ENV_UMBRAWG_TUN_FD))
+		env = append(env, fmt.Sprintf("%s=4", ENV_UMBRAWG_UAPI_FD))
+		env = append(env, fmt.Sprintf("%s=1", ENV_UMBRAWG_PROCESS_FOREGROUND))
 		files := [3]*os.File{}
 		if os.Getenv("LOG_LEVEL") != "" && logLevel != device.LogLevelSilent {
 			files[0], _ = os.Open(os.DevNull)

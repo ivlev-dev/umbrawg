@@ -1,4 +1,4 @@
-module github.com/amnezia-vpn/amneziawg-go/v3
+module github.com/ivlev-dev/umbrawg-rs
 
 go 1.25.0
 

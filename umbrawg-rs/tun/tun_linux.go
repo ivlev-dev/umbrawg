@@ -17,8 +17,8 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
-	"github.com/amnezia-vpn/amneziawg-go/v3/rwcancel"
+	"github.com/ivlev-dev/umbrawg-rs/conn"
+	"github.com/ivlev-dev/umbrawg-rs/rwcancel"
 	"golang.org/x/sys/unix"
 )
 

@@ -14,9 +14,9 @@ import (
 	"net/http"
 	"net/netip"
 
-	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
-	"github.com/amnezia-vpn/amneziawg-go/v3/device"
-	"github.com/amnezia-vpn/amneziawg-go/v3/tun/netstack"
+	"github.com/ivlev-dev/umbrawg-rs/conn"
+	"github.com/ivlev-dev/umbrawg-rs/device"
+	"github.com/ivlev-dev/umbrawg-rs/tun/netstack"
 )
 
 func main() {

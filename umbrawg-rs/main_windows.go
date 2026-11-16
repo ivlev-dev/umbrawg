@@ -12,11 +12,11 @@ import (
 
 	"golang.org/x/sys/windows"
 
-	"github.com/amnezia-vpn/amneziawg-go/v3/conn"
-	"github.com/amnezia-vpn/amneziawg-go/v3/device"
-	"github.com/amnezia-vpn/amneziawg-go/v3/ipc"
+	"github.com/ivlev-dev/umbrawg-rs/conn"
+	"github.com/ivlev-dev/umbrawg-rs/device"
+	"github.com/ivlev-dev/umbrawg-rs/ipc"
 
-	"github.com/amnezia-vpn/amneziawg-go/v3/tun"
+	"github.com/ivlev-dev/umbrawg-rs/tun"
 )
 
 const (
@@ -30,13 +30,13 @@ func main() {
 	}
 	interfaceName := os.Args[1]
 
-	fmt.Fprintln(os.Stderr, "Warning: this is a test program for Windows, mainly used for debugging this Go package. For a real AmneziaWG for Windows client, please visit: https://amnezia.org")
+	fmt.Fprintln(os.Stderr, "Warning: this is a test program for Windows, mainly used for debugging this Go package. For a real UmbraWG for Windows client, please visit: https://amnezia.org")
 
 	logger := device.NewLogger(
 		device.LogLevelVerbose,
 		fmt.Sprintf("(%s) ", interfaceName),
 	)
-	logger.Verbosef("Starting amneziawg-go version %s", Version)
+	logger.Verbosef("Starting umbrawg version %s", Version)
 
 	tun, err := tun.CreateTUN(interfaceName, 0)
 	if err == nil {
