@@ -19,9 +19,7 @@ use crate::UmbrawgAllowedIp;
 
 pub(crate) struct UmbrawgPeers(pub(crate) Vec<UmbrawgPeer>);
 
-impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for UmbrawgPeers
-{
+impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>> for UmbrawgPeers {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let mut ret = Vec::new();
         let nlas = NlasIterator::new(buf.value());
@@ -44,9 +42,7 @@ impl std::ops::Deref for UmbrawgPeers {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UmbrawgPeer(pub Vec<UmbrawgPeerAttribute>);
 
-impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for UmbrawgPeer
-{
+impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>> for UmbrawgPeer {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let mut ret = Vec::new();
         let nlas = NlasIterator::new(buf.value());
@@ -107,8 +103,8 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
         let data = buf.value();
         if data.len() < TIMESPEC_LEN {
             Err(format!(
-                "Invalid UWGPEER_A_LAST_HANDSHAKE_TIME, expecting size {}, but \
-                 got {:?}",
+                "Invalid UWGPEER_A_LAST_HANDSHAKE_TIME, expecting size {}, \
+                 but got {:?}",
                 TIMESPEC_LEN, data
             )
             .into())

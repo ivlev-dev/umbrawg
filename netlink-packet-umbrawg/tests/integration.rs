@@ -9,21 +9,20 @@
 
 #![cfg(target_os = "linux")]
 
-use std::convert::TryInto;
-use std::process::Command;
+use std::{convert::TryInto, process::Command};
 
 use futures::{lock::Mutex, StreamExt};
 use genetlink::new_connection;
-use netlink_packet_umbrawg::{
-    range::u32_range_from_string, UmbrawgAttribute,
-    UmbrawgCmd, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
-};
 use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST,
 };
 use netlink_packet_generic::{
     ctrl::{nlas::GenlCtrlAttrs, GenlCtrl, GenlCtrlCmd},
     GenlMessage,
+};
+use netlink_packet_umbrawg::{
+    range::u32_range_from_string, UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage,
+    UmbrawgPeer, UmbrawgPeerAttribute,
 };
 
 /// Serializes access to netlink interface creation/deletion across tests.
@@ -60,10 +59,7 @@ fn unique_ifname(prefix: &str) -> String {
 }
 
 async fn family_available(handle: &mut genetlink::GenetlinkHandle) -> bool {
-    handle
-        .resolve_family::<UmbrawgMessage>()
-        .await
-        .is_ok()
+    handle.resolve_family::<UmbrawgMessage>().await.is_ok()
 }
 
 /// Queries the genl family version of the umbrawg module: 2 for the
@@ -99,8 +95,7 @@ async fn send_request(
     msg: UmbrawgMessage,
     flags: u16,
 ) -> Vec<UmbrawgMessage> {
-    let genlmsg: GenlMessage<UmbrawgMessage> =
-        GenlMessage::from_payload(msg);
+    let genlmsg: GenlMessage<UmbrawgMessage> = GenlMessage::from_payload(msg);
     let mut nlmsg = NetlinkMessage::from(genlmsg);
     nlmsg.header.flags = flags;
 
@@ -126,8 +121,7 @@ async fn send_request_result(
     msg: UmbrawgMessage,
     flags: u16,
 ) -> Result<Vec<UmbrawgMessage>, i32> {
-    let genlmsg: GenlMessage<UmbrawgMessage> =
-        GenlMessage::from_payload(msg);
+    let genlmsg: GenlMessage<UmbrawgMessage> = GenlMessage::from_payload(msg);
     let mut nlmsg = NetlinkMessage::from(genlmsg);
     nlmsg.header.flags = flags;
 
@@ -182,9 +176,9 @@ async fn test_get_device_on_umbrawg_interface() {
     );
 
     let found_name = responses.iter().any(|r| {
-        r.attributes.iter().any(|attr| {
-            matches!(attr, UmbrawgAttribute::IfName(n) if *n == ifname)
-        })
+        r.attributes.iter().any(
+            |attr| matches!(attr, UmbrawgAttribute::IfName(n) if *n == ifname),
+        )
     });
     assert!(found_name, "expected IfName attribute in get response");
 
@@ -374,27 +368,39 @@ async fn test_set_and_get_all_3_1_parameters() {
 
     let version = family_version(&mut handle).await.unwrap_or(2);
     let h1 = if version >= 3 {
-        UmbrawgAttribute::H1Range(u32_range_from_string("712026294-712074283").unwrap())
+        UmbrawgAttribute::H1Range(
+            u32_range_from_string("712026294-712074283").unwrap(),
+        )
     } else {
         UmbrawgAttribute::H1("712026294-712074283".into())
     };
     let h2 = if version >= 3 {
-        UmbrawgAttribute::H2Range(u32_range_from_string("1504260570-1504277407").unwrap())
+        UmbrawgAttribute::H2Range(
+            u32_range_from_string("1504260570-1504277407").unwrap(),
+        )
     } else {
         UmbrawgAttribute::H2("1504260570-1504277407".into())
     };
     let h3 = if version >= 3 {
-        UmbrawgAttribute::H3Range(u32_range_from_string("2938347170-2938351405").unwrap())
+        UmbrawgAttribute::H3Range(
+            u32_range_from_string("2938347170-2938351405").unwrap(),
+        )
     } else {
         UmbrawgAttribute::H3("2938347170-2938351405".into())
     };
     let h4 = if version >= 3 {
-        UmbrawgAttribute::H4Range(u32_range_from_string("3916942126-3916960536").unwrap())
+        UmbrawgAttribute::H4Range(
+            u32_range_from_string("3916942126-3916960536").unwrap(),
+        )
     } else {
         UmbrawgAttribute::H4("3916942126-3916960536".into())
     };
 
-    let header_key: [u8; 32] = base64::decode("hj875O8KOzPqqrKI3FnA768294uWGdMDPh7ts49SzLU=").unwrap().try_into().unwrap();
+    let header_key: [u8; 32] =
+        base64::decode("hj875O8KOzPqqrKI3FnA768294uWGdMDPh7ts49SzLU=")
+            .unwrap()
+            .try_into()
+            .unwrap();
 
     let set_msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
@@ -428,52 +434,159 @@ async fn test_set_and_get_all_3_1_parameters() {
             UmbrawgAttribute::DisableCookies(false),
         ],
     };
-    let ack = send_request_result(&mut handle, set_msg, NLM_F_REQUEST | NLM_F_ACK).await;
+    let ack =
+        send_request_result(&mut handle, set_msg, NLM_F_REQUEST | NLM_F_ACK)
+            .await;
     assert!(ack.is_ok(), "set 3.1 failed: {:?}", ack);
 
     let get_msg = UmbrawgMessage {
         cmd: UmbrawgCmd::GetDevice,
         attributes: vec![UmbrawgAttribute::IfName(ifname.clone())],
     };
-    let responses = send_request(&mut handle, get_msg, NLM_F_REQUEST | NLM_F_DUMP).await;
+    let responses =
+        send_request(&mut handle, get_msg, NLM_F_REQUEST | NLM_F_DUMP).await;
     assert_eq!(responses.len(), 1);
     let attrs = &responses[0].attributes;
 
-    let jc = attrs.iter().find_map(|a| if let UmbrawgAttribute::JC(v)=a {Some(*v)} else {None});
+    let jc = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::JC(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(jc, Some(6));
-    let jmin = attrs.iter().find_map(|a| if let UmbrawgAttribute::Jmin(v)=a {Some(*v)} else {None});
+    let jmin = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::Jmin(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(jmin, Some(292));
-    let jmax = attrs.iter().find_map(|a| if let UmbrawgAttribute::Jmax(v)=a {Some(*v)} else {None});
+    let jmax = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::Jmax(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(jmax, Some(1152));
-    let s1 = attrs.iter().find_map(|a| if let UmbrawgAttribute::S1(v)=a {Some(*v)} else {None});
+    let s1 = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::S1(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(s1, Some(34));
-    let s2 = attrs.iter().find_map(|a| if let UmbrawgAttribute::S2(v)=a {Some(*v)} else {None});
+    let s2 = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::S2(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(s2, Some(97));
-    let s3 = attrs.iter().find_map(|a| if let UmbrawgAttribute::S3(v)=a {Some(*v)} else {None});
+    let s3 = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::S3(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(s3, Some(31));
-    let s4 = attrs.iter().find_map(|a| if let UmbrawgAttribute::S4(v)=a {Some(*v)} else {None});
+    let s4 = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::S4(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(s4, Some(28));
-    let has_h1 = attrs.iter().any(|a| matches!(a, UmbrawgAttribute::H1(_) | UmbrawgAttribute::H1Range(_)));
+    let has_h1 = attrs.iter().any(|a| {
+        matches!(a, UmbrawgAttribute::H1(_) | UmbrawgAttribute::H1Range(_))
+    });
     assert!(has_h1, "H1 missing");
-    let i1 = attrs.iter().find_map(|a| if let UmbrawgAttribute::I1(v)=a {Some(v.clone())} else {None});
+    let i1 = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::I1(v) = a {
+            Some(v.clone())
+        } else {
+            None
+        }
+    });
     assert!(i1.is_some() && i1.unwrap().contains("rc 38"));
-    let cpa = attrs.iter().find_map(|a| if let UmbrawgAttribute::ContentPaddingAddition(v)=a {Some(*v)} else {None});
-    assert_eq!(cpa, Some(pack_u16_range(51,197)));
-    let rat = attrs.iter().find_map(|a| if let UmbrawgAttribute::RekeyAfterTime(v)=a {Some(*v)} else {None});
-    assert_eq!(rat, Some(pack_u16_range(104,149)));
-    let rt = attrs.iter().find_map(|a| if let UmbrawgAttribute::RekeyTimeout(v)=a {Some(*v)} else {None});
-    assert_eq!(rt, Some(pack_u16_range(5,8)));
-    let rej = attrs.iter().find_map(|a| if let UmbrawgAttribute::RejectAfterTime(v)=a {Some(*v)} else {None});
-    assert_eq!(rej, Some(pack_u16_range(184,199)));
-    let kt = attrs.iter().find_map(|a| if let UmbrawgAttribute::KeepaliveTimeout(v)=a {Some(*v)} else {None});
-    assert_eq!(kt, Some(pack_u16_range(9,12)));
-    let mha = attrs.iter().find_map(|a| if let UmbrawgAttribute::MaxHandshakeAttempts(v)=a {Some(*v)} else {None});
-    assert_eq!(mha, Some(pack_u16_range(18,23)));
-    let rtb = attrs.iter().find_map(|a| if let UmbrawgAttribute::RandomTrailers(v)=a {Some(*v)} else {None});
+    let cpa = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::ContentPaddingAddition(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
+    assert_eq!(cpa, Some(pack_u16_range(51, 197)));
+    let rat = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::RekeyAfterTime(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
+    assert_eq!(rat, Some(pack_u16_range(104, 149)));
+    let rt = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::RekeyTimeout(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
+    assert_eq!(rt, Some(pack_u16_range(5, 8)));
+    let rej = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::RejectAfterTime(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
+    assert_eq!(rej, Some(pack_u16_range(184, 199)));
+    let kt = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::KeepaliveTimeout(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
+    assert_eq!(kt, Some(pack_u16_range(9, 12)));
+    let mha = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::MaxHandshakeAttempts(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
+    assert_eq!(mha, Some(pack_u16_range(18, 23)));
+    let rtb = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::RandomTrailers(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(rtb, Some(true));
-    let dc = attrs.iter().find_map(|a| if let UmbrawgAttribute::DisableCookies(v)=a {Some(*v)} else {None});
+    let dc = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::DisableCookies(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(dc, Some(false));
-    let hpk = attrs.iter().find_map(|a| if let UmbrawgAttribute::HeaderProtectionKey(v)=a {Some(*v)} else {None});
+    let hpk = attrs.iter().find_map(|a| {
+        if let UmbrawgAttribute::HeaderProtectionKey(v) = a {
+            Some(*v)
+        } else {
+            None
+        }
+    });
     assert_eq!(hpk, Some(header_key));
 
     delete_interface(&ifname);
@@ -481,28 +594,50 @@ async fn test_set_and_get_all_3_1_parameters() {
 
 #[tokio::test]
 async fn test_no_peers_fresh_interface() {
-    if !is_root() { eprintln!("Skipping integration test: not running as root"); return; }
+    if !is_root() {
+        eprintln!("Skipping integration test: not running as root");
+        return;
+    }
     let _guard = TEST_MUTEX.lock().await;
     let (connection, mut handle, _) = new_connection().unwrap();
     tokio::spawn(connection);
-    if !family_available(&mut handle).await { eprintln!("Skipping integration test: umbrawg family not available"); return; }
+    if !family_available(&mut handle).await {
+        eprintln!("Skipping integration test: umbrawg family not available");
+        return;
+    }
     let ifname = unique_ifname("npr");
     create_interface(&ifname).expect("failed to create test interface");
-    let get_msg = UmbrawgMessage { cmd: UmbrawgCmd::GetDevice, attributes: vec![UmbrawgAttribute::IfName(ifname.clone())] };
-    let responses = send_request(&mut handle, get_msg, NLM_F_REQUEST | NLM_F_DUMP).await;
+    let get_msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![UmbrawgAttribute::IfName(ifname.clone())],
+    };
+    let responses =
+        send_request(&mut handle, get_msg, NLM_F_REQUEST | NLM_F_DUMP).await;
     assert_eq!(responses.len(), 1);
-    let has_peers = responses[0].attributes.iter().any(|a| matches!(a, UmbrawgAttribute::Peers(_)));
-    assert!(!has_peers, "fresh interface should not have peers attribute");
+    let has_peers = responses[0]
+        .attributes
+        .iter()
+        .any(|a| matches!(a, UmbrawgAttribute::Peers(_)));
+    assert!(
+        !has_peers,
+        "fresh interface should not have peers attribute"
+    );
     delete_interface(&ifname);
 }
 
 #[tokio::test]
 async fn test_invalid_values_return_errno() {
-    if !is_root() { eprintln!("Skipping integration test: not running as root"); return; }
+    if !is_root() {
+        eprintln!("Skipping integration test: not running as root");
+        return;
+    }
     let _guard = TEST_MUTEX.lock().await;
     let (connection, mut handle, _) = new_connection().unwrap();
     tokio::spawn(connection);
-    if !family_available(&mut handle).await { eprintln!("Skipping integration test: umbrawg family not available"); return; }
+    if !family_available(&mut handle).await {
+        eprintln!("Skipping integration test: umbrawg family not available");
+        return;
+    }
     let ifname = unique_ifname("inv");
     create_interface(&ifname).expect("failed to create test interface");
 
@@ -516,22 +651,28 @@ async fn test_invalid_values_return_errno() {
             UmbrawgAttribute::S1(1),
         ],
     };
-    let res = send_request_result(&mut handle, set_msg, NLM_F_REQUEST | NLM_F_ACK).await;
+    let res =
+        send_request_result(&mut handle, set_msg, NLM_F_REQUEST | NLM_F_ACK)
+            .await;
     eprintln!("header-protection invalid result: {:?}", res);
     assert_eq!(res.unwrap_err(), 22, "too-small S1 should be EINVAL");
-
-
 
     delete_interface(&ifname);
 }
 
 #[tokio::test]
 async fn test_peer_replacement() {
-    if !is_root() { eprintln!("Skipping integration test: not running as root"); return; }
+    if !is_root() {
+        eprintln!("Skipping integration test: not running as root");
+        return;
+    }
     let _guard = TEST_MUTEX.lock().await;
     let (connection, mut handle, _) = new_connection().unwrap();
     tokio::spawn(connection);
-    if !family_available(&mut handle).await { eprintln!("Skipping integration test: umbrawg family not available"); return; }
+    if !family_available(&mut handle).await {
+        eprintln!("Skipping integration test: umbrawg family not available");
+        return;
+    }
     let ifname = unique_ifname("prr");
     create_interface(&ifname).expect("failed to create test interface");
 
@@ -541,23 +682,34 @@ async fn test_peer_replacement() {
         cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
             UmbrawgAttribute::IfName(ifname.clone()),
-            UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![UmbrawgPeerAttribute::PublicKey(peer1)])]),
+            UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PublicKey(peer1),
+            ])]),
         ],
     };
-    send_request_result(&mut handle, set1, NLM_F_REQUEST | NLM_F_ACK).await.unwrap();
+    send_request_result(&mut handle, set1, NLM_F_REQUEST | NLM_F_ACK)
+        .await
+        .unwrap();
 
     let set2 = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
             UmbrawgAttribute::IfName(ifname.clone()),
             UmbrawgAttribute::Flags(1), // UWGDEVICE_F_REPLACE_PEERS
-            UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![UmbrawgPeerAttribute::PublicKey(peer2)])]),
+            UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PublicKey(peer2),
+            ])]),
         ],
     };
-    let _ = send_request_result(&mut handle, set2, NLM_F_REQUEST | NLM_F_ACK).await;
+    let _ =
+        send_request_result(&mut handle, set2, NLM_F_REQUEST | NLM_F_ACK).await;
 
-    let get_msg = UmbrawgMessage { cmd: UmbrawgCmd::GetDevice, attributes: vec![UmbrawgAttribute::IfName(ifname.clone())] };
-    let responses = send_request(&mut handle, get_msg, NLM_F_REQUEST | NLM_F_DUMP).await;
+    let get_msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![UmbrawgAttribute::IfName(ifname.clone())],
+    };
+    let responses =
+        send_request(&mut handle, get_msg, NLM_F_REQUEST | NLM_F_DUMP).await;
     assert!(!responses.is_empty());
     let mut found1 = false;
     let mut found2 = false;
@@ -567,8 +719,12 @@ async fn test_peer_replacement() {
                 for p in peers {
                     for pa in p.0.iter() {
                         if let UmbrawgPeerAttribute::PublicKey(k) = pa {
-                            if *k == peer1 { found1 = true; }
-                            if *k == peer2 { found2 = true; }
+                            if *k == peer1 {
+                                found1 = true;
+                            }
+                            if *k == peer2 {
+                                found2 = true;
+                            }
                         }
                     }
                 }

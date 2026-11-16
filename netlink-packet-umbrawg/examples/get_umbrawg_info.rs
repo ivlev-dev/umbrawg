@@ -8,17 +8,16 @@ use futures::StreamExt;
 #[cfg(target_os = "linux")]
 use genetlink::new_connection;
 #[cfg(target_os = "linux")]
-use netlink_packet_umbrawg::{
-    UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
-    UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage,
-    UmbrawgPeerAttribute,
-};
-#[cfg(target_os = "linux")]
 use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_DUMP, NLM_F_REQUEST,
 };
 #[cfg(target_os = "linux")]
 use netlink_packet_generic::GenlMessage;
+#[cfg(target_os = "linux")]
+use netlink_packet_umbrawg::{
+    UmbrawgAllowedIp, UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCmd,
+    UmbrawgMessage, UmbrawgPeerAttribute,
+};
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -44,8 +43,7 @@ async fn main() {
         attributes: vec![UmbrawgAttribute::IfName(argv[1].clone())],
     };
 
-    let genlmsg: GenlMessage<UmbrawgMessage> =
-        GenlMessage::from_payload(msg);
+    let genlmsg: GenlMessage<UmbrawgMessage> = GenlMessage::from_payload(msg);
     let mut nlmsg = NetlinkMessage::from(genlmsg);
     nlmsg.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
 

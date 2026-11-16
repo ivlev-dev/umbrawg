@@ -10,9 +10,8 @@ use netlink_packet_generic::{GenlBuffer, GenlHeader};
 use pretty_assertions::assert_eq;
 
 use crate::{
-    UmbrawgAddressFamily, UmbrawgAllowedIp,
-    UmbrawgAllowedIpAttr, UmbrawgAttribute,
-    UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
+    UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
     UmbrawgPeerAttribute, UmbrawgTimeSpec,
 };
 
@@ -25,8 +24,7 @@ fn roundtrip_msg(msg: UmbrawgMessage) -> UmbrawgMessage {
     let mut buffer = vec![0; msg.buffer_len() + header_len];
     header.emit(&mut buffer);
     msg.emit(&mut buffer[header_len..]);
-    UmbrawgMessage::parse_with_param(&buffer[header_len..], header)
-        .unwrap()
+    UmbrawgMessage::parse_with_param(&buffer[header_len..], header).unwrap()
 }
 
 // nlmon capture of netlink packet sent by `sudo wg` command with netlink
@@ -112,12 +110,10 @@ fn test_query_reply() {
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ]),
-            UmbrawgPeerAttribute::LastHandshake(
-                UmbrawgTimeSpec {
-                    seconds: 1769415834,
-                    nano_seconds: 262671874,
-                },
-            ),
+            UmbrawgPeerAttribute::LastHandshake(UmbrawgTimeSpec {
+                seconds: 1769415834,
+                nano_seconds: 262671874,
+            }),
             UmbrawgPeerAttribute::PersistentKeepalive(25),
             UmbrawgPeerAttribute::TxBytes(1917056),
             UmbrawgPeerAttribute::RxBytes(30426264),
@@ -125,17 +121,11 @@ fn test_query_reply() {
             UmbrawgPeerAttribute::Endpoint(
                 std::net::SocketAddr::from_str("1.1.1.1:1111").unwrap(),
             ),
-            UmbrawgPeerAttribute::AllowedIps(vec![
-                UmbrawgAllowedIp(vec![
-                    UmbrawgAllowedIpAttr::Cidr(0),
-                    UmbrawgAllowedIpAttr::Family(
-                        UmbrawgAddressFamily::Ipv4,
-                    ),
-                    UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(
-                        Ipv4Addr::UNSPECIFIED,
-                    )),
-                ]),
-            ]),
+            UmbrawgPeerAttribute::AllowedIps(vec![UmbrawgAllowedIp(vec![
+                UmbrawgAllowedIpAttr::Cidr(0),
+                UmbrawgAllowedIpAttr::Family(UmbrawgAddressFamily::Ipv4),
+                UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(Ipv4Addr::UNSPECIFIED)),
+            ])]),
         ])]),
     ];
 
@@ -284,8 +274,7 @@ fn test_uwg31_attribute_wire_format() {
     // payload zero-padded to 4-byte alignment.
     assert_eq!(buf, vec![0x05, 0x00, 0x21, 0x00, 0x01, 0x00, 0x00, 0x00]);
 
-    let parsed =
-        UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
     assert_eq!(parsed, UmbrawgAttribute::RandomTrailers(true));
 }
 
@@ -293,22 +282,14 @@ fn test_uwg31_attribute_wire_format() {
 fn test_allowed_ips_ipv6_roundtrip() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
-        attributes: vec![UmbrawgAttribute::Peers(vec![
-            UmbrawgPeer(vec![
-                UmbrawgPeerAttribute::PublicKey([42u8; 32]),
-                UmbrawgPeerAttribute::AllowedIps(vec![
-                    UmbrawgAllowedIp(vec![
-                        UmbrawgAllowedIpAttr::Family(
-                            UmbrawgAddressFamily::Ipv6,
-                        ),
-                        UmbrawgAllowedIpAttr::IpAddr(IpAddr::V6(
-                            Ipv6Addr::UNSPECIFIED,
-                        )),
-                        UmbrawgAllowedIpAttr::Cidr(0),
-                    ]),
-                ]),
-            ]),
-        ])],
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([42u8; 32]),
+            UmbrawgPeerAttribute::AllowedIps(vec![UmbrawgAllowedIp(vec![
+                UmbrawgAllowedIpAttr::Family(UmbrawgAddressFamily::Ipv6),
+                UmbrawgAllowedIpAttr::IpAddr(IpAddr::V6(Ipv6Addr::UNSPECIFIED)),
+                UmbrawgAllowedIpAttr::Cidr(0),
+            ])]),
+        ])])],
     };
 
     assert_eq!(msg, roundtrip_msg(msg.clone()));
@@ -318,31 +299,25 @@ fn test_allowed_ips_ipv6_roundtrip() {
 fn test_multiple_allowed_ips_per_peer() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
-        attributes: vec![UmbrawgAttribute::Peers(vec![
-            UmbrawgPeer(vec![
-                UmbrawgPeerAttribute::PublicKey([7u8; 32]),
-                UmbrawgPeerAttribute::AllowedIps(vec![
-                    UmbrawgAllowedIp(vec![
-                        UmbrawgAllowedIpAttr::Family(
-                            UmbrawgAddressFamily::Ipv4,
-                        ),
-                        UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(
-                            Ipv4Addr::new(10, 0, 0, 0),
-                        )),
-                        UmbrawgAllowedIpAttr::Cidr(8),
-                    ]),
-                    UmbrawgAllowedIp(vec![
-                        UmbrawgAllowedIpAttr::Family(
-                            UmbrawgAddressFamily::Ipv6,
-                        ),
-                        UmbrawgAllowedIpAttr::IpAddr(IpAddr::V6(
-                            Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1),
-                        )),
-                        UmbrawgAllowedIpAttr::Cidr(128),
-                    ]),
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([7u8; 32]),
+            UmbrawgPeerAttribute::AllowedIps(vec![
+                UmbrawgAllowedIp(vec![
+                    UmbrawgAllowedIpAttr::Family(UmbrawgAddressFamily::Ipv4),
+                    UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(Ipv4Addr::new(
+                        10, 0, 0, 0,
+                    ))),
+                    UmbrawgAllowedIpAttr::Cidr(8),
+                ]),
+                UmbrawgAllowedIp(vec![
+                    UmbrawgAllowedIpAttr::Family(UmbrawgAddressFamily::Ipv6),
+                    UmbrawgAllowedIpAttr::IpAddr(IpAddr::V6(Ipv6Addr::new(
+                        0xfd00, 0, 0, 0, 0, 0, 0, 1,
+                    ))),
+                    UmbrawgAllowedIpAttr::Cidr(128),
                 ]),
             ]),
-        ])],
+        ])])],
     };
 
     assert_eq!(msg, roundtrip_msg(msg.clone()));
@@ -352,24 +327,20 @@ fn test_multiple_allowed_ips_per_peer() {
 fn test_peer_with_endpoint_keepalive_and_flags() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
-        attributes: vec![UmbrawgAttribute::Peers(vec![
-            UmbrawgPeer(vec![
-                UmbrawgPeerAttribute::PublicKey([1u8; 32]),
-                UmbrawgPeerAttribute::PresharedKey([2u8; 32]),
-                UmbrawgPeerAttribute::Endpoint(SocketAddr::V6(
-                    SocketAddrV6::new(
-                        Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
-                        51820,
-                        0,
-                        0,
-                    ),
-                )),
-                UmbrawgPeerAttribute::PersistentKeepalive(25),
-                UmbrawgPeerAttribute::Flags(
-                    crate::constants::UWGPEER_F_REPLACE_ALLOWEDIPS,
-                ),
-            ]),
-        ])],
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([1u8; 32]),
+            UmbrawgPeerAttribute::PresharedKey([2u8; 32]),
+            UmbrawgPeerAttribute::Endpoint(SocketAddr::V6(SocketAddrV6::new(
+                Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
+                51820,
+                0,
+                0,
+            ))),
+            UmbrawgPeerAttribute::PersistentKeepalive(25),
+            UmbrawgPeerAttribute::Flags(
+                crate::constants::UWGPEER_F_REPLACE_ALLOWEDIPS,
+            ),
+        ])])],
     };
 
     assert_eq!(msg, roundtrip_msg(msg.clone()));
@@ -426,17 +397,13 @@ fn test_full_device_config_roundtrip() {
                     51820,
                 )),
                 UmbrawgPeerAttribute::PersistentKeepalive(25),
-                UmbrawgPeerAttribute::AllowedIps(vec![
-                    UmbrawgAllowedIp(vec![
-                        UmbrawgAllowedIpAttr::Family(
-                            UmbrawgAddressFamily::Ipv4,
-                        ),
-                        UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(
-                            Ipv4Addr::new(0, 0, 0, 0),
-                        )),
-                        UmbrawgAllowedIpAttr::Cidr(0),
-                    ]),
-                ]),
+                UmbrawgPeerAttribute::AllowedIps(vec![UmbrawgAllowedIp(vec![
+                    UmbrawgAllowedIpAttr::Family(UmbrawgAddressFamily::Ipv4),
+                    UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(Ipv4Addr::new(
+                        0, 0, 0, 0,
+                    ))),
+                    UmbrawgAllowedIpAttr::Cidr(0),
+                ])]),
             ])]),
         ],
     };
@@ -466,8 +433,7 @@ fn test_parse_v3_magic_headers_and_keepalive() {
         cmd: UmbrawgCmd::GetDevice.into(),
         version: 3,
     };
-    let parsed =
-        UmbrawgMessage::parse_with_param(&raw, header).unwrap();
+    let parsed = UmbrawgMessage::parse_with_param(&raw, header).unwrap();
     assert_eq!(
         parsed.attributes,
         vec![
@@ -487,9 +453,7 @@ fn test_parse_v3_magic_headers_and_keepalive() {
     let attr = UmbrawgPeerAttribute::parse(&buf).unwrap();
     assert_eq!(
         attr,
-        UmbrawgPeerAttribute::PersistentKeepaliveRange(
-            25 | (25 << 16)
-        )
+        UmbrawgPeerAttribute::PersistentKeepaliveRange(25 | (25 << 16))
     );
 }
 
@@ -507,8 +471,7 @@ fn test_parse_v1_magic_header_string_8_bytes() {
         cmd: UmbrawgCmd::GetDevice.into(),
         version: 2,
     };
-    let parsed =
-        UmbrawgMessage::parse_with_param(&raw, header).unwrap();
+    let parsed = UmbrawgMessage::parse_with_param(&raw, header).unwrap();
     assert_eq!(
         parsed.attributes,
         vec![UmbrawgAttribute::H1("1234567".into())]
@@ -528,12 +491,8 @@ fn test_parse_legacy_magic_header_u32() {
         cmd: UmbrawgCmd::GetDevice.into(),
         version: 1,
     };
-    let parsed =
-        UmbrawgMessage::parse_with_param(&raw, header).unwrap();
-    assert_eq!(
-        parsed.attributes,
-        vec![UmbrawgAttribute::H1("123".into())]
-    );
+    let parsed = UmbrawgMessage::parse_with_param(&raw, header).unwrap();
+    assert_eq!(parsed.attributes, vec![UmbrawgAttribute::H1("123".into())]);
 }
 
 /// Range variants emit the UmbraWG 3.0 u64 wire format; parsing them back
@@ -545,9 +504,7 @@ fn test_magic_header_range_emit() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            UmbrawgAttribute::H1Range(u32_range_pack(
-                61220074, 118999195,
-            )),
+            UmbrawgAttribute::H1Range(u32_range_pack(61220074, 118999195)),
             UmbrawgAttribute::H4Range(u32_range_pack(4, 4)),
         ],
     };
@@ -595,14 +552,10 @@ fn test_v3_device_attributes_roundtrip() {
 fn test_keepalive_range_roundtrip() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
-        attributes: vec![UmbrawgAttribute::Peers(vec![
-            UmbrawgPeer(vec![
-                UmbrawgPeerAttribute::PublicKey([3u8; 32]),
-                UmbrawgPeerAttribute::PersistentKeepaliveRange(
-                    25 | (30 << 16),
-                ),
-            ]),
-        ])],
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([3u8; 32]),
+            UmbrawgPeerAttribute::PersistentKeepaliveRange(25 | (30 << 16)),
+        ])])],
     };
 
     assert_eq!(msg, roundtrip_msg(msg.clone()));

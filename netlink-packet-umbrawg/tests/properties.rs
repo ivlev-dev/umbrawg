@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: MIT
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{
+    IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6,
+};
 
 use netlink_packet_core::{Emitable, ParseableParametrized};
 use netlink_packet_generic::GenlHeader;
 use netlink_packet_umbrawg::{
     range::{u32_range_from_string, u32_range_pack, u32_range_unpack},
-    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr, UmbrawgAttribute,
-    UmbrawgCmd, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgTimeSpec,
+    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
+    UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgPeerAttribute, UmbrawgTimeSpec,
 };
 use proptest::prelude::*;
 
@@ -38,12 +41,16 @@ fn arb_addr() -> impl Strategy<Value = SocketAddr> {
         (any::<u32>(), any::<u16>()).prop_map(|(ip, port)| {
             SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::from(ip), port))
         }),
-        (arb_bytes16(), any::<u16>(), any::<u32>(), any::<u32>())
-            .prop_map(|(ip, port, flow, scope)| {
+        (arb_bytes16(), any::<u16>(), any::<u32>(), any::<u32>()).prop_map(
+            |(ip, port, flow, scope)| {
                 SocketAddr::V6(SocketAddrV6::new(
-                    Ipv6Addr::from(ip), port, flow, scope,
+                    Ipv6Addr::from(ip),
+                    port,
+                    flow,
+                    scope,
                 ))
-            }),
+            }
+        ),
     ]
 }
 
@@ -122,9 +129,9 @@ fn arb_attr() -> impl Strategy<Value = UmbrawgAttribute> {
         arb_bytes32().prop_map(UmbrawgAttribute::PublicKey),
         any::<u16>().prop_map(UmbrawgAttribute::ListenPort),
         any::<u32>().prop_map(UmbrawgAttribute::Fwmark),
-        prop::collection::vec(arb_peer(), 0..4).prop_map(UmbrawgAttribute::Peers),
+        prop::collection::vec(arb_peer(), 0..4)
+            .prop_map(UmbrawgAttribute::Peers),
         any::<u32>().prop_map(UmbrawgAttribute::Flags),
-
         any::<u16>().prop_map(UmbrawgAttribute::JC),
         any::<u16>().prop_map(UmbrawgAttribute::Jmin),
         any::<u16>().prop_map(UmbrawgAttribute::Jmax),
@@ -134,7 +141,6 @@ fn arb_attr() -> impl Strategy<Value = UmbrawgAttribute> {
         magic_header_string().prop_map(UmbrawgAttribute::H2),
         magic_header_string().prop_map(UmbrawgAttribute::H3),
         magic_header_string().prop_map(UmbrawgAttribute::H4),
-
         any::<u16>().prop_map(UmbrawgAttribute::S3),
         any::<u16>().prop_map(UmbrawgAttribute::S4),
         // I1-I5 as generic (possibly empty) strings; parse_string must accept.
@@ -157,9 +163,16 @@ fn arb_attr() -> impl Strategy<Value = UmbrawgAttribute> {
 }
 
 fn arb_msg() -> impl Strategy<Value = UmbrawgMessage> {
-    (prop_oneof![Just(UmbrawgCmd::GetDevice), Just(UmbrawgCmd::SetDevice),
-                  any::<u8>().prop_filter("not 0/1", |v| *v != 0 && *v != 1).prop_map(UmbrawgCmd::Other)],
-     prop::collection::vec(arb_attr(), 0..8))
+    (
+        prop_oneof![
+            Just(UmbrawgCmd::GetDevice),
+            Just(UmbrawgCmd::SetDevice),
+            any::<u8>()
+                .prop_filter("not 0/1", |v| *v != 0 && *v != 1)
+                .prop_map(UmbrawgCmd::Other)
+        ],
+        prop::collection::vec(arb_attr(), 0..8),
+    )
         .prop_map(|(cmd, attrs)| UmbrawgMessage {
             cmd,
             attributes: attrs,
@@ -271,14 +284,16 @@ fn parse_random_buffers_never_panic() {
     use proptest::test_runner::Config;
     let mut runner = proptest::test_runner::TestRunner::new(Config::default());
     let strat = prop::collection::vec(any::<u8>(), 0..512);
-    runner.run(&strat, |buf| {
-        let header = GenlHeader { cmd: 0, version: 2 };
-        let r = std::panic::catch_unwind(|| {
-            let _ = UmbrawgMessage::parse_with_param(&buf, header);
-        });
-        prop_assert!(r.is_ok());
-        Ok(())
-    }).unwrap();
+    runner
+        .run(&strat, |buf| {
+            let header = GenlHeader { cmd: 0, version: 2 };
+            let r = std::panic::catch_unwind(|| {
+                let _ = UmbrawgMessage::parse_with_param(&buf, header);
+            });
+            prop_assert!(r.is_ok());
+            Ok(())
+        })
+        .unwrap();
 }
 
 // ensure parse_string accepts subset; compile check

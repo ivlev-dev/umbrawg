@@ -329,11 +329,10 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 parse_u32(payload)
                     .context("invalid UWGDEVICE_A_FWMARK value")?,
             ),
-            UWGDEVICE_A_PEERS => {
-                Self::Peers(UmbrawgPeers::parse(buf)?.0)
-            }
+            UWGDEVICE_A_PEERS => Self::Peers(UmbrawgPeers::parse(buf)?.0),
             UWGDEVICE_A_FLAGS => Self::Flags(
-                parse_u32(payload).context("invalid UWGDEVICE_A_FLAGS value")?,
+                parse_u32(payload)
+                    .context("invalid UWGDEVICE_A_FLAGS value")?,
             ),
             UWGDEVICE_A_PEER => Self::Peer(UmbrawgPeer::parse(buf)?),
             UWGDEVICE_A_JC => Self::JC(
@@ -374,19 +373,24 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 parse_u16(payload).context("invalid UWGDEVICE_A_S4 value")?,
             ),
             UWGDEVICE_A_I1 => Self::I1(
-                parse_string(payload).context("invalid UWGDEVICE_A_I1 value")?,
+                parse_string(payload)
+                    .context("invalid UWGDEVICE_A_I1 value")?,
             ),
             UWGDEVICE_A_I2 => Self::I2(
-                parse_string(payload).context("invalid UWGDEVICE_A_I2 value")?,
+                parse_string(payload)
+                    .context("invalid UWGDEVICE_A_I2 value")?,
             ),
             UWGDEVICE_A_I3 => Self::I3(
-                parse_string(payload).context("invalid UWGDEVICE_A_I3 value")?,
+                parse_string(payload)
+                    .context("invalid UWGDEVICE_A_I3 value")?,
             ),
             UWGDEVICE_A_I4 => Self::I4(
-                parse_string(payload).context("invalid UWGDEVICE_A_I4 value")?,
+                parse_string(payload)
+                    .context("invalid UWGDEVICE_A_I4 value")?,
             ),
             UWGDEVICE_A_I5 => Self::I5(
-                parse_string(payload).context("invalid UWGDEVICE_A_I5 value")?,
+                parse_string(payload)
+                    .context("invalid UWGDEVICE_A_I5 value")?,
             ),
             UWGDEVICE_A_HEADER_PROTECTION_KEY => Self::HeaderProtectionKey(
                 payload

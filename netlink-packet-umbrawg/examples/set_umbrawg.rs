@@ -12,18 +12,17 @@ use futures::StreamExt;
 #[cfg(target_os = "linux")]
 use genetlink::new_connection;
 #[cfg(target_os = "linux")]
-use netlink_packet_umbrawg::{
-    UmbrawgAddressFamily, UmbrawgAllowedIp,
-    UmbrawgAllowedIpAttr, UmbrawgAttribute,
-    UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
-    UmbrawgPeerAttribute,
-};
-#[cfg(target_os = "linux")]
 use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_REQUEST,
 };
 #[cfg(target_os = "linux")]
 use netlink_packet_generic::GenlMessage;
+#[cfg(target_os = "linux")]
+use netlink_packet_umbrawg::{
+    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
+    UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgPeerAttribute,
+};
 
 #[cfg(not(target_os = "linux"))]
 fn main() {
@@ -91,22 +90,14 @@ async fn main() {
             UmbrawgPeerAttribute::AllowedIps(vec![
                 UmbrawgAllowedIp(vec![
                     // ipv4 0.0.0.0/0
-                    UmbrawgAllowedIpAttr::Family(
-                        UmbrawgAddressFamily::Ipv4,
-                    ),
-                    UmbrawgAllowedIpAttr::IpAddr(
-                        "0.0.0.0".parse().unwrap(),
-                    ),
+                    UmbrawgAllowedIpAttr::Family(UmbrawgAddressFamily::Ipv4),
+                    UmbrawgAllowedIpAttr::IpAddr("0.0.0.0".parse().unwrap()),
                     UmbrawgAllowedIpAttr::Cidr(0),
                 ]),
                 UmbrawgAllowedIp(vec![
                     // ipv6 ::/0
-                    UmbrawgAllowedIpAttr::Family(
-                        UmbrawgAddressFamily::Ipv6,
-                    ),
-                    UmbrawgAllowedIpAttr::IpAddr(
-                        "::".parse().unwrap(),
-                    ),
+                    UmbrawgAllowedIpAttr::Family(UmbrawgAddressFamily::Ipv6),
+                    UmbrawgAllowedIpAttr::IpAddr("::".parse().unwrap()),
                     UmbrawgAllowedIpAttr::Cidr(0),
                 ]),
             ]),
@@ -118,8 +109,7 @@ async fn main() {
         attributes,
     };
 
-    let genlmsg: GenlMessage<UmbrawgMessage> =
-        GenlMessage::from_payload(msg);
+    let genlmsg: GenlMessage<UmbrawgMessage> = GenlMessage::from_payload(msg);
 
     let mut nlmsg = NetlinkMessage::from(genlmsg);
     nlmsg.header.flags = NLM_F_REQUEST | NLM_F_ACK;

@@ -107,9 +107,7 @@ impl ParseableParametrized<[u8], GenlHeader> for UmbrawgMessage {
    ATTRIBUTE PARSER
 ========================= */
 
-fn parse_attributes(
-    buf: &[u8],
-) -> Result<Vec<UmbrawgAttribute>, DecodeError> {
+fn parse_attributes(buf: &[u8]) -> Result<Vec<UmbrawgAttribute>, DecodeError> {
     let mut attrs = Vec::new();
 
     for nla in NlasIterator::new(buf) {

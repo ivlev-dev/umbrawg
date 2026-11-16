@@ -11,9 +11,7 @@ const UWGALLOWEDIP_A_FAMILY: u16 = 1;
 const UWGALLOWEDIP_A_IPADDR: u16 = 2;
 const UWGALLOWEDIP_A_CIDR_MASK: u16 = 3;
 
-pub(crate) struct UmbrawgAllowedIps(
-    pub(crate) Vec<UmbrawgAllowedIp>,
-);
+pub(crate) struct UmbrawgAllowedIps(pub(crate) Vec<UmbrawgAllowedIp>);
 
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
     for UmbrawgAllowedIps

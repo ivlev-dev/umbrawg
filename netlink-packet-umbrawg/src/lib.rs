@@ -16,14 +16,8 @@ mod socket_addr;
 mod test;
 
 pub use self::{
-    allowedip::{
-        UmbrawgAddressFamily, UmbrawgAllowedIp,
-        UmbrawgAllowedIpAttr,
-    },
+    allowedip::{UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr},
     attribute::UmbrawgAttribute,
     message::{UmbrawgCmd, UmbrawgMessage},
-    peer::{
-        UmbrawgPeer, UmbrawgPeerAttribute,
-        UmbrawgTimeSpec,
-    },
+    peer::{UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgTimeSpec},
 };
