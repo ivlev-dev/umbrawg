@@ -89,28 +89,54 @@ fn parse_magic_header(payload: &[u8]) -> Result<String, DecodeError> {
     }
 }
 
+/// One `UWGDEVICE_A_*` attribute of an
+/// [`UmbrawgMessage`](crate::UmbrawgMessage).
+///
+/// The variants cover the attributes of every supported UmbraWG kernel
+/// module generation. Attributes this crate does not know are preserved in
+/// [`Other`](Self::Other) so that they can be re-emitted unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UmbrawgAttribute {
+    /// `UWGDEVICE_A_IFINDEX`: interface index (`u32`).
     IfIndex(u32),
+    /// `UWGDEVICE_A_IFNAME`: interface name, a NUL-terminated string.
     IfName(String),
+    /// `UWGDEVICE_A_PRIVATE_KEY`: static private key, 32 bytes.
+    ///
+    /// `UWG_CMD_GET_DEVICE` replies usually zero the key. On input an
+    /// all-zero key removes the static key.
     PrivateKey([u8; UWG_KEY_LEN]),
+    /// `UWGDEVICE_A_PUBLIC_KEY`: derived static public key, 32 bytes.
+    ///
+    /// Read-only: the kernel fills it in `UWG_CMD_GET_DEVICE` replies and
+    /// ignores it in `UWG_CMD_SET_DEVICE` requests.
     PublicKey([u8; UWG_KEY_LEN]),
+    /// `UWGDEVICE_A_LISTEN_PORT`: UDP listen port; `0` picks one randomly.
     ListenPort(u16),
+    /// `UWGDEVICE_A_FWMARK`: firewall mark; `0` disables it.
     Fwmark(u32),
+    /// `UWGDEVICE_A_PEERS`: nested list of peers.
     Peers(Vec<UmbrawgPeer>),
+    /// `UWGDEVICE_A_FLAGS`: `u32` bit mask of `UWGDEVICE_F_*` flags.
     Flags(u32),
-    // Umbra attributes
     /// `UWGDEVICE_A_PEER` (`NLA_NESTED`): a single peer.
     ///
     /// Used by `UWG_CMD_UNKNOWN_PEER` notifications. The peer attributes are
     /// nested directly, without the extra nesting level used by the
     /// [`Peers`](Self::Peers) list.
     Peer(UmbrawgPeer),
-    JC(u16),   // JunkCount
-    Jmin(u16), // JunkPacketMinSize
-    Jmax(u16), // JunkPacketMaxSize
+    /// `UWGDEVICE_A_JC`: number of junk packets (`u16`).
+    JC(u16),
+    /// `UWGDEVICE_A_JMIN`: minimal junk packet size (`u16`).
+    Jmin(u16),
+    /// `UWGDEVICE_A_JMAX`: maximal junk packet size (`u16`).
+    Jmax(u16),
+    /// `UWGDEVICE_A_S1`: padding added to handshake initiation messages
+    /// (`u16`).
     S1(u16),
+    /// `UWGDEVICE_A_S2`: padding added to handshake response messages
+    /// (`u16`).
     S2(u16),
     /// Magic header spec, e.g. `"61220074"` or `"684141592-1751861769"`.
     ///
@@ -119,41 +145,72 @@ pub enum UmbrawgAttribute {
     /// formats (string, `u32`, packed `u64` range) are normalized into this
     /// variant.
     H1(String),
+    /// `UWGDEVICE_A_H2` magic header spec; see [`H1`](Self::H1).
     H2(String),
+    /// `UWGDEVICE_A_H3` magic header spec; see [`H1`](Self::H1).
     H3(String),
+    /// `UWGDEVICE_A_H4` magic header spec; see [`H1`](Self::H1).
     H4(String),
     /// Magic header as a packed `u64` range (`lo | hi << 32`), the wire
     /// format of the UmbraWG 3.0 kernel module (genl family version 3).
     /// Use [`crate::range::u32_range_from_string`] to build these from spec
     /// strings. Never produced by parsing; see the `H1`..`H4` variants.
     H1Range(u64),
+    /// `UWGDEVICE_A_H2` as a packed `u64` range; see
+    /// [`H1Range`](Self::H1Range).
     H2Range(u64),
+    /// `UWGDEVICE_A_H3` as a packed `u64` range; see
+    /// [`H1Range`](Self::H1Range).
     H3Range(u64),
+    /// `UWGDEVICE_A_H4` as a packed `u64` range; see
+    /// [`H1Range`](Self::H1Range).
     H4Range(u64),
+    /// `UWGDEVICE_A_S3`: padding added to cookie reply messages (`u16`).
     S3(u16),
+    /// `UWGDEVICE_A_S4`: padding added to transport data messages (`u16`).
     S4(u16),
-    /// Intermediate header descriptor string.
+    /// `UWGDEVICE_A_I1`: intermediate header descriptor, a NUL-terminated
+    /// string.
     I1(String),
+    /// `UWGDEVICE_A_I2` intermediate header descriptor.
     I2(String),
+    /// `UWGDEVICE_A_I3` intermediate header descriptor.
     I3(String),
+    /// `UWGDEVICE_A_I4` intermediate header descriptor.
     I4(String),
+    /// `UWGDEVICE_A_I5` intermediate header descriptor.
     I5(String),
-    // UmbraWG 3.0 attributes
+    /// `UWGDEVICE_A_HEADER_PROTECTION_KEY`: header protection key, 32 bytes
+    /// (UmbraWG 3.0).
     HeaderProtectionKey([u8; HEADER_PROTECTION_KEY_LEN]),
+    /// `UWGDEVICE_A_CONTENT_PADDING_ADDITION`: `u32` packing a `u16` range
+    /// `lo | hi << 16` (UmbraWG 3.0). `0` disables the addition.
     ContentPaddingAddition(u32),
+    /// `UWGDEVICE_A_REKEY_AFTER_TIME`: `u32` packing a `u16` range in
+    /// seconds (UmbraWG 3.0). `0` disables it.
     RekeyAfterTime(u32),
+    /// `UWGDEVICE_A_REKEY_TIMEOUT`: `u32` packing a `u16` range in seconds
+    /// (UmbraWG 3.0). `0` disables it.
     RekeyTimeout(u32),
+    /// `UWGDEVICE_A_REJECT_AFTER_TIME`: `u32` packing a `u16` range in
+    /// seconds (UmbraWG 3.0). `0` disables it.
     RejectAfterTime(u32),
+    /// `UWGDEVICE_A_KEEPALIVE_TIMEOUT`: `u32` packing a `u16` range in
+    /// seconds (UmbraWG 3.0). `0` disables it.
     KeepaliveTimeout(u32),
+    /// `UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS`: `u32` packing a `u16` range
+    /// (UmbraWG 3.0).
     MaxHandshakeAttempts(u32),
-    // UmbraWG 3.1 attributes (genl family version is still 3; only the
-    // 3.1+ kernel module accepts them).
+    /// `UWGDEVICE_A_RANDOM_TRAILERS`: `u8` boolean (UmbraWG 3.1).
     RandomTrailers(bool),
+    /// `UWGDEVICE_A_DISABLE_COOKIES`: `u8` boolean (UmbraWG 3.1).
     DisableCookies(bool),
+    /// An attribute this crate does not know; kept verbatim.
     Other(DefaultNla),
 }
 
 impl UmbrawgAttribute {
+    /// Length of a Curve25519 key in bytes.
     pub const UWG_KEY_LEN: usize = UWG_KEY_LEN;
 }
 

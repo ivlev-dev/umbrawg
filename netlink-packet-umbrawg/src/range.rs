@@ -47,6 +47,45 @@ pub fn u32_range_from_string(spec: &str) -> Option<u64> {
     Some(u32_range_pack(lo, hi))
 }
 
+/// Packs a `[lo, hi]` `u16` range into the `u32` wire value used by the
+/// UmbraWG 3.0 kernel module for `ContentPaddingAddition`,
+/// `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`,
+/// `MaxHandshakeAttempts` and the persistent keepalive interval.
+pub fn u16_range_pack(lo: u16, hi: u16) -> u32 {
+    ((hi as u32) << 16) | (lo as u32)
+}
+
+/// Unpacks the `u32` wire value into `(lo, hi)`.
+pub fn u16_range_unpack(range: u32) -> (u16, u16) {
+    (range as u16, (range >> 16) as u16)
+}
+
+/// Formats a packed `u16` range as `"<lo>"` when `lo == hi` and
+/// `"<lo>-<hi>"` otherwise.
+pub fn u16_range_to_string(range: u32) -> String {
+    let (lo, hi) = u16_range_unpack(range);
+    if lo == hi {
+        lo.to_string()
+    } else {
+        format!("{lo}-{hi}")
+    }
+}
+
+/// Parses a `u16` range spec (`"<v>"` or `"<lo>-<hi>"`) into the packed
+/// `u32` wire value. Returns `None` for malformed input or when `lo > hi`.
+pub fn u16_range_from_string(spec: &str) -> Option<u32> {
+    let mut parts = spec.splitn(2, '-');
+    let lo: u16 = parts.next()?.trim().parse().ok()?;
+    let hi: u16 = match parts.next() {
+        Some(s) => s.trim().parse().ok()?,
+        None => lo,
+    };
+    if lo > hi {
+        return None;
+    }
+    Some(u16_range_pack(lo, hi))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,5 +116,36 @@ mod tests {
         assert_eq!(u32_range_from_string("bad"), None);
         assert_eq!(u32_range_from_string("10-5"), None);
         assert_eq!(u32_range_from_string(""), None);
+    }
+
+    #[test]
+    fn u16_pack_unpack_roundtrip() {
+        let v = u16_range_pack(51, 197);
+        assert_eq!(v, 51 | (197 << 16));
+        assert_eq!(u16_range_unpack(v), (51, 197));
+        assert_eq!(u16_range_unpack(u16_range_pack(0, 0)), (0, 0));
+        assert_eq!(
+            u16_range_unpack(u16_range_pack(u16::MAX, u16::MAX)),
+            (u16::MAX, u16::MAX)
+        );
+    }
+
+    #[test]
+    fn u16_to_string_formats() {
+        assert_eq!(u16_range_to_string(u16_range_pack(25, 25)), "25");
+        assert_eq!(u16_range_to_string(u16_range_pack(51, 197)), "51-197");
+    }
+
+    #[test]
+    fn u16_from_string_parses() {
+        assert_eq!(u16_range_from_string("25"), Some(u16_range_pack(25, 25)));
+        assert_eq!(
+            u16_range_from_string("51-197"),
+            Some(u16_range_pack(51, 197))
+        );
+        assert_eq!(u16_range_from_string("197-51"), None);
+        assert_eq!(u16_range_from_string("70000"), None);
+        assert_eq!(u16_range_from_string(""), None);
+        assert_eq!(u16_range_from_string("0x10"), None);
     }
 }

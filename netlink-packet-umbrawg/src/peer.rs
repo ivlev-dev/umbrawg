@@ -48,6 +48,15 @@ impl std::ops::Deref for UmbrawgPeers {
     }
 }
 
+/// One peer of the nested `UWGDEVICE_A_PEERS` list.
+///
+/// The wrapper carries the flattened list of `UWGPEER_A_*` attributes of a
+/// single peer. The kernel nests each peer with type `0`, which is what the
+/// [`Nla`] implementation emits.
+///
+/// Build peers with [`UmbrawgPeerConfig`](crate::UmbrawgPeerConfig) to get
+/// range and key validation, or construct the attribute list directly when
+/// every value is already known to be valid.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UmbrawgPeer(pub Vec<UmbrawgPeerAttribute>);
 
@@ -113,9 +122,13 @@ impl std::ops::Deref for UmbrawgPeer {
 
 const TIMESPEC_LEN: usize = 16;
 
+/// A `struct __kernel_timespec` value used by
+/// `UWGPEER_A_LAST_HANDSHAKE_TIME`.
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct UmbrawgTimeSpec {
+    /// Whole seconds since the Unix epoch.
     pub seconds: i64,
+    /// Nanoseconds within [`seconds`](Self::seconds), `0..1_000_000_000`.
     pub nano_seconds: i64,
 }
 
@@ -154,11 +167,15 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
 const NOISE_PUBLIC_KEY_LEN: usize = 32;
 const NOISE_SYMMETRIC_KEY_LEN: usize = 32;
 
+/// One `UWGPEER_A_*` attribute of an [`UmbrawgPeer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum UmbrawgPeerAttribute {
+    /// `UWGPEER_A_PUBLIC_KEY`: 32-byte Curve25519 public key.
     PublicKey([u8; NOISE_PUBLIC_KEY_LEN]),
+    /// `UWGPEER_A_PRESHARED_KEY`: 32-byte pre-shared symmetric key.
     PresharedKey([u8; NOISE_SYMMETRIC_KEY_LEN]),
+    /// `UWGPEER_A_ENDPOINT`: IPv4 or IPv6 socket address.
     Endpoint(SocketAddr),
     /// Persistent keepalive interval in seconds.
     ///
@@ -172,11 +189,21 @@ pub enum UmbrawgPeerAttribute {
     /// payloads; a plain interval `v` sent by new tools arrives as
     /// `v | v << 16`.
     PersistentKeepaliveRange(u32),
+    /// `UWGPEER_A_LAST_HANDSHAKE_TIME`: time of the last handshake.
     LastHandshake(UmbrawgTimeSpec),
+    /// `UWGPEER_A_RX_BYTES`: number of received bytes.
     RxBytes(u64),
+    /// `UWGPEER_A_TX_BYTES`: number of transmitted bytes.
     TxBytes(u64),
+    /// `UWGPEER_A_ALLOWEDIPS`: nested list of allowed IP entries.
     AllowedIps(Vec<UmbrawgAllowedIp>),
+    /// `UWGPEER_A_PROTOCOL_VERSION`: protocol version, `1` when set.
     ProtocolVersion(u32),
+    /// `UWGPEER_A_FLAGS`: `u32` bit mask of `UWGPEER_F_*` flags.
+    ///
+    /// `UWG_CMD_GET_DEVICE` replies also carry the read-only
+    /// [`UWGPEER_F_HAS_ADVANCED_SECURITY`](crate::constants::UWGPEER_F_HAS_ADVANCED_SECURITY)
+    /// bit here.
     Flags(u32),
     /// `UWGPEER_A_ADVANCED_SECURITY`: a presence-only `NLA_FLAG` requesting
     /// UmbraWG advanced security for the peer.
@@ -187,6 +214,7 @@ pub enum UmbrawgPeerAttribute {
     /// [`Flags`](Self::Flags) via
     /// [`UWGPEER_F_HAS_ADVANCED_SECURITY`](crate::constants::UWGPEER_F_HAS_ADVANCED_SECURITY).
     AdvancedSecurity(bool),
+    /// An attribute this crate does not know; kept verbatim.
     Other(DefaultNla),
 }
 
