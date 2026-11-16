@@ -25,7 +25,7 @@ use umbrawg_device::{
     DatagramSink, Device, IncomingOutcome, IoContext, PacketIo, Peer, PreparedIncoming,
     PreparedTransport,
 };
-use umbrawg_transport::{RecvQueue, Socket};
+use umbrawg_transport::{RecvQueue, Socket, MAX_BATCH_SIZE};
 use umbrawg_tun::Tun;
 
 use crate::ring::SpscRing;
@@ -869,7 +869,8 @@ pub(crate) fn worker_loop(
         .collect();
     let mut tun_sizes = [0usize; TUN_BATCH];
     let mut batch_buffer = vec![0u8; TUN_BATCH * slot];
-    let mut batch = TxBatch::new(TUN_BATCH).map_err(|error| io::Error::other(error.to_string()))?;
+    let mut batch =
+        TxBatch::new(MAX_BATCH_SIZE).map_err(|error| io::Error::other(error.to_string()))?;
     let mut rx = RxBatch::new(slot);
     let mut rekey: Vec<Arc<Peer>> = Vec::with_capacity(TUN_BATCH);
     let channel = &shared.channels[index];
@@ -1257,6 +1258,13 @@ mod tests {
             vec![(0, 100)]
         );
         assert_eq!(GroChunks::new(0, Some(10)).count(), 0);
+    }
+
+    #[test]
+    fn tx_batch_uses_transport_limit() {
+        let source = include_str!("parallel.rs");
+        let needle = concat!("TxBatch::new(", "TUN_BATCH)");
+        assert!(!source.contains(needle));
     }
 
     #[test]

@@ -16,6 +16,7 @@ use umbrawg_device::{
 };
 use umbrawg_transport::{
     AddressFamily, Endpoint, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
+    MAX_BATCH_SIZE,
 };
 use umbrawg_tun::{Tun, TunConfig, TunError, TunSet, VirtioNetHdr};
 use umbrawg_uapi::{socket_dir, ServerHandle, UapiListener};
@@ -410,7 +411,8 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
         .collect();
     let mut tun_sizes = [0usize; TUN_BATCH];
     let mut batch_buffer = vec![0u8; TUN_BATCH * slot];
-    let mut batch = TxBatch::new(TUN_BATCH).map_err(|error| io::Error::other(error.to_string()))?;
+    let mut batch =
+        TxBatch::new(MAX_BATCH_SIZE).map_err(|error| io::Error::other(error.to_string()))?;
     let mut rx = RxBatch::new(slot);
     let mut rekey: Vec<Arc<Peer>> = Vec::with_capacity(TUN_BATCH);
     let mut socket: Option<Socket> = None;
@@ -735,7 +737,9 @@ fn run_parallel(
         thread::sleep(Duration::from_millis(20));
     }
 
-    wait_for_shutdown(server)?;
+    if shared.failure().is_none() {
+        wait_for_shutdown(server)?;
+    }
     if rx_handle.join().is_err() {
         shared.register_failure("rx thread panicked".to_owned());
     }
@@ -758,6 +762,14 @@ fn run_parallel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tx_batch_does_not_reuse_tun_batch_capacity() {
+        let source = include_str!("lib.rs");
+        let needle = concat!("TxBatch::new(", "TUN_BATCH)");
+        assert!(!source.contains(needle));
+        assert!(TxBatch::new(MAX_BATCH_SIZE).is_ok());
+    }
 
     #[test]
     fn parses_foreground() {
