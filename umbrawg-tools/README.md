@@ -51,6 +51,15 @@ GitHub Actions:
 path-зависимость `../netlink-packet-umbrawg` разрешается без правки
 `Cargo.toml`, локальная сборка не меняется.
 
+Кроме fmt/clippy/test в `rust-ci.yml` есть:
+
+- `bench` — `bash -n` стенда, тесты хелперов (62) и тесты отчёта (17);
+- `packaging` — `scripts/check-packaging.sh`: версии `Cargo.toml` /
+  `debian/changelog` / spec, `bash`/`sh`/`fish` синтаксис, YAML workflow,
+  `groff -man -z`, `systemd-analyze verify` и проверка, что каждый
+  поставляемый артефакт (man, completions, unit-файлы) реально ставится
+  `debian/rules`, spec и `rust-build.yml`.
+
 ## Упаковка
 
 Пакеты собираются из release-бинарников, без `make` и legacy-C:
@@ -115,8 +124,35 @@ cargo test --workspace          # unit + CLI + parity strip против legacy-
 scripts/test-kernel.sh          # утилиты против модуля ядра
 scripts/test-userspace.sh       # утилиты против userspace-демона
 scripts/test-two-nodes.sh       # 2 netns: ping + iperf3, с обфускацией и без
-bench/bench.sh                  # матрица замеров (см. TODO.md)
 ```
+
+### Стенд замеров (bench/)
+
+`bench/` — изолированный стенд: два netns (`bn0`/`bn1`), veth-пара, iperf3,
+матрица реализаций/режимов/протоколов, MTU-guard, CPU-профиль и отчёт в
+Markdown. Подробности и методика — [bench/README.md](bench/README.md).
+
+```sh
+SMOKE=1 bash bench/bench.sh                        # быстрый прогон (нужен root)
+PLAN_ONLY=1 FORCE=1 bash bench/bench.sh             # план без трафика, без root
+bash bench/tests/test-bench-lib.sh                  # 62 проверки хелперов
+python3 -m unittest discover -s bench/tests -p 'test_*.py'   # 17 тестов отчёта
+scripts/check-packaging.sh                          # man/systemd/completions/версии
+```
+
+Пути не зашиты в скрипт: `BENCH_DIR` — каталог `bench.sh`, `REPO_ROOT` — этот
+репозиторий (бинарник `target/release/uwg`), `WORKSPACE_ROOT` — каталог
+соседних репозиториев. Переопределяются `RUSTDIR`, `MODDIR` (он же
+`MODULE_DIR`), `UWG`, `DAEMON`, `GO_BASELINE`, `OBF`, `RESULT`, `REPORT_PY`.
+Если стенд развёрнут отдельно (например, `/root/umbrawg/bench`), достаточно
+задать эти переменные — см. таблицу в [bench/README.md](bench/README.md).
+
+Матрица: `IMPL_LIST`, `MODE_LIST`, `PROTO_LIST`, `CONNS_LIST`, `LOSS_LIST`,
+`OBF_LIST`, `PEERS_LIST`, `DURATION`, `SMOKE`, `REPEATS`, `UDP_RATE`,
+`UDP_RATE_LIST`, `UNDERLAY_MTU`, `TUN_MTU`, `PLAN_ONLY`, `FORCE`, `RESULT`,
+`RUN_ID`, `CPU_HOT_PCT`. Перед прогоном проверяется наличие нужных бинарников
+(`REQUIRE_FAILED`, код 5), MTU-guard (`TUN_MTU` против `UNDERLAY_MTU`) и
+занятость машины (`IDLE_GUARD`, код 3).
 
 ## Документация для разработчика
 
