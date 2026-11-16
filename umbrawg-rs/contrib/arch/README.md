@@ -55,7 +55,7 @@ systemd-analyze verify /tmp/pkg/usr/lib/systemd/system/umbrawg@.service
 проверке они исключены; полный прогон — `cargo test --workspace` от root.
 
 Проверено на хосте: `umbrawg-daemon-git` собирается из ветки с параллельным RX
-(`makepkg -f --nodeps --skipinteg`), `check()` проходит 405 тестов в 23
+(`makepkg -f --nodeps --skipinteg`), `check()` проходит 407 тестов в 23
 наборах, `umbrawg 0.1.0` из распакованного пакета печатает версию и справку,
 юнит и tmpfiles на месте, `systemd-analyze verify` для `umbrawg@.service`
 ошибок не находит (только предупреждение об отсутствии `/usr/bin/umbrawg` в
