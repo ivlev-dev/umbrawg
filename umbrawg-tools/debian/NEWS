@@ -1,4 +1,4 @@
-amneziawg (1.0.20200206-2) unstable; urgency=medium
+umbrawg (1.0.20200206-2) unstable; urgency=medium
 
   As of wireguard-linux-compat and wireguard-dkms version 0.0.20200215-2,
   we no longer treat installation of the wireguard metapackage as a reason

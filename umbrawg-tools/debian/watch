@@ -1,4 +1,4 @@
 version=4
 opts=mode=git,pgpmode=gittag \
- https://github.com/amnezia-vpn/amnezia-wg-tools.git \
+ https://github.com/umbra-vpn/umbra-wg-tools.git \
  refs/tags/v?([\d\.]+)

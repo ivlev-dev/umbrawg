@@ -1,11 +1,11 @@
-Name:           amneziawg-tools
+Name:           umbrawg-tools
 Version:        1.0.20240201
 Release:        1%{?dist}
 URL:            https://www.wireguard.com/
 Summary:        Fast, modern, secure VPN tunnel
 License:        GPLv2
 
-Source0:        https://github.com/amnezia-vpn/amneziawg-tools/archive/refs/tags/v%{version}.tar.gz
+Source0:        https://github.com/umbra-vpn/umbrawg-tools/archive/refs/tags/v%{version}.tar.gz
 
 %{?systemd_requires}
 BuildRequires: make
@@ -48,7 +48,7 @@ WITH_BASHCOMPLETION=yes WITH_WGQUICK=yes WITH_SYSTEMDUNITS=yes -C src
 %license COPYING
 %{_bindir}/awg
 %{_bindir}/awg-quick
-%{_sysconfdir}/amnezia/amneziawg/
+%{_sysconfdir}/umbra/umbrawg/
 %{_datadir}/bash-completion/completions/awg
 %{_datadir}/bash-completion/completions/awg-quick
 %{_unitdir}/awg-quick@.service
@@ -57,7 +57,7 @@ WITH_BASHCOMPLETION=yes WITH_WGQUICK=yes WITH_SYSTEMDUNITS=yes -C src
 %{_mandir}/man8/awg-quick.8*
 
 %changelog
-* Thu Feb 1 2024 Yuri Egorov <ye@amnezia.org> - 1.0.20240201-1
+* Thu Feb 1 2024 Yuri Egorov <ye@umbra.org> - 1.0.20240201-1
 - Update to 1.0.20240201
 
 * Tue Sep 21 2021 Joe Doss <joe@solidadmin.com> - 1.0.20210914-1
