@@ -56,6 +56,25 @@ cargo run --example set_umbrawg -- uwg0
 4. Публикация 0.3.0 в crates.io (после проверки интеграции на сервере).
 5. Синхронизировать README с текущим API и CI.
 
+## Пакетирование и релиз
+
+- `.github/workflows/packaging.yml`: `cargo test --all-targets`, сборка
+  `contrib/arch/rust-netlink-packet-umbrawg-git` в `archlinux:latest` с проверкой
+  содержимого `/usr/share/cargo/registry/netlink-packet-umbrawg-0.3.0` и офлайновой
+  сборки потребителя через `[source] replace`, `cargo package`, `cargo publish --dry-run`;
+  на тег `v*` в GitHub Release попадают `.pkg.tar.zst`, `.crate` и `SHA256SUMS`.
+- Тег должен совпадать с версией из `Cargo.toml` (`v0.3.0`); иначе job `версия`
+  падает до сборки.
+- Секреты не нужны: crates.io и AUR не затрагиваются. Публикация крейта остаётся
+  ручной (`cargo publish` с `CARGO_REGISTRY_TOKEN`), AUR — копированием
+  `PKGBUILD`/`.SRCINFO` в AUR-репозиторий.
+- Стабильный Arch-пакет `rust-netlink-packet-umbrawg` в CI не собирается: в
+  `sha256sums` заглушка `TODO_UPDPKGSUMS_AFTER_FIRST_TAG`, после тега нужны
+  `updpkgsums` и `makepkg --printsrcinfo > .SRCINFO`.
+- Workflow проверен в Docker (`makepkg`, офлайновая сборка потребителя,
+  `cargo package`, `cargo publish --dry-run`), но ни разу не прогонялся в
+  GitHub Actions — первый прогон по тегу считать проверкой.
+
 ## Соглашения
 
 - Числовые значения атрибутов и байтовый layout менять нельзя.
