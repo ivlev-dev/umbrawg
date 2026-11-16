@@ -1,5 +1,7 @@
 # UmbraWG kernel module
 
+[![License: GPL-2.0](https://img.shields.io/badge/License-GPL--2.0-blue.svg)](https://www.gnu.org/licenses/old-licenses/gpl-2.0.html)
+
 > [!IMPORTANT]
 > UmbraWG requires Linux 7.0 or newer. Older kernels are not supported.
 
