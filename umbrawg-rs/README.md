@@ -20,10 +20,75 @@ UmbraWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
 ## Build
 
 ```sh
+cargo build --release -p umbrawg
 cargo build --release --workspace
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 ```
+
+The minimum supported Rust version is 1.88 (`rust-version` in the manifests,
+enforced by the `msrv` CI job). The daemon depends on Linux only: `libc`,
+`rustix` (`fs`) and `/dev/net/tun`; there is no dependency on the netlink crate
+or the kernel module.
+
+### Cross build (ARM)
+
+Supported release targets: `x86_64-unknown-linux-gnu`,
+`aarch64-unknown-linux-gnu`, `armv7-unknown-linux-gnueabihf`. Cross linking
+uses the distribution cross toolchains:
+
+```sh
+rustup target add aarch64-unknown-linux-gnu armv7-unknown-linux-gnueabihf
+sudo apt-get install gcc-aarch64-linux-gnu libc6-dev-arm64-cross \
+    gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+cargo build --release -p umbrawg --target aarch64-unknown-linux-gnu
+cargo build --release -p umbrawg --target armv7-unknown-linux-gnueabihf
+```
+
+`libc6-dev-*-cross` is required: without it the cross linker fails with
+`cannot find Scrt1.o`/`crti.o`. The resulting binaries are dynamically linked
+PIE, so the target system needs a matching arm64/armhf userland. Verification
+in Docker (`rust:bookworm`, glibc 2.36) shows a maximum requirement of
+`GLIBC_2.34` for all three targets, which covers Debian 12 (bookworm) and
+Raspberry Pi OS bookworm; systems on glibc 2.31 (bullseye) need a rebuild in a
+matching container. CI builds on Ubuntu 22.04 (libc 2.35), so the produced
+archives require at most glibc 2.35.
+
+Verification without hardware:
+
+```sh
+file target/aarch64-unknown-linux-gnu/release/umbrawg
+readelf -h target/aarch64-unknown-linux-gnu/release/umbrawg
+readelf -V target/aarch64-unknown-linux-gnu/release/umbrawg
+qemu-aarch64-static -L /usr/aarch64-linux-gnu target/aarch64-unknown-linux-gnu/release/umbrawg --version
+qemu-arm-static -L /usr/arm-linux-gnueabihf target/armv7-unknown-linux-gnueabihf/release/umbrawg --version
+```
+
+## CI
+
+`.github/workflows/ci.yml`:
+
+| Job | Contents |
+|---|---|
+| `test stable` | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, `cargo doc -D warnings` |
+| `msrv 1.88` | `cargo build --workspace` and `cargo test --no-run` on the declared minimum toolchain |
+| `build <target>` | release build of `umbrawg` for all three targets, tests compiled for the target, `file`/`readelf` architecture check, qemu smoke run of the binary and unit tests under qemu, packaged `tar.gz` artifact |
+| `GitHub Release` | on a `v*` tag: `SHA256SUMS` and the archives are published |
+
+The build job runs on Ubuntu 22.04 to keep the produced binaries usable on older
+userlands. Each archive is a relocatable tree:
+
+```text
+umbrawg-<version>-<target>/
+  usr/bin/umbrawg
+  usr/share/doc/umbrawg/{README.md,CHANGELOG.md,LICENSE}
+  usr/lib/systemd/system/*.service   (only if systemd/ exists in the repository)
+```
+
+The `umbrawg@.service` unit currently ships with the `umbrawg-tools` package
+(`systemd/umbrawg@.service`), so the daemon archive contains only the binary.
 
 ## Run
 
