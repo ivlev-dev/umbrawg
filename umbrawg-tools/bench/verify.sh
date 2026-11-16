@@ -1,9 +1,14 @@
 #!/bin/bash
 set -euo pipefail
 
-MODDIR=${MODDIR:-/root/umbrawg/module/src}
-UWG=${UWG:-/root/umbrawg/tools/target/release/uwg}
-OBF=${OBF:-/root/umbrawg/bench/obf-params.conf}
+BENCH_DIR=${BENCH_DIR:-$(cd "$(dirname "$0")" && pwd)}
+REPO_ROOT=$(cd "$BENCH_DIR/.." && pwd)
+WORKSPACE_ROOT=${WORKSPACE_ROOT:-$(cd "$REPO_ROOT/.." && pwd)}
+. "$BENCH_DIR/bench-lib.sh"
+
+MODDIR=${MODDIR:-${MODULE_DIR:-$(first_existing_dir "$WORKSPACE_ROOT/umbrawg-linux-kernel-module/src" "$WORKSPACE_ROOT/module/src")}}
+UWG=${UWG:-$(first_existing_file "$REPO_ROOT/target/release/uwg" "$WORKSPACE_ROOT/umbrawg-tools/target/release/uwg" "$WORKSPACE_ROOT/tools/target/release/uwg")}
+OBF=${OBF:-$BENCH_DIR/obf-params.conf}
 NS0=uwg0ns
 NS1=uwg1ns
 IF0=uwgt0

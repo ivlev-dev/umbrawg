@@ -1,10 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-RUSTDIR=${RUSTDIR:-/root/umbrawg/rust}
-UWG=${UWG:-/root/umbrawg/tools/target/release/uwg}
-DAEMON=${DAEMON:-$RUSTDIR/target/release/umbrawg}
-OBF=${OBF:-/root/umbrawg/bench/obf-params.conf}
+BENCH_DIR=${BENCH_DIR:-$(cd "$(dirname "$0")" && pwd)}
+REPO_ROOT=$(cd "$BENCH_DIR/.." && pwd)
+WORKSPACE_ROOT=${WORKSPACE_ROOT:-$(cd "$REPO_ROOT/.." && pwd)}
+. "$BENCH_DIR/bench-lib.sh"
+
+RUSTDIR=${RUSTDIR:-$(first_existing_dir "$WORKSPACE_ROOT/umbrawg-rs" "$WORKSPACE_ROOT/rust")}
+UWG=${UWG:-$(first_existing_file "$REPO_ROOT/target/release/uwg" "$WORKSPACE_ROOT/umbrawg-tools/target/release/uwg" "$WORKSPACE_ROOT/tools/target/release/uwg")}
+DAEMON=${DAEMON:-$(first_existing_file "$RUSTDIR/target/release/umbrawg" "$RUSTDIR/umbrawg")}
+OBF=${OBF:-$BENCH_DIR/obf-params.conf}
 NS0=uwgu0
 NS1=uwgu1
 IF0=uwgt0
