@@ -1,5 +1,7 @@
 # UmbraWG userspace (Rust)
 
+![CI](https://github.com/ivlev-dev/umbrawg-rs/actions/workflows/ci.yml/badge.svg) ![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
+
 Userspace daemon for the UmbraWG protocol (WireGuard-compatible Noise IK with
 UmbraWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
 
