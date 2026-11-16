@@ -12,6 +12,8 @@ The module uses only the in-kernel cryptography API (`chacha20poly1305`, `blake2
   - [RHEL/CentOS/SUSE/Fedora Core](#rhelcentossusefedora-core)
 - [Manual build](#manual-build)
 - [Configuration](#configuration)
+- [Performance](#performance)
+- [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
 - [License](#license)
 
@@ -57,6 +59,11 @@ You may need to install kernel headers and/or build essentials packages before r
     sudo make install
     ```
 
+    > [!IMPORTANT]
+    > On clang-built kernels `LLVM=1` is mandatory, not optional: a plain `make`
+    > fails on compiler flags such as `-fms-anonymous-structs`. Use
+    > `make LLVM=1` for every target, including `module-debug`.
+
     Or on a capable system you may want to use DKMS for this:
     ```shell
     sudo make dkms-install
@@ -64,6 +71,11 @@ You may need to install kernel headers and/or build essentials packages before r
     sudo dkms build -m umbrawg -v 1.0.0
     sudo dkms install -m umbrawg -v 1.0.0
     ```
+
+    > [!NOTE]
+    > To verify that a rebuild actually happened, compare the `.ko` timestamp or
+    > build log. `srcversion` is not reliable: it does not change when only
+    > headers are modified.
 
 ## Configuration
 
@@ -79,10 +91,56 @@ You may need to install kernel headers and/or build essentials packages before r
 
 `* Assuming a basic internet connection with an MTU value of 1280.`
 
+## Performance
+
+Measured on 6 vCPU, underlay MTU 9000, TUN MTU 1420, `iperf3` pinned to a
+separate CPU, medians of 3–5 repeats, one peer, `obf0`/`obf1` = obfuscation
+off/on. Baseline is `master` at `2cd5972`.
+
+| Mode | Profile | `umbrawg` | `amneziawg` |
+|---|---|---|---|
+| 1 connection | obf0 / obf1 | 2265 / 2167 | 1806 / 1764 |
+| 3 connections | obf0 / obf1 | 2032 / 1843 | 1810 / 1716 |
+
+Mbit/s, TCP. The gain over the original implementation is **+13…+25%** for a
+single connection, depending on the profile and run-to-run spread — it is not a
+fixed +15%. With three connections there is no gain: the difference stays
+within the run-to-run spread.
+
+Three connections do not scale because one peer means one outer UDP socket,
+one threaded NAPI thread and one in-order queue; only the crypto stage is
+actually parallel, and RPS/XPS on veth are disabled in these runs.
+
+Details, rejected experiments and open items: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+
+## Limitations
+
+- One peer is served by one outer UDP socket and one threaded NAPI thread.
+  Several connections to the same peer do not add throughput; multi-peer
+  sharding is still being measured.
+- Threaded NAPI cannot be disabled: turning it off costs 11–13% TCP.
+- GSO aggregation is part of the send path: the module builds standard UDP GSO
+  skbs (up to 23 KB) and the kernel segments them before they hit the wire, so
+  no IP fragments are produced. Interoperability with `go`, `rust` and
+  `amneziawg` is verified in both directions.
+- UDP GRO on the module socket is not implemented (`gro_receive` is `NULL`,
+  `ACCEPT_L4` is not set); the estimated gain is 2–4% and it is not a path to
+  multi-core scaling.
+- Linux 7.0 or newer is required; the in-tree compatibility layer for older
+  kernels has been removed.
+- UDP loss seen in benchmarks comes from `iperf3` receive-buffer overflow
+  (`RcvbufErrors`), not from tunnel drops.
+
 ## Troubleshooting
 
 > [!TIP]
 > Please check [Ubuntu Server documentation](https://documentation.ubuntu.com/server/how-to/wireguard-vpn/troubleshooting) for more troubleshooting steps.
+
+### Handshake is lost when the kernel starts first
+
+If the kernel side initiates the handshake before the userspace daemon has
+bound the UDP port, the first handshake is lost and the tunnel comes up on the
+5 second retry. Configure userspace first, then the kernel side.
 
 ### Enable debug logging
 
