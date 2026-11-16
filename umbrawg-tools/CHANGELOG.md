@@ -18,6 +18,13 @@ userspace-демоном из `umbrawg-rs`.
   продолжают сессию (семантика `awg syncconf`, без перезапуска интерфейса).
 - `uwg addconf`/`uwg syncconf` работают через оба транспорта: kernel netlink
   и userspace UAPI.
+- `AdvancedSecurity` пира читается из `[Peer]` и параметра
+  `uwg set … peer … advanced-security <on|off>` (регистронезависимо,
+  `on`/`off`/`true`/`false`/`1`/`0`, как в legacy `awg`), печатается в
+  `showconf` и сохраняется `uwg-quick save`. Через kernel netlink значение
+  передаётся типизированным `UWGPEER_A_ADVANCED_SECURITY` только для `on`;
+  userspace UAPI такого ключа не знает, поэтому `uwg` предупреждает и
+  не отправляет его, не прерывая `setconf`/`addconf`/`syncconf`.
 - `uwg show <interface> advanced-security` и строка `advanced security` в
   `uwg show`: ядро отдаёт `UWGPEER_F_HAS_ADVANCED_SECURITY` и
   `UWGPEER_A_ADVANCED_SECURITY`, userspace UAPI поля не имеет и показывает
@@ -47,6 +54,14 @@ userspace-демоном из `umbrawg-rs`.
 
 ### Исправлено
 
+- `uwg-quick up` передаёт конфигурацию в `uwg setconf` как файл
+  (`/dev/stdin`): раньше команда запускалась без обязательного аргумента
+  `<configuration filename>` и падала с usage-ошибкой.
+- `uwg show <interface> max_handshake_attempts` (форма из legacy `awg show`)
+  принимается наравне с `max-handshake-attempts` и опечаткой
+  `max-handshake-attemps`.
+- `uwg-quick strip` больше не требует root: `sudo` запускается только для
+  `up`, `down` и `save`, как в legacy `wg-quick`.
 - Пустой список `AllowedIPs` больше не отправляется в netlink как пустой
   вложенный атрибут: достаточно флага `UWGPEER_F_REPLACE_ALLOWEDIPS`.
 
