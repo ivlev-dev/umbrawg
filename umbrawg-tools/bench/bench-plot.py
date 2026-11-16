@@ -533,13 +533,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-# compatibility aliases for grouping
-def group_by(rows: Sequence[Row]):
-    return group_rows(rows)
-
-
-def group(rows: Sequence[Row]):
-    return group_rows(rows)
+# compatibility aliases
+parse_rows = load_rows
+read_rows = load_rows
+aggregate_rows = aggregate
+group_by = group_rows
+group = group_rows
+group_data = group_rows
+group_charts = group_rows
+group_chart = group_rows
+build = build_report
+render_report = build_report
 
 
 if __name__ == "__main__":
