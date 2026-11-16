@@ -13,6 +13,7 @@ The module uses only the in-kernel cryptography API (`chacha20poly1305`, `blake2
   - [Ubuntu / Debian / Linux Mint](#ubuntu--debian--linux-mint)
   - [RHEL/CentOS/SUSE/Fedora Core](#rhelcentossusefedora-core)
 - [Manual build](#manual-build)
+- [Continuous integration](#continuous-integration)
 - [Packages and releases](#packages-and-releases)
 - [Configuration](#configuration)
 - [Performance](#performance)
@@ -79,6 +80,46 @@ You may need to install kernel headers and/or build essentials packages before r
     > To verify that a rebuild actually happened, compare the `.ko` timestamp or
     > build log. `srcversion` is not reliable: it does not change when only
     > headers are modified.
+
+## Continuous integration
+
+`.github/workflows/build.yml` catches build regressions on every push to
+`master` and `feature/**`, on every pull request, and on manual
+`workflow_dispatch`. The workflow runs only when the module sources or the
+workflow itself change (`src/**`, `Makefile`, `Kbuild`, `Kconfig`,
+`.github/workflows/build.yml`).
+
+| Job | Image | What it does |
+|---|---|---|
+| `release` | `archlinux:latest` | installs `base-devel git clang llvm lld bc linux-headers kmod`, builds `src/umbrawg.ko`, checks `modinfo` (name and vermagic) and uploads the module with its `modinfo` output |
+| `debug` | `archlinux:latest` | builds `make -C src module-debug` with `V=1`, fails on any `warning:`, uploads the full build log |
+| `netlink parity` | `archlinux:latest` | checks out `ivlev-dev/umbrawg-tools` and `ivlev-dev/netlink-packet-umbrawg` next to the module, builds `uwg`, and runs `src/tests/netlink-parity.sh` if the module can be loaded |
+
+Requirements and behaviour:
+
+- the jobs need no secrets and use `permissions: contents: read`; each job has
+  a 40-minute timeout;
+- the kernel headers come from the container's `linux-headers` package, so the
+  build target is the Arch kernel, not the GitHub runner kernel. The workflow
+  locates the headers in `/usr/lib/modules/*/build` and passes `KERNELDIR`
+  explicitly, because `uname -r` inside the container is the runner kernel;
+- the compiler is detected from the headers, not hardcoded. The workflow checks
+  `CONFIG_CC_IS_CLANG` in `.config` (with `include/config/auto.conf` as a
+  fallback): clang-built kernels are built with `make LLVM=1`, GCC-built kernels
+  (including Arch's stock kernel) are built with a plain `make`. A GCC-built
+  kernel rejects the flags used by clang and vice versa, so both release and
+  debug builds follow the kernel's compiler;
+- the expected module version is read from `src/version.h` and passed as
+  `UMBRAWG_VERSION`, the same way the DKMS packages do it;
+- the parity script needs a loaded `umbrawg` module and root. In a container the
+  built module targets the Arch kernel, which normally differs from the runner
+  kernel, and module loading may require `CAP_SYS_MODULE`. When either check
+  fails, the job emits a `::warning::` annotation and a summary entry saying
+  that parity was skipped; the script is never reported as passed silently.
+  The `uwg` build itself always runs and fails the job on a build error;
+- the `release` and `debug` jobs were verified locally in Docker
+  (`archlinux:latest`), and the `parity` job was verified up to the expected
+  skip; `actionlint` reports 0 findings.
 
 ## Packages and releases
 
