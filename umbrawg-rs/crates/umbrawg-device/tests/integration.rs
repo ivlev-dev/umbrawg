@@ -740,3 +740,132 @@ fn uapi_snapshot_and_apply_patch_the_device() {
     assert_eq!(snapshot.timings.keepalive_timeout.lo(), 4);
     assert_eq!(snapshot.timings.keepalive_timeout.hi(), 6);
 }
+
+#[test]
+fn send_batch_coalesces_equal_lengths_and_keeps_order() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let first = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[1u8; 100]);
+    let second = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[2u8; 100]);
+    let third = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[3u8; 40]);
+    let mut output = vec![0u8; 65_535];
+    let sent = {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_batch(
+                &pair.peer_b,
+                &[first.as_slice(), second.as_slice(), third.as_slice()],
+                &mut output,
+                &mut ctx,
+            )
+            .unwrap()
+    };
+    assert_eq!(sent.sent, 3);
+    assert_eq!(sent.staged, 0);
+    assert!(!sent.needs_handshake);
+    assert_eq!(sent.endpoint, Some(pair.addr_b));
+    assert_eq!(sent.layout.len(), 2);
+
+    let groups = sent.layout.groups();
+    assert_eq!(groups[0].segments, 2);
+    assert_eq!(groups[0].len(), groups[0].segment_len * 2);
+    assert_eq!(groups[1].segments, 1);
+    assert_eq!(groups[1].segment_len, groups[1].len());
+
+    for group in groups {
+        let datagram = Sent {
+            payload: output[group.start..group.end()].to_vec(),
+            gso_size: (group.segments > 1).then_some(group.segment_len),
+        };
+        deliver_one(
+            datagram,
+            pair.addr_a,
+            &pair.b,
+            &mut pair.io_b,
+            &mut pair.rng,
+            now,
+            &mut pair.scratch,
+        );
+    }
+    assert_eq!(pair.io_b.delivered.len(), 3);
+    assert_eq!(pair.io_b.delivered[0].1, first);
+    assert_eq!(pair.io_b.delivered[1].1, second);
+    assert_eq!(pair.io_b.delivered[2].1, third);
+}
+
+#[test]
+fn send_batch_stages_without_keypair_and_flushes_in_order() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    let first = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"first");
+    let second = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"second");
+    let third = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"third");
+    let mut output = vec![0u8; 65_535];
+    {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        let sent = pair
+            .a
+            .send_batch(
+                &pair.peer_b,
+                &[first.as_slice(), second.as_slice(), third.as_slice()],
+                &mut output,
+                &mut ctx,
+            )
+            .unwrap();
+        assert_eq!(sent.sent, 0);
+        assert_eq!(sent.staged, 3);
+        assert!(sent.needs_handshake);
+        assert!(sent.layout.is_empty());
+    }
+    assert_eq!(pair.peer_b.staged_len(), 3);
+
+    complete_handshake(&mut pair, now);
+    assert_eq!(pair.peer_b.staged_len(), 0);
+    let delivered: Vec<Vec<u8>> = pair
+        .io_b
+        .delivered
+        .iter()
+        .map(|(_, packet)| packet.clone())
+        .collect();
+    assert_eq!(delivered, vec![first, second, third]);
+}
+
+#[test]
+fn send_batch_reports_missing_endpoint() {
+    let sender = device(0x33, ObfParams::default());
+    let receiver = device(0x44, ObfParams::default());
+    let peer = sender
+        .add_peer(PeerConfig::new(receiver.public_key().unwrap()))
+        .unwrap();
+    let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"data");
+    let mut output = vec![0u8; 65_535];
+    let mut rng = TestRng::new(7);
+    let mut scratch = vec![0u8; 65_535];
+    let mut io = MemoryIo::new();
+    let mut ctx = IoContext::new(&mut rng, Instant::now(), &mut scratch, &mut io);
+    assert!(matches!(
+        sender.send_batch(&peer, &[packet.as_slice()], &mut output, &mut ctx),
+        Err(DeviceError::NoEndpoint)
+    ));
+    assert!(matches!(sender.after_batch_sent(&peer, &mut ctx), Ok(())));
+}
+
+#[test]
+fn send_batch_without_data_is_a_noop() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    let mut output = vec![0u8; 64];
+    let sent = {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_batch(&pair.peer_b, &[], &mut output, &mut ctx)
+            .unwrap()
+    };
+    assert_eq!(sent.sent, 0);
+    assert_eq!(sent.staged, 0);
+    assert!(sent.layout.is_empty());
+    assert!(pair.io_a.take_sent().is_empty());
+}

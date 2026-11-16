@@ -10,12 +10,18 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use umbrawg_device::{DatagramSink, Device, DeviceConfig, IncomingMeta, IoContext, PacketIo, Peer};
+use umbrawg_device::{
+    DatagramSink, Device, DeviceConfig, DeviceError, IncomingMeta, IoContext, PacketIo, Peer,
+};
 use umbrawg_transport::{
     AddressFamily, Endpoint, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
 };
 use umbrawg_tun::{Tun, TunConfig, TunError, TunSet, VirtioNetHdr};
 use umbrawg_uapi::{socket_dir, UapiListener};
+
+mod tx;
+
+use tx::TxBatch;
 
 const MAX_PACKET: usize = 65_535;
 const RECV_BATCH: usize = 64;
@@ -183,6 +189,69 @@ fn is_socket_would_block(error: &TransportError) -> bool {
     matches!(error, TransportError::WouldBlock)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn send_run<R: rand_core::RngCore>(
+    device: &Device,
+    socket: &Socket,
+    tun: &Tun,
+    rng: &mut R,
+    now: Instant,
+    scratch: &mut [u8],
+    fallback: &mut [u8],
+    batch_buffer: &mut [u8],
+    batch: &mut TxBatch,
+    peer: &Arc<Peer>,
+    plaintexts: &[&[u8]],
+    rekey: &mut Vec<Arc<Peer>>,
+) {
+    if plaintexts.is_empty() {
+        return;
+    }
+    if batch.used() + plaintexts.len() > batch_buffer.len() {
+        batch.flush(socket, batch_buffer);
+    }
+    let offset = batch.used();
+    let mut io = WorkerIo { socket, tun };
+    let mut context = IoContext::new(rng, now, scratch, &mut io);
+    match device.send_batch(peer, plaintexts, &mut batch_buffer[offset..], &mut context) {
+        Ok(sent) => {
+            if sent.staged > 0 {
+                batch.flush(socket, batch_buffer);
+                if sent.needs_handshake {
+                    if let Err(error) = device.initiate_handshake(peer, &mut context) {
+                        log::debug!("handshake failed: {error}");
+                    }
+                }
+                return;
+            }
+            if sent.sent == 0 {
+                return;
+            }
+            let Some(endpoint) = sent.endpoint else {
+                return;
+            };
+            if !batch.push(endpoint, offset, &sent.layout) {
+                batch.flush(socket, batch_buffer);
+                if !batch.push(endpoint, offset, &sent.layout) {
+                    return;
+                }
+            }
+            if !rekey.iter().any(|known| Arc::ptr_eq(known, peer)) {
+                rekey.push(Arc::clone(peer));
+            }
+        }
+        Err(DeviceError::BufferTooSmall { .. }) => {
+            batch.flush(socket, batch_buffer);
+            for plaintext in plaintexts {
+                if let Err(error) = device.send_packet(peer, plaintext, fallback, &mut context) {
+                    log::debug!("send failed: {error}");
+                }
+            }
+        }
+        Err(error) => log::debug!("batch send failed: {error}"),
+    }
+}
+
 fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
     let mut rng = rand_core::OsRng;
     let mut scratch = vec![0u8; MAX_PACKET + 512];
@@ -197,6 +266,9 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
         .map(|buffer| buffer.as_mut_slice())
         .collect();
     let mut tun_sizes = [0usize; TUN_BATCH];
+    let mut batch_buffer = vec![0u8; TUN_BATCH * slot];
+    let mut batch = TxBatch::new(TUN_BATCH).map_err(|error| io::Error::other(error.to_string()))?;
+    let mut rekey: Vec<Arc<Peer>> = Vec::with_capacity(TUN_BATCH);
     let mut socket: Option<Socket> = None;
 
     while !shutdown_requested() {
@@ -221,6 +293,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
         }
         let active = socket.as_ref().expect("socket is bound");
         let mut busy = false;
+        rekey.clear();
 
         loop {
             match tun.read_batch_sizes(&mut tun_slices, &mut tun_sizes) {
@@ -228,31 +301,83 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                 Ok(count) => {
                     busy = true;
                     log::debug!("tun batch of {count} segments");
+                    let mut plaintexts: [&[u8]; TUN_BATCH] = [&[]; TUN_BATCH];
+                    let mut pending = 0usize;
+                    let mut current: Option<Arc<Peer>> = None;
                     for index in 0..count {
                         let length = tun_sizes[index];
                         if length == 0 {
                             continue;
                         }
-                        let Some(destination) = packet_destination(&tun_slices[index][..length])
-                        else {
+                        let packet = &tun_slices[index][..length];
+                        let Some(destination) = packet_destination(packet) else {
                             continue;
                         };
                         let Some(peer) = device.route(destination) else {
                             log::debug!("no peer for {destination}");
                             continue;
                         };
-                        let mut io = WorkerIo {
-                            socket: active,
-                            tun: &tun,
-                        };
-                        let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
-                        if let Err(error) = device.send_packet(
-                            &peer,
-                            &tun_slices[index][..length],
-                            &mut tx_buffer,
-                            &mut context,
-                        ) {
-                            log::debug!("encrypt failed: {error}");
+                        let same = current
+                            .as_ref()
+                            .is_some_and(|known| Arc::ptr_eq(known, &peer));
+                        if !same {
+                            if let Some(previous) = current.as_ref() {
+                                send_run(
+                                    &device,
+                                    active,
+                                    &tun,
+                                    &mut rng,
+                                    now,
+                                    &mut scratch,
+                                    &mut tx_buffer,
+                                    &mut batch_buffer,
+                                    &mut batch,
+                                    previous,
+                                    &plaintexts[..pending],
+                                    &mut rekey,
+                                );
+                                pending = 0;
+                            }
+                            current = Some(peer);
+                        }
+                        plaintexts[pending] = packet;
+                        pending += 1;
+                        if pending == TUN_BATCH {
+                            if let Some(peer) = current.as_ref() {
+                                send_run(
+                                    &device,
+                                    active,
+                                    &tun,
+                                    &mut rng,
+                                    now,
+                                    &mut scratch,
+                                    &mut tx_buffer,
+                                    &mut batch_buffer,
+                                    &mut batch,
+                                    peer,
+                                    &plaintexts[..pending],
+                                    &mut rekey,
+                                );
+                            }
+                            pending = 0;
+                        }
+                    }
+                    if pending > 0 {
+                        if let Some(peer) = current.as_ref() {
+                            send_run(
+                                &device,
+                                active,
+                                &tun,
+                                &mut rng,
+                                now,
+                                &mut scratch,
+                                &mut tx_buffer,
+                                &mut batch_buffer,
+                                &mut batch,
+                                peer,
+                                &plaintexts[..pending],
+                                &mut rekey,
+                            );
                         }
                     }
                 }
@@ -261,6 +386,20 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                     log::debug!("tun read failed: {error}");
                     break;
                 }
+            }
+        }
+
+        if !batch.is_empty() {
+            batch.flush(active, &batch_buffer);
+        }
+        for peer in &rekey {
+            let mut io = WorkerIo {
+                socket: active,
+                tun: &tun,
+            };
+            let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
+            if let Err(error) = device.after_batch_sent(peer, &mut context) {
+                log::debug!("send timers failed: {error}");
             }
         }
 

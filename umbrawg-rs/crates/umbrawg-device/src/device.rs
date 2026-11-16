@@ -72,6 +72,21 @@ pub enum SendOutcome {
     Staged,
 }
 
+/// Результат батч-шифрования и отправки.
+#[derive(Clone, Debug)]
+pub struct SentBatch {
+    /// Раскладка зашифрованных датаграмм в буфере назначения.
+    pub layout: BatchLayout,
+    /// Сколько пакетов ушло в очередь staged из-за отсутствия ключа.
+    pub staged: usize,
+    /// Сколько пакетов зашифровано.
+    pub sent: usize,
+    /// Нужно ли инициировать рукопожатие после отправки управления.
+    pub needs_handshake: bool,
+    /// Адрес пира, если он известен.
+    pub endpoint: Option<SocketAddr>,
+}
+
 pub struct Device {
     private_key: RwLock<Option<Key>>,
     identity: RwLock<Option<StaticIdentity>>,
@@ -634,11 +649,26 @@ impl Device {
         now: Instant,
     ) -> Result<usize> {
         let timings = self.timings();
+        let params = self.obfuscation.load();
+        self.encrypt_with_keypair_ctx(peer, keypair, &params, &timings, plaintext, dst, rng, now)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encrypt_with_keypair_ctx<R: RngCore>(
+        &self,
+        peer: &Peer,
+        keypair: &Keypair,
+        params: &ObfParams,
+        timings: &Timings,
+        plaintext: &[u8],
+        dst: &mut [u8],
+        rng: &mut R,
+        now: Instant,
+    ) -> Result<usize> {
         if keypair.is_expired(now, timings.keychain_expire()) {
             return Err(DeviceError::KeypairExpired);
         }
-        let params = self.obfuscation.load();
-        let obfuscator = Obfuscator::new(&params);
+        let obfuscator = Obfuscator::new(params);
         let padding = usize::from(params.s4);
         let header_end = padding + TRANSPORT_HEADER_SIZE;
         if dst.len() < header_end {
@@ -797,6 +827,97 @@ impl Device {
             offset += length;
         }
         Ok(layout)
+    }
+
+    pub fn send_batch<R: RngCore, S: DatagramSink>(
+        &self,
+        peer: &Arc<Peer>,
+        plaintexts: &[&[u8]],
+        dst: &mut [u8],
+        ctx: &mut IoContext<'_, R, S>,
+    ) -> Result<SentBatch> {
+        let endpoint = peer.endpoint();
+        let mut layout = BatchLayout::new();
+        if plaintexts.is_empty() {
+            return Ok(SentBatch {
+                layout,
+                staged: 0,
+                sent: 0,
+                needs_handshake: false,
+                endpoint,
+            });
+        }
+        if endpoint.is_none() {
+            return Err(DeviceError::NoEndpoint);
+        }
+        let timings = self.timings();
+        let params = self.obfuscation.load();
+        let keypair = peer
+            .current_keypair()
+            .filter(|keypair| !keypair.is_expired(ctx.now, timings.keychain_expire()));
+        let Some(keypair) = keypair else {
+            let mut staged = 0;
+            for plaintext in plaintexts {
+                let mut buffer = self.staging_pool.acquire();
+                if plaintext.len() > buffer.len() {
+                    return Err(DeviceError::BufferTooSmall {
+                        required: plaintext.len(),
+                        available: buffer.len(),
+                    });
+                }
+                buffer[..plaintext.len()].copy_from_slice(plaintext);
+                peer.stage(buffer, plaintext.len())?;
+                staged += 1;
+            }
+            return Ok(SentBatch {
+                layout,
+                staged,
+                sent: 0,
+                needs_handshake: staged > 0,
+                endpoint,
+            });
+        };
+        let mut offset = 0;
+        let mut total = 0;
+        for plaintext in plaintexts {
+            if offset >= dst.len() {
+                return Err(DeviceError::BufferTooSmall {
+                    required: offset + 1,
+                    available: dst.len(),
+                });
+            }
+            let length = self.encrypt_with_keypair_ctx(
+                peer,
+                &keypair,
+                &params,
+                &timings,
+                plaintext,
+                &mut dst[offset..],
+                ctx.rng,
+                ctx.now,
+            )?;
+            if !layout.push(offset, length) {
+                return Err(DeviceError::PacketTooLarge);
+            }
+            offset += length;
+            total += length;
+        }
+        peer.add_tx(total as u64);
+        Ok(SentBatch {
+            layout,
+            staged: 0,
+            sent: plaintexts.len(),
+            needs_handshake: false,
+            endpoint,
+        })
+    }
+
+    pub fn after_batch_sent<R: RngCore, S: DatagramSink>(
+        &self,
+        peer: &Arc<Peer>,
+        ctx: &mut IoContext<'_, R, S>,
+    ) -> Result<()> {
+        self.after_data_sent(peer, ctx)
     }
 
     fn after_data_sent<R: RngCore, S: DatagramSink>(
