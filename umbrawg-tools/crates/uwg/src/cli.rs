@@ -79,7 +79,7 @@ pub struct SetconfArgs {
 
 pub fn show_usage() -> String {
     format!(
-        "Usage: {PROGRAM} show {{ <interface> | all | interfaces }} [public-key | private-key | listen-port | fwmark | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | advanced-security | dump | jc | jmin | jmax | s1 | s2 | s3 | s4 | h1 | h2 | h3 | h4 | i1 | i2 | i3 | i4 | i5 | header-protection-key | content-padding-addition | rekey-after-time | rekey-timeout | reject-after-time | keepalive-timeout | max-handshake-attempts | random-trailers | disable-cookies]"
+        "Usage: {PROGRAM} show {{ <interface> | all | interfaces }} [public-key | private-key | listen-port | fwmark | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | advanced-security | dump | jc | jmin | jmax | s1 | s2 | s3 | s4 | h1 | h2 | h3 | h4 | i1 | i2 | i3 | i4 | i5 | header-protection-key | content-padding-addition | rekey-after-time | rekey-timeout | reject-after-time | keepalive-timeout | max-handshake-attempts | max_handshake_attempts | random-trailers | disable-cookies]"
     )
 }
 

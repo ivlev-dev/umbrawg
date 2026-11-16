@@ -518,7 +518,7 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
                 u16_range_text(device.obfuscation.keepalive_timeout)
             );
         }
-        "max-handshake-attempts" | "max-handshake-attemps" => {
+        "max-handshake-attempts" | "max-handshake-attemps" | "max_handshake_attempts" => {
             let _ = writeln!(
                 output,
                 "{prefix}{}",
@@ -882,6 +882,23 @@ mod tests {
     }
 
     #[test]
+    fn accepts_every_max_handshake_attempts_spelling() {
+        let mut device = sample_device();
+        device.obfuscation.max_handshake_attempts = Some(U16Range::new(2, 5));
+        for parameter in [
+            "max-handshake-attempts",
+            "max-handshake-attemps",
+            "max_handshake_attempts",
+        ] {
+            assert_eq!(
+                ugly(&device, parameter, false).expect("valid"),
+                "2-5\n",
+                "{parameter}"
+            );
+        }
+    }
+
+    #[test]
     fn shows_advanced_security_state() {
         let mut device = sample_device();
         assert!(pretty_at(&device, false, 1_700_000_060).contains("  advanced security: yes\n"));
@@ -913,6 +930,9 @@ mod tests {
         assert!(output.contains("[Peer]\nPublicKey = "));
         assert!(output.contains("AllowedIPs = 10.0.0.0/8\n"));
         assert!(output.contains("PersistentKeepalive = 25\n"));
+        assert!(output.contains("AdvancedSecurity = on\n"));
+        let reparsed = umbrawg_config::Config::parse(&output).expect("showconf parses");
+        assert_eq!(reparsed, sample_device().to_config());
     }
 
     #[test]
