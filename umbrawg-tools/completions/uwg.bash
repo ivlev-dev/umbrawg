@@ -1,7 +1,7 @@
 _uwg_completion() {
 	local commands params interfaces
 	commands="help version genkey genpsk pubkey show showconf set setconf addconf syncconf"
-	params="public-key private-key listen-port fwmark peers preshared-keys endpoints allowed-ips latest-handshakes persistent-keepalive advanced-security transfer dump jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key content-padding-addition rekey-after-time rekey-timeout reject-after-time keepalive-timeout max-handshake-attempts random-trailers disable-cookies"
+	params="public-key private-key listen-port fwmark peers preshared-keys endpoints allowed-ips latest-handshakes persistent-keepalive advanced-security transfer dump jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key content-padding-addition rekey-after-time rekey-timeout reject-after-time keepalive-timeout max-handshake-attempts max_handshake_attempts random-trailers disable-cookies"
 	interfaces="$(uwg show interfaces 2>/dev/null)"
 
 	if [[ $COMP_CWORD -eq 1 ]]; then

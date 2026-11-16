@@ -134,3 +134,33 @@ jobs:
 
       - name: Check packaging
         run: scripts/check-packaging.sh
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ivlev-dev/netlink-packet-umbrawg
+          path: netlink-packet-umbrawg
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools -> tools/target
+
+      - name: Build uwg
+        run: cargo build --release -p uwg
+
+      - name: Check docs
+        run: scripts/check-docs.sh
