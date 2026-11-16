@@ -19,8 +19,10 @@ use umbrawg_transport::{
 use umbrawg_tun::{Tun, TunConfig, TunError, TunSet, VirtioNetHdr};
 use umbrawg_uapi::{socket_dir, UapiListener};
 
+mod rx;
 mod tx;
 
+use rx::RxBatch;
 use tx::TxBatch;
 
 const MAX_PACKET: usize = 65_535;
@@ -123,6 +125,7 @@ extern "C" fn signal_handler(_signal: libc::c_int) {
 struct WorkerIo<'a> {
     socket: &'a Socket,
     tun: &'a Tun,
+    rx: &'a mut RxBatch,
 }
 
 impl DatagramSink for WorkerIo<'_> {
@@ -146,6 +149,13 @@ impl DatagramSink for WorkerIo<'_> {
 
 impl PacketIo for WorkerIo<'_> {
     fn deliver(&mut self, _peer: &Peer, packet: &[u8]) {
+        if self.rx.push(packet) {
+            return;
+        }
+        self.rx.flush(self.tun);
+        if self.rx.push(packet) {
+            return;
+        }
         if let Err(error) = self.tun.write(packet) {
             log::debug!("tun write failed: {error}");
         }
@@ -203,6 +213,7 @@ fn send_run<R: rand_core::RngCore>(
     peer: &Arc<Peer>,
     plaintexts: &[&[u8]],
     rekey: &mut Vec<Arc<Peer>>,
+    rx: &mut RxBatch,
 ) {
     if plaintexts.is_empty() {
         return;
@@ -211,7 +222,7 @@ fn send_run<R: rand_core::RngCore>(
         batch.flush(socket, batch_buffer);
     }
     let offset = batch.used();
-    let mut io = WorkerIo { socket, tun };
+    let mut io = WorkerIo { socket, tun, rx };
     let mut context = IoContext::new(rng, now, scratch, &mut io);
     match device.send_batch(peer, plaintexts, &mut batch_buffer[offset..], &mut context) {
         Ok(sent) => {
@@ -268,6 +279,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
     let mut tun_sizes = [0usize; TUN_BATCH];
     let mut batch_buffer = vec![0u8; TUN_BATCH * slot];
     let mut batch = TxBatch::new(TUN_BATCH).map_err(|error| io::Error::other(error.to_string()))?;
+    let mut rx = RxBatch::new(slot);
     let mut rekey: Vec<Arc<Peer>> = Vec::with_capacity(TUN_BATCH);
     let mut socket: Option<Socket> = None;
 
@@ -335,6 +347,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                                     previous,
                                     &plaintexts[..pending],
                                     &mut rekey,
+                                    &mut rx,
                                 );
                                 pending = 0;
                             }
@@ -357,6 +370,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                                     peer,
                                     &plaintexts[..pending],
                                     &mut rekey,
+                                    &mut rx,
                                 );
                             }
                             pending = 0;
@@ -377,6 +391,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                                 peer,
                                 &plaintexts[..pending],
                                 &mut rekey,
+                                &mut rx,
                             );
                         }
                     }
@@ -396,6 +411,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
             let mut io = WorkerIo {
                 socket: active,
                 tun: &tun,
+                rx: &mut rx,
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             if let Err(error) = device.after_batch_sent(peer, &mut context) {
@@ -431,6 +447,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
                         let mut io = WorkerIo {
                             socket: active,
                             tun: &tun,
+                            rx: &mut rx,
                         };
                         let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
                         match device.handle_incoming(
@@ -451,10 +468,13 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
             }
         }
 
+        rx.flush(&tun);
+
         for peer in device.peers() {
             let mut io = WorkerIo {
                 socket: active,
                 tun: &tun,
+                rx: &mut rx,
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             if let Err(error) = device.flush_staged(&peer, &mut context) {
@@ -469,6 +489,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
             let mut io = WorkerIo {
                 socket: active,
                 tun: &tun,
+                rx: &mut rx,
             };
             let started = Instant::now();
             let mut context = IoContext::new(&mut rng, started, &mut scratch, &mut io);
