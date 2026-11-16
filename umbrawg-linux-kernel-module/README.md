@@ -51,9 +51,9 @@ You may need to install kernel headers and/or build essentials packages before r
     cd umbrawg-linux-kernel-module/src
     ```
 
-2. Now perform build and installation:
+2. Now perform build and installation (use `LLVM=1` if the kernel was built with clang, e.g. Arch/CachyOS):
     ```shell
-    make
+    make LLVM=1
     sudo make install
     ```
 
