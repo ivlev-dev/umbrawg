@@ -1,0 +1,46 @@
+# Maintainer: Yuri Egorov <ye@umbra.org>
+pkgname=rust-netlink-packet-umbrawg-git
+pkgver=0.3.0.r0.g0000000
+pkgrel=1
+_crate=netlink-packet-umbrawg
+pkgdesc="UmbraWG generic netlink packet definitions (Rust crate sources, git main)"
+arch=('any')
+url="https://github.com/ivlev-dev/${_crate}"
+license=('MIT')
+provides=("${pkgname%-git}")
+conflicts=("${pkgname%-git}")
+source=("${_crate}::git+https://github.com/ivlev-dev/${_crate}.git#branch=main")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/${_crate}"
+  local version
+  version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)
+  if [[ -z ${version} ]]; then
+    echo "не удалось определить версию крейта из Cargo.toml" >&2
+    return 1
+  fi
+  printf '%s.r%s.g%s' "${version}" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "${srcdir}/${_crate}"
+
+  local crate_version
+  crate_version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)
+  if [[ -z ${crate_version} ]]; then
+    echo "не удалось определить версию крейта из Cargo.toml" >&2
+    return 1
+  fi
+
+  local registry="${pkgdir}/usr/share/cargo/registry/${_crate}-${crate_version}"
+
+  install -dm0755 "${registry}"
+  install -m0644 Cargo.toml README.md CHANGELOG LICENSE "${registry}"
+  install -dm0755 "${registry}/src"
+  install -m0644 src/*.rs "${registry}/src"
+  printf '{"files":{},"package":null}\n' >"${registry}/.cargo-checksum.json"
+  chmod 0644 "${registry}/.cargo-checksum.json"
+
+  install -Dpm0644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}

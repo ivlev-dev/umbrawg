@@ -1,0 +1,26 @@
+# Maintainer: Yuri Egorov <ye@umbra.org>
+pkgname=rust-netlink-packet-umbrawg
+pkgver=0.3.0
+pkgrel=1
+_crate=netlink-packet-umbrawg
+pkgdesc="UmbraWG generic netlink packet definitions (Rust crate sources)"
+arch=('any')
+url="https://github.com/ivlev-dev/${_crate}"
+license=('MIT')
+source=("${_crate}-${pkgver}.tar.gz::https://github.com/ivlev-dev/${_crate}/archive/v${pkgver}.tar.gz")
+sha256sums=('TODO_UPDPKGSUMS_AFTER_FIRST_TAG')
+
+package() {
+  cd "${srcdir}/${_crate}-${pkgver}"
+
+  local registry="${pkgdir}/usr/share/cargo/registry/${_crate}-${pkgver}"
+
+  install -dm0755 "${registry}"
+  install -m0644 Cargo.toml README.md CHANGELOG LICENSE "${registry}"
+  install -dm0755 "${registry}/src"
+  install -m0644 src/*.rs "${registry}/src"
+  printf '{"files":{},"package":null}\n' >"${registry}/.cargo-checksum.json"
+  chmod 0644 "${registry}/.cargo-checksum.json"
+
+  install -Dpm0644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
