@@ -89,7 +89,7 @@ fn strip_does_not_require_root() {
     script(
         &tools,
         "sudo",
-        &format!("#!/bin/sh\ntouch '{marker_text}'\nexit 1\n"),
+        &format!("#!/bin/sh\nPATH=/usr/bin:/bin\ntouch '{marker_text}'\nexit 1\n"),
     );
     let path = config(
         &directory,
