@@ -289,3 +289,5 @@ scripts/check-packaging.sh                          # man/systemd/completions/в
 ## Документация для разработчика
 
 Состояние проекта, известные проблемы и план работ — в [TODO.md](TODO.md).
+Порядок выпуска, теги, публикация в crates.io, AUR и пакеты — в
+[RELEASE.md](RELEASE.md).
