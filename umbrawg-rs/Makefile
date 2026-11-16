@@ -1,31 +1,24 @@
-PREFIX ?= /usr
-DESTDIR ?=
-BINDIR ?= $(PREFIX)/bin
-export GO111MODULE := on
+.PHONY: all build release test clippy fmt bench clean
 
-all: generate-version-and-build
+all: build
 
-MAKEFLAGS += --no-print-directory
+build:
+	cargo build --workspace
 
-generate-version-and-build:
-	@export GIT_CEILING_DIRECTORIES="$(realpath $(CURDIR)/..)" && \
-	tag="$$(git describe --tags --dirty 2>/dev/null)" && \
-	ver="$$(printf 'package main\n\nconst Version = "%s"\n' "$$tag")" && \
-	[ "$$(cat version.go 2>/dev/null)" != "$$ver" ] && \
-	echo "$$ver" > version.go && \
-	git update-index --assume-unchanged version.go || true
-	@$(MAKE) umbrawg
-
-umbrawg: $(wildcard *.go) $(wildcard */*.go)
-	go build -v -o "$@"
-
-install: umbrawg
-	@install -v -d "$(DESTDIR)$(BINDIR)" && install -v -m 0755 "$<" "$(DESTDIR)$(BINDIR)/umbrawg"
+release:
+	cargo build --release --workspace
 
 test:
-	go test ./...
+	cargo test --workspace
+
+clippy:
+	cargo clippy --workspace --all-targets -- -D warnings
+
+fmt:
+	cargo fmt --all -- --check
+
+bench:
+	cargo bench -p umbrawg-bench
 
 clean:
-	rm -f umbrawg
-
-.PHONY: all clean test install generate-version-and-build
+	cargo clean

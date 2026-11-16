@@ -1,24 +1,11 @@
-FROM golang:1.25.12 as awg
-COPY . /awg
-WORKDIR /awg
-RUN go mod download && \
-    go mod verify && \
-    go build -ldflags '-linkmode external -extldflags "-fno-PIC -static"' -v -o /usr/bin
+FROM rust:1.85-bookworm AS build
+WORKDIR /src
+COPY . .
+RUN cargo build --release --workspace
 
-FROM alpine:3.19 as tools
-ARG AWGTOOLS_COMMIT="v3.1.20260812"
-
-RUN apk add --no-cache git build-base linux-headers && \
-    git clone https://github.com/amnezia-vpn/amneziawg-tools.git /amneziawg-tools && \
-    cd /amneziawg-tools && git checkout ${AWGTOOLS_COMMIT} && \
-    cd src && make
-
-FROM alpine:3.19
-
-RUN apk --no-cache add iproute2 iptables bash
-COPY --from=tools /amneziawg-tools/src/wg /usr/bin/awg
-COPY --from=tools /amneziawg-tools/src/wg-quick/linux.bash /usr/bin/awg-quick
-RUN chmod +x /usr/bin/awg /usr/bin/awg-quick && \
-    ln -s /usr/bin/awg /usr/bin/wg && \
-    ln -s /usr/bin/awg-quick /usr/bin/wg-quick
-COPY --from=awg /usr/bin/umbrawg /usr/bin/umbrawg
+FROM debian:bookworm-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends iproute2 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=build /src/target/release/umbrawg /usr/bin/umbrawg
+ENTRYPOINT ["umbrawg"]
