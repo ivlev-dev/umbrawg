@@ -4,12 +4,18 @@
 
 - Ветка `master` (после слияния `feature/rust-tools`), всё запушено.
 - C-реализация сохранена в `legacy-c/` как поведенческий эталон и источник тест-векторов.
-- Rust-утилиты: `uwg` (genkey, genpsk, pubkey, show, showconf, set, setconf) и
-  `uwg-quick` (up, down, strip, save).
+- Rust-утилиты: `uwg` (genkey, genpsk, pubkey, show, showconf, set, setconf,
+  addconf, syncconf, version, help) и `uwg-quick` (up, down, strip, save).
 - Транспорт управления: kernel netlink (семейство `umbrawg`) и userspace UAPI
   (`/var/run/umbrawg/<iface>.sock`) с автовыбором.
-- Конфигурация: INI с полным набором параметров AmneziaWG/UmbraWG 3.1.
-- Тесты: 35 + 28 + 21 + 62 unit, 4 CLI, 2 parity-теста `strip` против bash-версии.
+- Конфигурация: INI с полным набором параметров AmneziaWG/UmbraWG 3.1;
+  парсинг `uwg-quick` переведён на общие примитивы `umbrawg-config`.
+- AdvancedSecurity пира: чтение флага из netlink (`uwg show`,
+  `uwg show <iface> advanced-security`); ядро выставляет его само.
+- Тесты: 190 (unit, 10 CLI на фейковом UAPI-сокете, 2 parity-теста `strip`
+  против bash-версии).
+- CI: fmt/clippy/test, релизные сборки x86_64/aarch64/armv7; упаковка
+  deb/rpm/man/completions/systemd из Rust-дерева.
 - Интеграционные скрипты: `scripts/test-kernel.sh`, `scripts/test-userspace.sh`,
   `scripts/test-two-nodes.sh` — проходят на сервере.
 - Стенд замеров: `bench/bench.sh` (матрица + изоляция ядер), `bench/verify*.sh`
@@ -58,20 +64,22 @@ iperf3 на `IPERF_CPU`.
 
 ## Известные проблемы
 
-- `uwg-quick` пока частично дублирует парсинг конфига (переход на `umbrawg-config` сделан не везде).
 - AdvancedSecurity пира доступен только для чтения: ядро 3.1 выставляет флаг само.
 - Пакеты (`debian/`, spec) собираются из Rust-дерева; для source-upload в Debian
   нужен vendor `netlink-packet-umbrawg`.
 - CI собирает ARM-тарболы, но не запускает тесты на ARM-хостах.
-- UDP-замеры упираются в cap `-b` — профиль замера требует доработки.
-- Go-эталон с обфускацией показывает аномально низкий TCP; сравнение нужно валидировать.
+- `tools/bench/` отстаёт от актуального стенда `/root/umbrawg/bench`
+  (повторы, мультипоток, CPU-профиль, MTU-guard).
+- Go-эталон с обфускацией несравним: в нём обфускация данных — заглушка
+  (`device/obf_data.go`), а S4=28 на MTU 1500 вызывает фрагментацию.
 
 ## Что делать дальше (по приоритету)
 
-1. Убрать дублирование `uwg-quick` → `umbrawg-config`/`umbrawg-ctl`.
-2. Интеграция стенда: матрица ≤ 30 минут, отчёты CSV → Markdown, полная матрица с потерями.
-3. Добавить interop-тест Rust↔ядро в CI (в netns, с автоскипом без root).
-4. Vendor `netlink-packet-umbrawg` для source-upload в Debian.
+1. Синхронизировать `tools/bench` с актуальным стендом (он не git, живёт в
+   `/root/umbrawg/bench`).
+2. Добавить interop-тест Rust↔ядро в CI (в netns, с автоскипом без root).
+3. Vendor `netlink-packet-umbrawg` для source-upload в Debian.
+4. Проверить реальные сборки `.deb`/`.rpm` и ARM-рантайм.
 
 Сделано в 0.2.0: упаковка Debian/RPM из `cargo build --release`, man-страницы,
 completions, systemd-юниты, CI fmt/clippy/test и релизные сборки x86_64/aarch64/armv7.
