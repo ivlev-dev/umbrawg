@@ -1,0 +1,27 @@
+pkgbase = umbrawg-tools-git
+	pkgdesc = UmbraWG command line tools: uwg and uwg-quick (git master)
+	pkgver = 0.2.0.r0.g0000000
+	pkgrel = 1
+	url = https://github.com/ivlev-dev/umbrawg-tools
+	arch = x86_64
+	arch = aarch64
+	license = GPL-2.0-only
+	makedepends = cargo
+	makedepends = rust
+	depends = glibc
+	depends = iproute2
+	optdepends = nftables: предпочтительный бэкенд firewall-правил uwg-quick
+	optdepends = iptables: запасной бэкенд firewall-правил uwg-quick
+	optdepends = openresolv: управление DNS через resolvconf
+	optdepends = systemd-resolvconf: управление DNS через resolvconf
+	optdepends = procps-ng: sysctl rp_filter для uwg-quick
+	optdepends = umbrawg-dkms: ядерный бэкенд UmbraWG
+	optdepends = umbrawg-daemon: userspace-бэкенд UmbraWG
+	provides = umbrawg-tools
+	conflicts = umbrawg-tools
+	source = umbrawg-tools::git+https://github.com/ivlev-dev/umbrawg-tools.git#branch=master
+	source = netlink-packet-umbrawg::git+https://github.com/ivlev-dev/netlink-packet-umbrawg.git#branch=main
+	sha256sums = SKIP
+	sha256sums = SKIP
+
+pkgname = umbrawg-tools-git

@@ -1,0 +1,80 @@
+# Maintainer: Yuri Egorov <ye@umbra.org>
+pkgname=umbrawg-tools-git
+pkgver=0.2.0.r0.g0000000
+pkgrel=1
+_upstream_name=umbrawg-tools
+_netlink_pkg=netlink-packet-umbrawg
+pkgdesc="UmbraWG command line tools: uwg and uwg-quick (git master)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/ivlev-dev/umbrawg-tools"
+license=('GPL-2.0-only')
+depends=('glibc' 'iproute2')
+makedepends=('cargo' 'rust')
+optdepends=(
+  'nftables: предпочтительный бэкенд firewall-правил uwg-quick'
+  'iptables: запасной бэкенд firewall-правил uwg-quick'
+  'openresolv: управление DNS через resolvconf'
+  'systemd-resolvconf: управление DNS через resolvconf'
+  'procps-ng: sysctl rp_filter для uwg-quick'
+  'umbrawg-dkms: ядерный бэкенд UmbraWG'
+  'umbrawg-daemon: userspace-бэкенд UmbraWG'
+)
+provides=("${pkgname%-git}")
+conflicts=("${pkgname%-git}")
+source=(
+  "${_upstream_name}::git+https://github.com/ivlev-dev/${_upstream_name}.git#branch=master"
+  "${_netlink_pkg}::git+https://github.com/ivlev-dev/${_netlink_pkg}.git#branch=main"
+)
+sha256sums=('SKIP' 'SKIP')
+
+pkgver() {
+  cd "${srcdir}/${_upstream_name}"
+  local version
+  version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)
+  if [[ -z ${version} ]]; then
+    echo "не удалось определить версию workspace из Cargo.toml" >&2
+    return 1
+  fi
+  printf '%s.r%s.g%s' "${version}" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "${srcdir}/${_upstream_name}"
+  cargo fetch --locked
+}
+
+build() {
+  cd "${srcdir}/${_upstream_name}"
+  cargo build --release --frozen --package uwg --package uwg-quick
+}
+
+check() {
+  cd "${srcdir}/${_upstream_name}"
+  cargo test --release --frozen --workspace
+}
+
+package() {
+  cd "${srcdir}/${_upstream_name}"
+
+  install -Dpm0755 target/release/uwg "${pkgdir}/usr/bin/uwg"
+  install -Dpm0755 target/release/uwg-quick "${pkgdir}/usr/bin/uwg-quick"
+
+  install -Dpm0644 man/uwg.8 "${pkgdir}/usr/share/man/man8/uwg.8"
+  install -Dpm0644 man/uwg-quick.8 "${pkgdir}/usr/share/man/man8/uwg-quick.8"
+
+  install -Dpm0644 completions/uwg.bash "${pkgdir}/usr/share/bash-completion/completions/uwg"
+  install -Dpm0644 completions/uwg-quick.bash "${pkgdir}/usr/share/bash-completion/completions/uwg-quick"
+  install -Dpm0644 completions/_uwg "${pkgdir}/usr/share/zsh/site-functions/_uwg"
+  install -Dpm0644 completions/_uwg-quick "${pkgdir}/usr/share/zsh/site-functions/_uwg-quick"
+  install -Dpm0644 completions/uwg.fish "${pkgdir}/usr/share/fish/vendor_completions.d/uwg.fish"
+  install -Dpm0644 completions/uwg-quick.fish "${pkgdir}/usr/share/fish/vendor_completions.d/uwg-quick.fish"
+
+  install -Dpm0644 systemd/uwg-quick@.service "${pkgdir}/usr/lib/systemd/system/uwg-quick@.service"
+  install -Dpm0644 systemd/uwg-quick.target "${pkgdir}/usr/lib/systemd/system/uwg-quick.target"
+
+  install -dpm0700 "${pkgdir}/etc/umbrawg"
+
+  install -Dpm0644 COPYING "${pkgdir}/usr/share/licenses/${pkgname}/COPYING"
+  install -Dpm0644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dpm0644 CHANGELOG.md "${pkgdir}/usr/share/doc/${pkgname}/CHANGELOG.md"
+}
