@@ -8,10 +8,10 @@ use futures::StreamExt;
 #[cfg(target_os = "linux")]
 use genetlink::new_connection;
 #[cfg(target_os = "linux")]
-use netlink_packet_amnezia_wireguard::{
-    AmneziaWireguardAllowedIp, AmneziaWireguardAllowedIpAttr,
-    AmneziaWireguardAttribute, AmneziaWireguardCmd, AmneziaWireguardMessage,
-    AmneziaWireguardPeerAttribute,
+use netlink_packet_umbrawg::{
+    UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
+    UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage,
+    UmbrawgPeerAttribute,
 };
 #[cfg(target_os = "linux")]
 use netlink_packet_core::{
@@ -32,19 +32,19 @@ async fn main() {
 
     let argv: Vec<String> = args().collect();
     if argv.len() < 2 {
-        eprintln!("Usage: get_amneziawg_info <ifname>");
+        eprintln!("Usage: get_umbrawg_info <ifname>");
         return;
     }
 
     let (connection, mut handle, _) = new_connection().unwrap();
     tokio::spawn(connection);
 
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::GetDevice,
-        attributes: vec![AmneziaWireguardAttribute::IfName(argv[1].clone())],
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![UmbrawgAttribute::IfName(argv[1].clone())],
     };
 
-    let genlmsg: GenlMessage<AmneziaWireguardMessage> =
+    let genlmsg: GenlMessage<UmbrawgMessage> =
         GenlMessage::from_payload(msg);
     let mut nlmsg = NetlinkMessage::from(genlmsg);
     nlmsg.header.flags = NLM_F_REQUEST | NLM_F_DUMP;
@@ -66,34 +66,34 @@ async fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn print_wg_payload(wg: AmneziaWireguardMessage) {
+fn print_wg_payload(wg: UmbrawgMessage) {
     for attr in &wg.attributes {
         match attr {
-            AmneziaWireguardAttribute::IfIndex(v) => println!("IfIndex: {}", v),
-            AmneziaWireguardAttribute::IfName(v) => println!("IfName: {}", v),
-            AmneziaWireguardAttribute::PrivateKey(_) => {
+            UmbrawgAttribute::IfIndex(v) => println!("IfIndex: {}", v),
+            UmbrawgAttribute::IfName(v) => println!("IfName: {}", v),
+            UmbrawgAttribute::PrivateKey(_) => {
                 println!("PrivateKey: (hidden)")
             }
-            AmneziaWireguardAttribute::PublicKey(v) => {
+            UmbrawgAttribute::PublicKey(v) => {
                 println!("PublicKey: {}", base64::encode(v))
             }
-            AmneziaWireguardAttribute::ListenPort(v) => {
+            UmbrawgAttribute::ListenPort(v) => {
                 println!("ListenPort: {}", v)
             }
-            AmneziaWireguardAttribute::Fwmark(v) => println!("Fwmark: {}", v),
-            AmneziaWireguardAttribute::Peers(peers) => {
+            UmbrawgAttribute::Fwmark(v) => println!("Fwmark: {}", v),
+            UmbrawgAttribute::Peers(peers) => {
                 for peer in peers {
                     println!("Peer: ");
                     print_wg_peer(peer);
                 }
             }
-            AmneziaWireguardAttribute::JC(v) => {
+            UmbrawgAttribute::JC(v) => {
                 println!("JunkCount: {}", v)
             }
-            AmneziaWireguardAttribute::Jmin(v) => {
+            UmbrawgAttribute::Jmin(v) => {
                 println!("JunkPacketMinSize: {}", v)
             }
-            AmneziaWireguardAttribute::Jmax(v) => {
+            UmbrawgAttribute::Jmax(v) => {
                 println!("JunkPacketMaxSize: {}", v)
             }
             _ => (),
@@ -102,31 +102,31 @@ fn print_wg_payload(wg: AmneziaWireguardMessage) {
 }
 
 #[cfg(target_os = "linux")]
-fn print_wg_peer(attrs: &[AmneziaWireguardPeerAttribute]) {
+fn print_wg_peer(attrs: &[UmbrawgPeerAttribute]) {
     for attr in attrs {
         match attr {
-            AmneziaWireguardPeerAttribute::PublicKey(v) => {
+            UmbrawgPeerAttribute::PublicKey(v) => {
                 println!("  PublicKey: {}", base64::encode(v))
             }
-            AmneziaWireguardPeerAttribute::PresharedKey(_) => {
+            UmbrawgPeerAttribute::PresharedKey(_) => {
                 println!("  PresharedKey: (hidden)")
             }
-            AmneziaWireguardPeerAttribute::Endpoint(v) => {
+            UmbrawgPeerAttribute::Endpoint(v) => {
                 println!("  Endpoint: {}", v)
             }
-            AmneziaWireguardPeerAttribute::PersistentKeepalive(v) => {
+            UmbrawgPeerAttribute::PersistentKeepalive(v) => {
                 println!("  PersistentKeepalive: {}", v)
             }
-            AmneziaWireguardPeerAttribute::LastHandshake(v) => {
+            UmbrawgPeerAttribute::LastHandshake(v) => {
                 println!("  LastHandshake: {:?}", v)
             }
-            AmneziaWireguardPeerAttribute::RxBytes(v) => {
+            UmbrawgPeerAttribute::RxBytes(v) => {
                 println!("  RxBytes: {}", v)
             }
-            AmneziaWireguardPeerAttribute::TxBytes(v) => {
+            UmbrawgPeerAttribute::TxBytes(v) => {
                 println!("  TxBytes: {}", v)
             }
-            AmneziaWireguardPeerAttribute::AllowedIps(ips) => {
+            UmbrawgPeerAttribute::AllowedIps(ips) => {
                 for ip in ips {
                     print_wg_allowedip(ip);
                 }
@@ -137,16 +137,16 @@ fn print_wg_peer(attrs: &[AmneziaWireguardPeerAttribute]) {
 }
 
 #[cfg(target_os = "linux")]
-fn print_wg_allowedip(nlas: &AmneziaWireguardAllowedIp) -> Option<()> {
+fn print_wg_allowedip(nlas: &UmbrawgAllowedIp) -> Option<()> {
     let ipaddr = nlas.iter().find_map(|nla| {
-        if let AmneziaWireguardAllowedIpAttr::IpAddr(addr) = nla {
+        if let UmbrawgAllowedIpAttr::IpAddr(addr) = nla {
             Some(*addr)
         } else {
             None
         }
     })?;
     let cidr = nlas.iter().find_map(|nla| {
-        if let AmneziaWireguardAllowedIpAttr::Cidr(cidr) = nla {
+        if let UmbrawgAllowedIpAttr::Cidr(cidr) = nla {
             Some(*cidr)
         } else {
             None

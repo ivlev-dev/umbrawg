@@ -7,30 +7,30 @@ use netlink_packet_core::{
     ErrorContext, Nla, NlaBuffer, NlasIterator, Parseable, NLA_F_NESTED,
 };
 
-const WGALLOWEDIP_A_FAMILY: u16 = 1;
-const WGALLOWEDIP_A_IPADDR: u16 = 2;
-const WGALLOWEDIP_A_CIDR_MASK: u16 = 3;
+const UWGALLOWEDIP_A_FAMILY: u16 = 1;
+const UWGALLOWEDIP_A_IPADDR: u16 = 2;
+const UWGALLOWEDIP_A_CIDR_MASK: u16 = 3;
 
-pub(crate) struct AmneziaWireguardAllowedIps(
-    pub(crate) Vec<AmneziaWireguardAllowedIp>,
+pub(crate) struct UmbrawgAllowedIps(
+    pub(crate) Vec<UmbrawgAllowedIp>,
 );
 
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for AmneziaWireguardAllowedIps
+    for UmbrawgAllowedIps
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let mut ret = Vec::new();
         let nlas = NlasIterator::new(buf.value());
         for nla in nlas {
             let nla = nla?;
-            ret.push(AmneziaWireguardAllowedIp::parse(&nla)?);
+            ret.push(UmbrawgAllowedIp::parse(&nla)?);
         }
         Ok(Self(ret))
     }
 }
 
-impl std::ops::Deref for AmneziaWireguardAllowedIps {
-    type Target = Vec<AmneziaWireguardAllowedIp>;
+impl std::ops::Deref for UmbrawgAllowedIps {
+    type Target = Vec<UmbrawgAllowedIp>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -38,23 +38,23 @@ impl std::ops::Deref for AmneziaWireguardAllowedIps {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AmneziaWireguardAllowedIp(pub Vec<AmneziaWireguardAllowedIpAttr>);
+pub struct UmbrawgAllowedIp(pub Vec<UmbrawgAllowedIpAttr>);
 
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for AmneziaWireguardAllowedIp
+    for UmbrawgAllowedIp
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let mut ret = Vec::new();
         let nlas = NlasIterator::new(buf.value());
         for nla in nlas {
             let nla = nla?;
-            ret.push(AmneziaWireguardAllowedIpAttr::parse(&nla)?);
+            ret.push(UmbrawgAllowedIpAttr::parse(&nla)?);
         }
         Ok(Self(ret))
     }
 }
 
-impl Nla for AmneziaWireguardAllowedIp {
+impl Nla for UmbrawgAllowedIp {
     fn kind(&self) -> u16 {
         // linux kernel always set it to 0
         NLA_F_NESTED
@@ -69,8 +69,8 @@ impl Nla for AmneziaWireguardAllowedIp {
     }
 }
 
-impl std::ops::Deref for AmneziaWireguardAllowedIp {
-    type Target = Vec<AmneziaWireguardAllowedIpAttr>;
+impl std::ops::Deref for UmbrawgAllowedIp {
+    type Target = Vec<UmbrawgAllowedIpAttr>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -82,13 +82,13 @@ const AF_INET: u16 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum AmneziaWireguardAddressFamily {
+pub enum UmbrawgAddressFamily {
     Ipv4,
     Ipv6,
     Other(u16),
 }
 
-impl From<u16> for AmneziaWireguardAddressFamily {
+impl From<u16> for UmbrawgAddressFamily {
     fn from(d: u16) -> Self {
         match d {
             AF_INET6 => Self::Ipv6,
@@ -98,26 +98,26 @@ impl From<u16> for AmneziaWireguardAddressFamily {
     }
 }
 
-impl From<AmneziaWireguardAddressFamily> for u16 {
-    fn from(v: AmneziaWireguardAddressFamily) -> u16 {
+impl From<UmbrawgAddressFamily> for u16 {
+    fn from(v: UmbrawgAddressFamily) -> u16 {
         match v {
-            AmneziaWireguardAddressFamily::Ipv6 => AF_INET6,
-            AmneziaWireguardAddressFamily::Ipv4 => AF_INET,
-            AmneziaWireguardAddressFamily::Other(d) => d,
+            UmbrawgAddressFamily::Ipv6 => AF_INET6,
+            UmbrawgAddressFamily::Ipv4 => AF_INET,
+            UmbrawgAddressFamily::Other(d) => d,
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum AmneziaWireguardAllowedIpAttr {
-    Family(AmneziaWireguardAddressFamily),
+pub enum UmbrawgAllowedIpAttr {
+    Family(UmbrawgAddressFamily),
     IpAddr(IpAddr),
     Cidr(u8),
     Other(DefaultNla),
 }
 
-impl Nla for AmneziaWireguardAllowedIpAttr {
+impl Nla for UmbrawgAllowedIpAttr {
     fn value_len(&self) -> usize {
         match self {
             Self::Family(_) => 2,
@@ -132,9 +132,9 @@ impl Nla for AmneziaWireguardAllowedIpAttr {
 
     fn kind(&self) -> u16 {
         match self {
-            Self::Family(_) => WGALLOWEDIP_A_FAMILY,
-            Self::IpAddr(_) => WGALLOWEDIP_A_IPADDR,
-            Self::Cidr(_) => WGALLOWEDIP_A_CIDR_MASK,
+            Self::Family(_) => UWGALLOWEDIP_A_FAMILY,
+            Self::IpAddr(_) => UWGALLOWEDIP_A_IPADDR,
+            Self::Cidr(_) => UWGALLOWEDIP_A_CIDR_MASK,
             Self::Other(nla) => nla.kind(),
         }
     }
@@ -153,21 +153,21 @@ impl Nla for AmneziaWireguardAllowedIpAttr {
 }
 
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for AmneziaWireguardAllowedIpAttr
+    for UmbrawgAllowedIpAttr
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let payload = buf.value();
         Ok(match buf.kind() {
-            WGALLOWEDIP_A_FAMILY => Self::Family(
+            UWGALLOWEDIP_A_FAMILY => Self::Family(
                 parse_u16(payload)
-                    .context("invalid WGALLOWEDIP_A_FAMILY value")?
+                    .context("invalid UWGALLOWEDIP_A_FAMILY value")?
                     .into(),
             ),
-            WGALLOWEDIP_A_IPADDR => Self::IpAddr(
+            UWGALLOWEDIP_A_IPADDR => Self::IpAddr(
                 parse_ip(payload)
-                    .context("invalid WGALLOWEDIP_A_IPADDR value")?,
+                    .context("invalid UWGALLOWEDIP_A_IPADDR value")?,
             ),
-            WGALLOWEDIP_A_CIDR_MASK => Self::Cidr(payload[0]),
+            UWGALLOWEDIP_A_CIDR_MASK => Self::Cidr(payload[0]),
             kind => Self::Other(
                 DefaultNla::parse(buf)
                     .context(format!("unknown NLA type {kind}"))?,

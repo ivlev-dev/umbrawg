@@ -12,11 +12,11 @@ use futures::StreamExt;
 #[cfg(target_os = "linux")]
 use genetlink::new_connection;
 #[cfg(target_os = "linux")]
-use netlink_packet_amnezia_wireguard::{
-    AmneziaWireguardAddressFamily, AmneziaWireguardAllowedIp,
-    AmneziaWireguardAllowedIpAttr, AmneziaWireguardAttribute,
-    AmneziaWireguardCmd, AmneziaWireguardMessage, AmneziaWireguardPeer,
-    AmneziaWireguardPeerAttribute,
+use netlink_packet_umbrawg::{
+    UmbrawgAddressFamily, UmbrawgAllowedIp,
+    UmbrawgAllowedIpAttr, UmbrawgAttribute,
+    UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgPeerAttribute,
 };
 #[cfg(target_os = "linux")]
 use netlink_packet_core::{
@@ -37,15 +37,15 @@ async fn main() {
 
     let argv: Vec<String> = args().collect();
     if argv.len() < 2 {
-        eprintln!("Usage: set_amneziawg <ifname>");
+        eprintln!("Usage: set_umbrawg <ifname>");
         return;
     }
 
-    // The amneziawg interface need to exist before executing this code.
-    // This can be done with `ip link <name> type amneziawg` command.
+    // The umbrawg interface need to exist before executing this code.
+    // This can be done with `ip link <name> type umbrawg` command.
     let name = argv[1].clone();
     let priv_key = generate_priv_key();
-    let peer_pub_key: [u8; AmneziaWireguardAttribute::WG_KEY_LEN] =
+    let peer_pub_key: [u8; UmbrawgAttribute::UWG_KEY_LEN] =
         base64::decode("8bdQrVLqiw3ZoHCucNh1YfH0iCWuyStniRr8t7H24Fk=")
             .unwrap()
             .try_into()
@@ -55,53 +55,53 @@ async fn main() {
     tokio::spawn(connection);
 
     let attributes = vec![
-        AmneziaWireguardAttribute::IfName(name),
-        AmneziaWireguardAttribute::PrivateKey(priv_key),
-        AmneziaWireguardAttribute::ListenPort(51820),
-        AmneziaWireguardAttribute::Fwmark(0),
-        // Amnezia specific parameters
-        AmneziaWireguardAttribute::JC(4),
-        AmneziaWireguardAttribute::Jmin(40),
-        AmneziaWireguardAttribute::Jmax(70),
-        AmneziaWireguardAttribute::S1(0x5566),
-        AmneziaWireguardAttribute::H1("61220074".into()),
-        AmneziaWireguardAttribute::Peers(vec![AmneziaWireguardPeer(vec![
-            AmneziaWireguardPeerAttribute::PublicKey(peer_pub_key),
-            AmneziaWireguardPeerAttribute::Endpoint(SocketAddr::new(
+        UmbrawgAttribute::IfName(name),
+        UmbrawgAttribute::PrivateKey(priv_key),
+        UmbrawgAttribute::ListenPort(51820),
+        UmbrawgAttribute::Fwmark(0),
+        // Umbra specific parameters
+        UmbrawgAttribute::JC(4),
+        UmbrawgAttribute::Jmin(40),
+        UmbrawgAttribute::Jmax(70),
+        UmbrawgAttribute::S1(0x5566),
+        UmbrawgAttribute::H1("61220074".into()),
+        UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey(peer_pub_key),
+            UmbrawgPeerAttribute::Endpoint(SocketAddr::new(
                 IpAddr::V4(Ipv4Addr::new(10, 10, 10, 1)),
                 51820,
             )),
-            AmneziaWireguardPeerAttribute::AllowedIps(vec![
-                AmneziaWireguardAllowedIp(vec![
+            UmbrawgPeerAttribute::AllowedIps(vec![
+                UmbrawgAllowedIp(vec![
                     // ipv4 0.0.0.0/0
-                    AmneziaWireguardAllowedIpAttr::Family(
-                        AmneziaWireguardAddressFamily::Ipv4,
+                    UmbrawgAllowedIpAttr::Family(
+                        UmbrawgAddressFamily::Ipv4,
                     ),
-                    AmneziaWireguardAllowedIpAttr::IpAddr(
+                    UmbrawgAllowedIpAttr::IpAddr(
                         "0.0.0.0".parse().unwrap(),
                     ),
-                    AmneziaWireguardAllowedIpAttr::Cidr(0),
+                    UmbrawgAllowedIpAttr::Cidr(0),
                 ]),
-                AmneziaWireguardAllowedIp(vec![
+                UmbrawgAllowedIp(vec![
                     // ipv6 ::/0
-                    AmneziaWireguardAllowedIpAttr::Family(
-                        AmneziaWireguardAddressFamily::Ipv6,
+                    UmbrawgAllowedIpAttr::Family(
+                        UmbrawgAddressFamily::Ipv6,
                     ),
-                    AmneziaWireguardAllowedIpAttr::IpAddr(
+                    UmbrawgAllowedIpAttr::IpAddr(
                         "::".parse().unwrap(),
                     ),
-                    AmneziaWireguardAllowedIpAttr::Cidr(0),
+                    UmbrawgAllowedIpAttr::Cidr(0),
                 ]),
             ]),
         ])]),
     ];
 
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes,
     };
 
-    let genlmsg: GenlMessage<AmneziaWireguardMessage> =
+    let genlmsg: GenlMessage<UmbrawgMessage> =
         GenlMessage::from_payload(msg);
 
     let mut nlmsg = NetlinkMessage::from(genlmsg);
@@ -118,8 +118,8 @@ async fn main() {
 }
 
 #[cfg(target_os = "linux")]
-fn generate_priv_key() -> [u8; AmneziaWireguardAttribute::WG_KEY_LEN] {
-    let mut key = [0u8; AmneziaWireguardAttribute::WG_KEY_LEN];
+fn generate_priv_key() -> [u8; UmbrawgAttribute::UWG_KEY_LEN] {
+    let mut key = [0u8; UmbrawgAttribute::UWG_KEY_LEN];
     getrandom::getrandom(&mut key).unwrap();
     // modify random bytes using algorithm described
     // at https://cr.yp.to/ecdh.html.

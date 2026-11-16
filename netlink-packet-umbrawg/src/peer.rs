@@ -9,32 +9,32 @@ use netlink_packet_core::{
 };
 
 use super::{
-    allowedip::AmneziaWireguardAllowedIps,
+    allowedip::UmbrawgAllowedIps,
     socket_addr::{
         emit_socket_addr, parse_socket_addr, SOCKET_ADDR_V4_LEN,
         SOCKET_ADDR_V6_LEN,
     },
 };
-use crate::AmneziaWireguardAllowedIp;
+use crate::UmbrawgAllowedIp;
 
-pub(crate) struct AmneziaWireguardPeers(pub(crate) Vec<AmneziaWireguardPeer>);
+pub(crate) struct UmbrawgPeers(pub(crate) Vec<UmbrawgPeer>);
 
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for AmneziaWireguardPeers
+    for UmbrawgPeers
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let mut ret = Vec::new();
         let nlas = NlasIterator::new(buf.value());
         for nla in nlas {
             let nla = nla?;
-            ret.push(AmneziaWireguardPeer::parse(&nla)?);
+            ret.push(UmbrawgPeer::parse(&nla)?);
         }
         Ok(Self(ret))
     }
 }
 
-impl std::ops::Deref for AmneziaWireguardPeers {
-    type Target = Vec<AmneziaWireguardPeer>;
+impl std::ops::Deref for UmbrawgPeers {
+    type Target = Vec<UmbrawgPeer>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -42,23 +42,23 @@ impl std::ops::Deref for AmneziaWireguardPeers {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AmneziaWireguardPeer(pub Vec<AmneziaWireguardPeerAttribute>);
+pub struct UmbrawgPeer(pub Vec<UmbrawgPeerAttribute>);
 
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for AmneziaWireguardPeer
+    for UmbrawgPeer
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let mut ret = Vec::new();
         let nlas = NlasIterator::new(buf.value());
         for nla in nlas {
             let nla = nla?;
-            ret.push(AmneziaWireguardPeerAttribute::parse(&nla)?);
+            ret.push(UmbrawgPeerAttribute::parse(&nla)?);
         }
         Ok(Self(ret))
     }
 }
 
-impl Nla for AmneziaWireguardPeer {
+impl Nla for UmbrawgPeer {
     fn kind(&self) -> u16 {
         // linux kernel always set it to 0
         NLA_F_NESTED
@@ -73,8 +73,8 @@ impl Nla for AmneziaWireguardPeer {
     }
 }
 
-impl std::ops::Deref for AmneziaWireguardPeer {
-    type Target = Vec<AmneziaWireguardPeerAttribute>;
+impl std::ops::Deref for UmbrawgPeer {
+    type Target = Vec<UmbrawgPeerAttribute>;
 
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -84,12 +84,12 @@ impl std::ops::Deref for AmneziaWireguardPeer {
 const TIMESPEC_LEN: usize = 16;
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AmneziaWireguardTimeSpec {
+pub struct UmbrawgTimeSpec {
     pub seconds: i64,
     pub nano_seconds: i64,
 }
 
-impl Emitable for AmneziaWireguardTimeSpec {
+impl Emitable for UmbrawgTimeSpec {
     fn buffer_len(&self) -> usize {
         TIMESPEC_LEN
     }
@@ -101,13 +101,13 @@ impl Emitable for AmneziaWireguardTimeSpec {
 }
 
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for AmneziaWireguardTimeSpec
+    for UmbrawgTimeSpec
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let data = buf.value();
         if data.len() < TIMESPEC_LEN {
             Err(format!(
-                "Invalid WGPEER_A_LAST_HANDSHAKE_TIME, expecting size {}, but \
+                "Invalid UWGPEER_A_LAST_HANDSHAKE_TIME, expecting size {}, but \
                  got {:?}",
                 TIMESPEC_LEN, data
             )
@@ -124,20 +124,20 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
 const NOISE_PUBLIC_KEY_LEN: usize = 32;
 const NOISE_SYMMETRIC_KEY_LEN: usize = 32;
 
-const WGPEER_A_PUBLIC_KEY: u16 = 1;
-const WGPEER_A_PRESHARED_KEY: u16 = 2;
-const WGPEER_A_FLAGS: u16 = 3;
-const WGPEER_A_ENDPOINT: u16 = 4;
-const WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL: u16 = 5;
-const WGPEER_A_LAST_HANDSHAKE_TIME: u16 = 6;
-const WGPEER_A_RX_BYTES: u16 = 7;
-const WGPEER_A_TX_BYTES: u16 = 8;
-const WGPEER_A_ALLOWEDIPS: u16 = 9;
-const WGPEER_A_PROTOCOL_VERSION: u16 = 10;
+const UWGPEER_A_PUBLIC_KEY: u16 = 1;
+const UWGPEER_A_PRESHARED_KEY: u16 = 2;
+const UWGPEER_A_FLAGS: u16 = 3;
+const UWGPEER_A_ENDPOINT: u16 = 4;
+const UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL: u16 = 5;
+const UWGPEER_A_LAST_HANDSHAKE_TIME: u16 = 6;
+const UWGPEER_A_RX_BYTES: u16 = 7;
+const UWGPEER_A_TX_BYTES: u16 = 8;
+const UWGPEER_A_ALLOWEDIPS: u16 = 9;
+const UWGPEER_A_PROTOCOL_VERSION: u16 = 10;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum AmneziaWireguardPeerAttribute {
+pub enum UmbrawgPeerAttribute {
     PublicKey([u8; NOISE_PUBLIC_KEY_LEN]),
     PresharedKey([u8; NOISE_SYMMETRIC_KEY_LEN]),
     Endpoint(SocketAddr),
@@ -148,21 +148,21 @@ pub enum AmneziaWireguardPeerAttribute {
     /// this variant.
     PersistentKeepalive(u16),
     /// Persistent keepalive as `u32` packing a `u16` range
-    /// (`lo | hi << 16`), the wire format of the AmneziaWG 3.0 kernel
+    /// (`lo | hi << 16`), the wire format of the UmbraWG 3.0 kernel
     /// module (genl family version 3). Produced by parsing 4-byte
     /// payloads; a plain interval `v` sent by new tools arrives as
     /// `v | v << 16`.
     PersistentKeepaliveRange(u32),
-    LastHandshake(AmneziaWireguardTimeSpec),
+    LastHandshake(UmbrawgTimeSpec),
     RxBytes(u64),
     TxBytes(u64),
-    AllowedIps(Vec<AmneziaWireguardAllowedIp>),
+    AllowedIps(Vec<UmbrawgAllowedIp>),
     ProtocolVersion(u32),
     Flags(u32),
     Other(DefaultNla),
 }
 
-impl Nla for AmneziaWireguardPeerAttribute {
+impl Nla for UmbrawgPeerAttribute {
     fn value_len(&self) -> usize {
         match self {
             Self::PublicKey(v) => size_of_val(v),
@@ -185,19 +185,19 @@ impl Nla for AmneziaWireguardPeerAttribute {
 
     fn kind(&self) -> u16 {
         match self {
-            Self::PublicKey(_) => WGPEER_A_PUBLIC_KEY,
-            Self::PresharedKey(_) => WGPEER_A_PRESHARED_KEY,
-            Self::Endpoint(_) => WGPEER_A_ENDPOINT,
+            Self::PublicKey(_) => UWGPEER_A_PUBLIC_KEY,
+            Self::PresharedKey(_) => UWGPEER_A_PRESHARED_KEY,
+            Self::Endpoint(_) => UWGPEER_A_ENDPOINT,
             Self::PersistentKeepalive(_)
             | Self::PersistentKeepaliveRange(_) => {
-                WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL
+                UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL
             }
-            Self::LastHandshake(_) => WGPEER_A_LAST_HANDSHAKE_TIME,
-            Self::RxBytes(_) => WGPEER_A_RX_BYTES,
-            Self::TxBytes(_) => WGPEER_A_TX_BYTES,
-            Self::AllowedIps(_) => WGPEER_A_ALLOWEDIPS | NLA_F_NESTED,
-            Self::ProtocolVersion(_) => WGPEER_A_PROTOCOL_VERSION,
-            Self::Flags(_) => WGPEER_A_FLAGS,
+            Self::LastHandshake(_) => UWGPEER_A_LAST_HANDSHAKE_TIME,
+            Self::RxBytes(_) => UWGPEER_A_RX_BYTES,
+            Self::TxBytes(_) => UWGPEER_A_TX_BYTES,
+            Self::AllowedIps(_) => UWGPEER_A_ALLOWEDIPS | NLA_F_NESTED,
+            Self::ProtocolVersion(_) => UWGPEER_A_PROTOCOL_VERSION,
+            Self::Flags(_) => UWGPEER_A_FLAGS,
             Self::Other(v) => v.kind(),
         }
     }
@@ -221,77 +221,77 @@ impl Nla for AmneziaWireguardPeerAttribute {
 }
 
 impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
-    for AmneziaWireguardPeerAttribute
+    for UmbrawgPeerAttribute
 {
     fn parse(buf: &NlaBuffer<&'a T>) -> Result<Self, DecodeError> {
         let payload = buf.value();
         Ok(match buf.kind() {
-            WGPEER_A_PUBLIC_KEY => Self::PublicKey(
+            UWGPEER_A_PUBLIC_KEY => Self::PublicKey(
                 payload
                     .try_into()
                     .map_err(|e: std::array::TryFromSliceError| {
                         DecodeError::from(e.to_string())
                     })
-                    .context("invalid WGPEER_A_PUBLIC_KEY")?,
+                    .context("invalid UWGPEER_A_PUBLIC_KEY")?,
             ),
-            WGPEER_A_PRESHARED_KEY => Self::PresharedKey(
+            UWGPEER_A_PRESHARED_KEY => Self::PresharedKey(
                 payload
                     .try_into()
                     .map_err(|e: std::array::TryFromSliceError| {
                         DecodeError::from(e.to_string())
                     })
-                    .context("invalid WGPEER_A_PRESHARED_KEY")?,
+                    .context("invalid UWGPEER_A_PRESHARED_KEY")?,
             ),
-            WGPEER_A_ENDPOINT => Self::Endpoint(
+            UWGPEER_A_ENDPOINT => Self::Endpoint(
                 parse_socket_addr(payload)
-                    .context("invalid WGPEER_A_ENDPOINT")?,
+                    .context("invalid UWGPEER_A_ENDPOINT")?,
             ),
-            WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL => {
-                // AmneziaWG 3.0 sends a u32 (packed u16 range), older
+            UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL => {
+                // UmbraWG 3.0 sends a u32 (packed u16 range), older
                 // modules send a u16.
                 match payload.len() {
                     2 => {
                         Self::PersistentKeepalive(parse_u16(payload).context(
-                            "invalid WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL \
+                            "invalid UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL \
                              value",
                         )?)
                     }
                     4 => Self::PersistentKeepaliveRange(
                         parse_u32(payload).context(
-                            "invalid WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL \
+                            "invalid UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL \
                              value",
                         )?,
                     ),
                     _ => {
                         return Err(DecodeError::from(format!(
-                            "invalid WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL \
+                            "invalid UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL \
                              payload length {}",
                             payload.len()
                         )))
                     }
                 }
             }
-            WGPEER_A_LAST_HANDSHAKE_TIME => Self::LastHandshake(
-                AmneziaWireguardTimeSpec::parse(buf)
-                    .context("invalid WGPEER_A_LAST_HANDSHAKE_TIME")?,
+            UWGPEER_A_LAST_HANDSHAKE_TIME => Self::LastHandshake(
+                UmbrawgTimeSpec::parse(buf)
+                    .context("invalid UWGPEER_A_LAST_HANDSHAKE_TIME")?,
             ),
-            WGPEER_A_RX_BYTES => Self::RxBytes(
+            UWGPEER_A_RX_BYTES => Self::RxBytes(
                 parse_u64(payload)
-                    .context("invalid WGPEER_A_RX_BYTES value")?,
+                    .context("invalid UWGPEER_A_RX_BYTES value")?,
             ),
-            WGPEER_A_TX_BYTES => Self::TxBytes(
+            UWGPEER_A_TX_BYTES => Self::TxBytes(
                 parse_u64(payload)
-                    .context("invalid WGPEER_A_TX_BYTES value")?,
+                    .context("invalid UWGPEER_A_TX_BYTES value")?,
             ),
-            WGPEER_A_ALLOWEDIPS => {
-                Self::AllowedIps(AmneziaWireguardAllowedIps::parse(buf)?.0)
+            UWGPEER_A_ALLOWEDIPS => {
+                Self::AllowedIps(UmbrawgAllowedIps::parse(buf)?.0)
             }
-            WGPEER_A_PROTOCOL_VERSION => Self::ProtocolVersion(
+            UWGPEER_A_PROTOCOL_VERSION => Self::ProtocolVersion(
                 parse_u32(payload)
-                    .context("invalid WGPEER_A_PROTOCOL_VERSION value")?,
+                    .context("invalid UWGPEER_A_PROTOCOL_VERSION value")?,
             ),
-            WGPEER_A_FLAGS => Self::Flags(
-                parse_u32(payload).context("invalid WGPEER_A_FLAGS value")?,
+            UWGPEER_A_FLAGS => Self::Flags(
+                parse_u32(payload).context("invalid UWGPEER_A_FLAGS value")?,
             ),
             kind => Self::Other(
                 DefaultNla::parse(buf)

@@ -1,16 +1,16 @@
 // SPDX-License-Identifier: MIT
 
-//! Helpers for the AmneziaWG 3.0 `u32_range_t` wire format.
+//! Helpers for the UmbraWG 3.0 `u32_range_t` wire format.
 //!
 //! Since kernel module v3.0 the magic header attributes
-//! (`WGDEVICE_A_H1`..`WGDEVICE_A_H4`) are transferred as a `u64` packing a
+//! (`UWGDEVICE_A_H1`..`UWGDEVICE_A_H4`) are transferred as a `u64` packing a
 //! range of `u32` values: the low 32 bits hold the range start, the high 32
 //! bits hold the range end. Older modules (genl family version 2) transfer
 //! the same information as a NUL-terminated decimal string, either `"<v>"`
 //! or `"<lo>-<hi>"`. These helpers convert between the two representations.
 
 /// Packs a `[lo, hi]` `u32` range into the `u64` wire value used by the
-/// AmneziaWG 3.0 kernel module.
+/// UmbraWG 3.0 kernel module.
 pub fn u32_range_pack(lo: u32, hi: u32) -> u64 {
     ((hi as u64) << 32) | (lo as u64)
 }
@@ -20,7 +20,7 @@ pub fn u32_range_unpack(range: u64) -> (u32, u32) {
     (range as u32, (range >> 32) as u32)
 }
 
-/// Formats a packed range the way `awg`(8) and the v1.0 kernel module do:
+/// Formats a packed range the way `uwg`(8) and the v1.0 kernel module do:
 /// `"<lo>"` when `lo == hi`, `"<lo>-<hi>"` otherwise.
 pub fn u32_range_to_string(range: u64) -> String {
     let (lo, hi) = u32_range_unpack(range);

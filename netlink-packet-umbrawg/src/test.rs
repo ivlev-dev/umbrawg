@@ -10,13 +10,13 @@ use netlink_packet_generic::{GenlBuffer, GenlHeader};
 use pretty_assertions::assert_eq;
 
 use crate::{
-    AmneziaWireguardAddressFamily, AmneziaWireguardAllowedIp,
-    AmneziaWireguardAllowedIpAttr, AmneziaWireguardAttribute,
-    AmneziaWireguardCmd, AmneziaWireguardMessage, AmneziaWireguardPeer,
-    AmneziaWireguardPeerAttribute, AmneziaWireguardTimeSpec,
+    UmbrawgAddressFamily, UmbrawgAllowedIp,
+    UmbrawgAllowedIpAttr, UmbrawgAttribute,
+    UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgPeerAttribute, UmbrawgTimeSpec,
 };
 
-fn roundtrip_msg(msg: AmneziaWireguardMessage) -> AmneziaWireguardMessage {
+fn roundtrip_msg(msg: UmbrawgMessage) -> UmbrawgMessage {
     let header = GenlHeader {
         cmd: msg.cmd.into(),
         version: 2,
@@ -25,7 +25,7 @@ fn roundtrip_msg(msg: AmneziaWireguardMessage) -> AmneziaWireguardMessage {
     let mut buffer = vec![0; msg.buffer_len() + header_len];
     header.emit(&mut buffer);
     msg.emit(&mut buffer[header_len..]);
-    AmneziaWireguardMessage::parse_with_param(&buffer[header_len..], header)
+    UmbrawgMessage::parse_with_param(&buffer[header_len..], header)
         .unwrap()
 }
 
@@ -37,16 +37,16 @@ fn test_query_request() {
         0x00, 0x01, 0x00, 0x00, 0x07, 0x00, 0x02, 0x00, 0x63, 0x6e, 0x00, 0x00,
     ];
 
-    let expected: AmneziaWireguardMessage = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::GetDevice,
-        attributes: vec![AmneziaWireguardAttribute::IfName("cn".to_string())],
+    let expected: UmbrawgMessage = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![UmbrawgAttribute::IfName("cn".to_string())],
     };
 
     let header = GenlHeader::parse(&GenlBuffer::new(&raw)).unwrap();
 
     assert_eq!(
         expected,
-        AmneziaWireguardMessage::parse_with_param(&raw[4..], header).unwrap(),
+        UmbrawgMessage::parse_with_param(&raw[4..], header).unwrap(),
     );
     let mut buffer = vec![0; expected.buffer_len() + header.buffer_len()];
     header.emit(&mut buffer);
@@ -89,49 +89,49 @@ fn test_query_reply() {
     ];
 
     let attributes = vec![
-        AmneziaWireguardAttribute::ListenPort(32812),
-        AmneziaWireguardAttribute::Fwmark(0),
-        AmneziaWireguardAttribute::IfIndex(3),
-        AmneziaWireguardAttribute::IfName("cn".to_string()),
-        AmneziaWireguardAttribute::PrivateKey([
+        UmbrawgAttribute::ListenPort(32812),
+        UmbrawgAttribute::Fwmark(0),
+        UmbrawgAttribute::IfIndex(3),
+        UmbrawgAttribute::IfName("cn".to_string()),
+        UmbrawgAttribute::PrivateKey([
             0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18,
             19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31,
         ]),
-        AmneziaWireguardAttribute::PublicKey([
+        UmbrawgAttribute::PublicKey([
             204, 175, 16, 225, 169, 215, 208, 95, 242, 189, 210, 160, 241, 120,
             45, 151, 70, 154, 28, 247, 190, 136, 15, 104, 117, 167, 121, 147,
             93, 29, 33, 117,
         ]),
-        AmneziaWireguardAttribute::Peers(vec![AmneziaWireguardPeer(vec![
-            AmneziaWireguardPeerAttribute::PublicKey([
+        UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([
                 119, 220, 154, 192, 179, 240, 197, 231, 91, 184, 211, 66, 45,
                 136, 236, 146, 209, 58, 52, 35, 34, 144, 135, 130, 21, 81, 87,
                 25, 105, 222, 160, 68,
             ]),
-            AmneziaWireguardPeerAttribute::PresharedKey([
+            UmbrawgPeerAttribute::PresharedKey([
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
             ]),
-            AmneziaWireguardPeerAttribute::LastHandshake(
-                AmneziaWireguardTimeSpec {
+            UmbrawgPeerAttribute::LastHandshake(
+                UmbrawgTimeSpec {
                     seconds: 1769415834,
                     nano_seconds: 262671874,
                 },
             ),
-            AmneziaWireguardPeerAttribute::PersistentKeepalive(25),
-            AmneziaWireguardPeerAttribute::TxBytes(1917056),
-            AmneziaWireguardPeerAttribute::RxBytes(30426264),
-            AmneziaWireguardPeerAttribute::ProtocolVersion(1),
-            AmneziaWireguardPeerAttribute::Endpoint(
+            UmbrawgPeerAttribute::PersistentKeepalive(25),
+            UmbrawgPeerAttribute::TxBytes(1917056),
+            UmbrawgPeerAttribute::RxBytes(30426264),
+            UmbrawgPeerAttribute::ProtocolVersion(1),
+            UmbrawgPeerAttribute::Endpoint(
                 std::net::SocketAddr::from_str("1.1.1.1:1111").unwrap(),
             ),
-            AmneziaWireguardPeerAttribute::AllowedIps(vec![
-                AmneziaWireguardAllowedIp(vec![
-                    AmneziaWireguardAllowedIpAttr::Cidr(0),
-                    AmneziaWireguardAllowedIpAttr::Family(
-                        AmneziaWireguardAddressFamily::Ipv4,
+            UmbrawgPeerAttribute::AllowedIps(vec![
+                UmbrawgAllowedIp(vec![
+                    UmbrawgAllowedIpAttr::Cidr(0),
+                    UmbrawgAllowedIpAttr::Family(
+                        UmbrawgAddressFamily::Ipv4,
                     ),
-                    AmneziaWireguardAllowedIpAttr::IpAddr(IpAddr::V4(
+                    UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(
                         Ipv4Addr::UNSPECIFIED,
                     )),
                 ]),
@@ -139,8 +139,8 @@ fn test_query_reply() {
         ])]),
     ];
 
-    let expected: AmneziaWireguardMessage = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::GetDevice,
+    let expected: UmbrawgMessage = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
         attributes,
     };
 
@@ -148,7 +148,7 @@ fn test_query_reply() {
 
     assert_eq!(
         expected,
-        AmneziaWireguardMessage::parse_with_param(&raw[4..], header).unwrap(),
+        UmbrawgMessage::parse_with_param(&raw[4..], header).unwrap(),
     );
 
     let mut buffer = vec![0; expected.buffer_len() + header.buffer_len()];
@@ -158,22 +158,22 @@ fn test_query_reply() {
 }
 
 #[test]
-fn test_amnezia_junk_parameters() {
-    // Message with Amnezia Specific Junk params
-    let msg: AmneziaWireguardMessage = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+fn test_umbra_junk_parameters() {
+    // Message with Umbra Specific Junk params
+    let msg: UmbrawgMessage = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::IfName("awg0".into()),
-            AmneziaWireguardAttribute::JC(4),
-            AmneziaWireguardAttribute::Jmin(40),
-            AmneziaWireguardAttribute::Jmax(70),
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::JC(4),
+            UmbrawgAttribute::Jmin(40),
+            UmbrawgAttribute::Jmax(70),
         ],
     };
 
     let mut buffer = vec![0; msg.buffer_len()];
     msg.emit(&mut buffer);
 
-    // Checking Amnezia Specific bytes
+    // Checking Umbra Specific bytes
     // JunkCount (JC) should be 11 (0x0b)
     // Netlink Attribute: [Length (2 bytes), Type (2 bytes), Value (n bytes)]
 
@@ -193,12 +193,12 @@ fn test_amnezia_junk_parameters() {
 }
 
 #[test]
-fn test_amnezia_magic_headers() {
-    let msg: AmneziaWireguardMessage = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+fn test_umbra_magic_headers() {
+    let msg: UmbrawgMessage = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::H1("61220074".into()),
-            AmneziaWireguardAttribute::S1(0x5566),
+            UmbrawgAttribute::H1("61220074".into()),
+            UmbrawgAttribute::S1(0x5566),
         ],
     };
 
@@ -218,13 +218,13 @@ fn test_amnezia_magic_headers() {
 
 #[test]
 fn test_set_device_roundtrip() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::IfName("awg0".into()),
-            AmneziaWireguardAttribute::ListenPort(51820),
-            AmneziaWireguardAttribute::Fwmark(1234),
-            AmneziaWireguardAttribute::Flags(1),
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::ListenPort(51820),
+            UmbrawgAttribute::Fwmark(1234),
+            UmbrawgAttribute::Flags(1),
         ],
     };
 
@@ -232,26 +232,26 @@ fn test_set_device_roundtrip() {
 }
 
 #[test]
-fn test_all_amnezia_attributes_emit_and_roundtrip() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+fn test_all_umbra_attributes_emit_and_roundtrip() {
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::JC(1),
-            AmneziaWireguardAttribute::Jmin(10),
-            AmneziaWireguardAttribute::Jmax(100),
-            AmneziaWireguardAttribute::S1(0x0102),
-            AmneziaWireguardAttribute::S2(0x0304),
-            AmneziaWireguardAttribute::S3(0x0506),
-            AmneziaWireguardAttribute::S4(0x0708),
-            AmneziaWireguardAttribute::H1("61220074".into()),
-            AmneziaWireguardAttribute::H2("2351746464".into()),
-            AmneziaWireguardAttribute::H3("3053333659".into()),
-            AmneziaWireguardAttribute::H4("1789444460".into()),
-            AmneziaWireguardAttribute::I1("<r 2>".into()),
-            AmneziaWireguardAttribute::I2("".into()),
-            AmneziaWireguardAttribute::I3("".into()),
-            AmneziaWireguardAttribute::I4("".into()),
-            AmneziaWireguardAttribute::I5("".into()),
+            UmbrawgAttribute::JC(1),
+            UmbrawgAttribute::Jmin(10),
+            UmbrawgAttribute::Jmax(100),
+            UmbrawgAttribute::S1(0x0102),
+            UmbrawgAttribute::S2(0x0304),
+            UmbrawgAttribute::S3(0x0506),
+            UmbrawgAttribute::S4(0x0708),
+            UmbrawgAttribute::H1("61220074".into()),
+            UmbrawgAttribute::H2("2351746464".into()),
+            UmbrawgAttribute::H3("3053333659".into()),
+            UmbrawgAttribute::H4("1789444460".into()),
+            UmbrawgAttribute::I1("<r 2>".into()),
+            UmbrawgAttribute::I2("".into()),
+            UmbrawgAttribute::I3("".into()),
+            UmbrawgAttribute::I4("".into()),
+            UmbrawgAttribute::I5("".into()),
         ],
     };
 
@@ -260,13 +260,13 @@ fn test_all_amnezia_attributes_emit_and_roundtrip() {
 }
 
 #[test]
-fn test_awg31_device_attributes_roundtrip() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+fn test_uwg31_device_attributes_roundtrip() {
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::IfName("awg0".into()),
-            AmneziaWireguardAttribute::RandomTrailers(true),
-            AmneziaWireguardAttribute::DisableCookies(false),
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::RandomTrailers(true),
+            UmbrawgAttribute::DisableCookies(false),
         ],
     };
 
@@ -274,10 +274,10 @@ fn test_awg31_device_attributes_roundtrip() {
 }
 
 #[test]
-fn test_awg31_attribute_wire_format() {
-    use netlink_packet_core::{Nla, NlaBuffer};
+fn test_uwg31_attribute_wire_format() {
+    use netlink_packet_core::NlaBuffer;
 
-    let attr = AmneziaWireguardAttribute::RandomTrailers(true);
+    let attr = UmbrawgAttribute::RandomTrailers(true);
     let mut buf = vec![0; attr.buffer_len()];
     attr.emit(&mut buf);
     // NLA header: len = 5 (4 header + 1 payload), kind = 33, then the u8
@@ -285,26 +285,26 @@ fn test_awg31_attribute_wire_format() {
     assert_eq!(buf, vec![0x05, 0x00, 0x21, 0x00, 0x01, 0x00, 0x00, 0x00]);
 
     let parsed =
-        AmneziaWireguardAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
-    assert_eq!(parsed, AmneziaWireguardAttribute::RandomTrailers(true));
+        UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(parsed, UmbrawgAttribute::RandomTrailers(true));
 }
 
 #[test]
 fn test_allowed_ips_ipv6_roundtrip() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
-        attributes: vec![AmneziaWireguardAttribute::Peers(vec![
-            AmneziaWireguardPeer(vec![
-                AmneziaWireguardPeerAttribute::PublicKey([42u8; 32]),
-                AmneziaWireguardPeerAttribute::AllowedIps(vec![
-                    AmneziaWireguardAllowedIp(vec![
-                        AmneziaWireguardAllowedIpAttr::Family(
-                            AmneziaWireguardAddressFamily::Ipv6,
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![
+            UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PublicKey([42u8; 32]),
+                UmbrawgPeerAttribute::AllowedIps(vec![
+                    UmbrawgAllowedIp(vec![
+                        UmbrawgAllowedIpAttr::Family(
+                            UmbrawgAddressFamily::Ipv6,
                         ),
-                        AmneziaWireguardAllowedIpAttr::IpAddr(IpAddr::V6(
+                        UmbrawgAllowedIpAttr::IpAddr(IpAddr::V6(
                             Ipv6Addr::UNSPECIFIED,
                         )),
-                        AmneziaWireguardAllowedIpAttr::Cidr(0),
+                        UmbrawgAllowedIpAttr::Cidr(0),
                     ]),
                 ]),
             ]),
@@ -316,29 +316,29 @@ fn test_allowed_ips_ipv6_roundtrip() {
 
 #[test]
 fn test_multiple_allowed_ips_per_peer() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
-        attributes: vec![AmneziaWireguardAttribute::Peers(vec![
-            AmneziaWireguardPeer(vec![
-                AmneziaWireguardPeerAttribute::PublicKey([7u8; 32]),
-                AmneziaWireguardPeerAttribute::AllowedIps(vec![
-                    AmneziaWireguardAllowedIp(vec![
-                        AmneziaWireguardAllowedIpAttr::Family(
-                            AmneziaWireguardAddressFamily::Ipv4,
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![
+            UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PublicKey([7u8; 32]),
+                UmbrawgPeerAttribute::AllowedIps(vec![
+                    UmbrawgAllowedIp(vec![
+                        UmbrawgAllowedIpAttr::Family(
+                            UmbrawgAddressFamily::Ipv4,
                         ),
-                        AmneziaWireguardAllowedIpAttr::IpAddr(IpAddr::V4(
+                        UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(
                             Ipv4Addr::new(10, 0, 0, 0),
                         )),
-                        AmneziaWireguardAllowedIpAttr::Cidr(8),
+                        UmbrawgAllowedIpAttr::Cidr(8),
                     ]),
-                    AmneziaWireguardAllowedIp(vec![
-                        AmneziaWireguardAllowedIpAttr::Family(
-                            AmneziaWireguardAddressFamily::Ipv6,
+                    UmbrawgAllowedIp(vec![
+                        UmbrawgAllowedIpAttr::Family(
+                            UmbrawgAddressFamily::Ipv6,
                         ),
-                        AmneziaWireguardAllowedIpAttr::IpAddr(IpAddr::V6(
+                        UmbrawgAllowedIpAttr::IpAddr(IpAddr::V6(
                             Ipv6Addr::new(0xfd00, 0, 0, 0, 0, 0, 0, 1),
                         )),
-                        AmneziaWireguardAllowedIpAttr::Cidr(128),
+                        UmbrawgAllowedIpAttr::Cidr(128),
                     ]),
                 ]),
             ]),
@@ -350,13 +350,13 @@ fn test_multiple_allowed_ips_per_peer() {
 
 #[test]
 fn test_peer_with_endpoint_keepalive_and_flags() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
-        attributes: vec![AmneziaWireguardAttribute::Peers(vec![
-            AmneziaWireguardPeer(vec![
-                AmneziaWireguardPeerAttribute::PublicKey([1u8; 32]),
-                AmneziaWireguardPeerAttribute::PresharedKey([2u8; 32]),
-                AmneziaWireguardPeerAttribute::Endpoint(SocketAddr::V6(
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![
+            UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PublicKey([1u8; 32]),
+                UmbrawgPeerAttribute::PresharedKey([2u8; 32]),
+                UmbrawgPeerAttribute::Endpoint(SocketAddr::V6(
                     SocketAddrV6::new(
                         Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1),
                         51820,
@@ -364,9 +364,9 @@ fn test_peer_with_endpoint_keepalive_and_flags() {
                         0,
                     ),
                 )),
-                AmneziaWireguardPeerAttribute::PersistentKeepalive(25),
-                AmneziaWireguardPeerAttribute::Flags(
-                    crate::constants::WGPEER_F_REPLACE_ALLOWEDIPS,
+                UmbrawgPeerAttribute::PersistentKeepalive(25),
+                UmbrawgPeerAttribute::Flags(
+                    crate::constants::UWGPEER_F_REPLACE_ALLOWEDIPS,
                 ),
             ]),
         ])],
@@ -377,11 +377,11 @@ fn test_peer_with_endpoint_keepalive_and_flags() {
 
 #[test]
 fn test_empty_peers_roundtrip() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::IfName("awg0".into()),
-            AmneziaWireguardAttribute::Peers(vec![]),
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::Peers(vec![]),
         ],
     };
 
@@ -399,42 +399,42 @@ fn test_full_device_config_roundtrip() {
         13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1, 0,
     ];
 
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::IfIndex(5),
-            AmneziaWireguardAttribute::IfName("awg0".into()),
-            AmneziaWireguardAttribute::PrivateKey(private_key),
-            AmneziaWireguardAttribute::PublicKey(public_key),
-            AmneziaWireguardAttribute::ListenPort(51820),
-            AmneziaWireguardAttribute::Fwmark(0),
-            AmneziaWireguardAttribute::Flags(
-                crate::constants::WGDEVICE_F_REPLACE_PEERS,
+            UmbrawgAttribute::IfIndex(5),
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::PrivateKey(private_key),
+            UmbrawgAttribute::PublicKey(public_key),
+            UmbrawgAttribute::ListenPort(51820),
+            UmbrawgAttribute::Fwmark(0),
+            UmbrawgAttribute::Flags(
+                crate::constants::UWGDEVICE_F_REPLACE_PEERS,
             ),
-            // Amnezia parameters
-            AmneziaWireguardAttribute::JC(4),
-            AmneziaWireguardAttribute::Jmin(40),
-            AmneziaWireguardAttribute::Jmax(70),
-            AmneziaWireguardAttribute::S1(0x1234),
-            AmneziaWireguardAttribute::S2(0x5678),
-            AmneziaWireguardAttribute::H1("61220074".into()),
-            AmneziaWireguardAttribute::H2("6050999999".into()),
-            AmneziaWireguardAttribute::Peers(vec![AmneziaWireguardPeer(vec![
-                AmneziaWireguardPeerAttribute::PublicKey([0xabu8; 32]),
-                AmneziaWireguardPeerAttribute::Endpoint(SocketAddr::new(
+            // Umbra parameters
+            UmbrawgAttribute::JC(4),
+            UmbrawgAttribute::Jmin(40),
+            UmbrawgAttribute::Jmax(70),
+            UmbrawgAttribute::S1(0x1234),
+            UmbrawgAttribute::S2(0x5678),
+            UmbrawgAttribute::H1("61220074".into()),
+            UmbrawgAttribute::H2("6050999999".into()),
+            UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PublicKey([0xabu8; 32]),
+                UmbrawgPeerAttribute::Endpoint(SocketAddr::new(
                     IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)),
                     51820,
                 )),
-                AmneziaWireguardPeerAttribute::PersistentKeepalive(25),
-                AmneziaWireguardPeerAttribute::AllowedIps(vec![
-                    AmneziaWireguardAllowedIp(vec![
-                        AmneziaWireguardAllowedIpAttr::Family(
-                            AmneziaWireguardAddressFamily::Ipv4,
+                UmbrawgPeerAttribute::PersistentKeepalive(25),
+                UmbrawgPeerAttribute::AllowedIps(vec![
+                    UmbrawgAllowedIp(vec![
+                        UmbrawgAllowedIpAttr::Family(
+                            UmbrawgAddressFamily::Ipv4,
                         ),
-                        AmneziaWireguardAllowedIpAttr::IpAddr(IpAddr::V4(
+                        UmbrawgAllowedIpAttr::IpAddr(IpAddr::V4(
                             Ipv4Addr::new(0, 0, 0, 0),
                         )),
-                        AmneziaWireguardAllowedIpAttr::Cidr(0),
+                        UmbrawgAllowedIpAttr::Cidr(0),
                     ]),
                 ]),
             ])]),
@@ -444,7 +444,7 @@ fn test_full_device_config_roundtrip() {
     assert_eq!(msg, roundtrip_msg(msg.clone()));
 }
 
-/// AmneziaWG 3.0 encodes magic headers as packed u64 ranges and keepalive
+/// UmbraWG 3.0 encodes magic headers as packed u64 ranges and keepalive
 /// as u32. Parsing must normalize these instead of failing.
 #[test]
 fn test_parse_v3_magic_headers_and_keepalive() {
@@ -463,16 +463,16 @@ fn test_parse_v3_magic_headers_and_keepalive() {
         raw.extend_from_slice(&value.to_le_bytes());
     }
     let header = GenlHeader {
-        cmd: AmneziaWireguardCmd::GetDevice.into(),
+        cmd: UmbrawgCmd::GetDevice.into(),
         version: 3,
     };
     let parsed =
-        AmneziaWireguardMessage::parse_with_param(&raw, header).unwrap();
+        UmbrawgMessage::parse_with_param(&raw, header).unwrap();
     assert_eq!(
         parsed.attributes,
         vec![
-            AmneziaWireguardAttribute::H1("61220074-118999195".into()),
-            AmneziaWireguardAttribute::H2("4".into()),
+            UmbrawgAttribute::H1("61220074-118999195".into()),
+            UmbrawgAttribute::H2("4".into()),
         ]
     );
 
@@ -481,13 +481,13 @@ fn test_parse_v3_magic_headers_and_keepalive() {
     let keepalive: u32 = 25 | (25 << 16);
     let attr_len = (4 + 4) as u16;
     peer_nla.extend_from_slice(&attr_len.to_le_bytes());
-    peer_nla.extend_from_slice(&5u16.to_le_bytes()); // WGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL
+    peer_nla.extend_from_slice(&5u16.to_le_bytes()); // UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL
     peer_nla.extend_from_slice(&keepalive.to_le_bytes());
     let buf = NlaBuffer::new_checked(&peer_nla[..]).unwrap();
-    let attr = AmneziaWireguardPeerAttribute::parse(&buf).unwrap();
+    let attr = UmbrawgPeerAttribute::parse(&buf).unwrap();
     assert_eq!(
         attr,
-        AmneziaWireguardPeerAttribute::PersistentKeepaliveRange(
+        UmbrawgPeerAttribute::PersistentKeepaliveRange(
             25 | (25 << 16)
         )
     );
@@ -500,55 +500,55 @@ fn test_parse_v1_magic_header_string_8_bytes() {
     let mut raw = Vec::new();
     let len = (4 + 8) as u16;
     raw.extend_from_slice(&len.to_le_bytes());
-    raw.extend_from_slice(&14u16.to_le_bytes()); // WGDEVICE_A_H1
+    raw.extend_from_slice(&14u16.to_le_bytes()); // UWGDEVICE_A_H1
     raw.extend_from_slice(b"1234567\0");
 
     let header = GenlHeader {
-        cmd: AmneziaWireguardCmd::GetDevice.into(),
+        cmd: UmbrawgCmd::GetDevice.into(),
         version: 2,
     };
     let parsed =
-        AmneziaWireguardMessage::parse_with_param(&raw, header).unwrap();
+        UmbrawgMessage::parse_with_param(&raw, header).unwrap();
     assert_eq!(
         parsed.attributes,
-        vec![AmneziaWireguardAttribute::H1("1234567".into())]
+        vec![UmbrawgAttribute::H1("1234567".into())]
     );
 }
 
-/// The original AmneziaWG (genl version 1) sent magic headers as bare u32.
+/// The original UmbraWG (genl version 1) sent magic headers as bare u32.
 #[test]
 fn test_parse_legacy_magic_header_u32() {
     let mut raw = Vec::new();
     let len = (4 + 4) as u16;
     raw.extend_from_slice(&len.to_le_bytes());
-    raw.extend_from_slice(&14u16.to_le_bytes()); // WGDEVICE_A_H1
+    raw.extend_from_slice(&14u16.to_le_bytes()); // UWGDEVICE_A_H1
     raw.extend_from_slice(&123u32.to_le_bytes());
 
     let header = GenlHeader {
-        cmd: AmneziaWireguardCmd::GetDevice.into(),
+        cmd: UmbrawgCmd::GetDevice.into(),
         version: 1,
     };
     let parsed =
-        AmneziaWireguardMessage::parse_with_param(&raw, header).unwrap();
+        UmbrawgMessage::parse_with_param(&raw, header).unwrap();
     assert_eq!(
         parsed.attributes,
-        vec![AmneziaWireguardAttribute::H1("123".into())]
+        vec![UmbrawgAttribute::H1("123".into())]
     );
 }
 
-/// Range variants emit the AmneziaWG 3.0 u64 wire format; parsing them back
+/// Range variants emit the UmbraWG 3.0 u64 wire format; parsing them back
 /// yields the normalized string variants.
 #[test]
 fn test_magic_header_range_emit() {
     use crate::range::u32_range_pack;
 
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::H1Range(u32_range_pack(
+            UmbrawgAttribute::H1Range(u32_range_pack(
                 61220074, 118999195,
             )),
-            AmneziaWireguardAttribute::H4Range(u32_range_pack(4, 4)),
+            UmbrawgAttribute::H4Range(u32_range_pack(4, 4)),
         ],
     };
 
@@ -567,24 +567,24 @@ fn test_magic_header_range_emit() {
     assert_eq!(
         parsed.attributes,
         vec![
-            AmneziaWireguardAttribute::H1("61220074-118999195".into()),
-            AmneziaWireguardAttribute::H4("4".into()),
+            UmbrawgAttribute::H1("61220074-118999195".into()),
+            UmbrawgAttribute::H4("4".into()),
         ]
     );
 }
 
 #[test]
 fn test_v3_device_attributes_roundtrip() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::HeaderProtectionKey([7u8; 32]),
-            AmneziaWireguardAttribute::ContentPaddingAddition(100),
-            AmneziaWireguardAttribute::RekeyAfterTime(120),
-            AmneziaWireguardAttribute::RekeyTimeout(5),
-            AmneziaWireguardAttribute::RejectAfterTime(180),
-            AmneziaWireguardAttribute::KeepaliveTimeout(10),
-            AmneziaWireguardAttribute::MaxHandshakeAttempts(3),
+            UmbrawgAttribute::HeaderProtectionKey([7u8; 32]),
+            UmbrawgAttribute::ContentPaddingAddition(100),
+            UmbrawgAttribute::RekeyAfterTime(120),
+            UmbrawgAttribute::RekeyTimeout(5),
+            UmbrawgAttribute::RejectAfterTime(180),
+            UmbrawgAttribute::KeepaliveTimeout(10),
+            UmbrawgAttribute::MaxHandshakeAttempts(3),
         ],
     };
 
@@ -593,12 +593,12 @@ fn test_v3_device_attributes_roundtrip() {
 
 #[test]
 fn test_keepalive_range_roundtrip() {
-    let msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
-        attributes: vec![AmneziaWireguardAttribute::Peers(vec![
-            AmneziaWireguardPeer(vec![
-                AmneziaWireguardPeerAttribute::PublicKey([3u8; 32]),
-                AmneziaWireguardPeerAttribute::PersistentKeepaliveRange(
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![
+            UmbrawgPeer(vec![
+                UmbrawgPeerAttribute::PublicKey([3u8; 32]),
+                UmbrawgPeerAttribute::PersistentKeepaliveRange(
                     25 | (30 << 16),
                 ),
             ]),

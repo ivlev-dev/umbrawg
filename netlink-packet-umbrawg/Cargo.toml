@@ -1,13 +1,13 @@
 [package]
-name = "netlink-packet-amnezia-wireguard"
+name = "netlink-packet-umbrawg"
 version = "0.2.1"
 edition = "2021"
-homepage = "https://github.com/frkn-dev/netlink-packet-amnezia-wireguard"
-repository = "https://github.com/frkn-dev/netlink-packet-amnezia-wireguard"
-keywords = ["wireguard", "netlink", "linux", "amnezia"]
+homepage = "https://github.com/ivlev-dev/netlink-packet-umbrawg"
+repository = "https://github.com/ivlev-dev/netlink-packet-umbrawg"
+keywords = ["wireguard", "netlink", "linux", "umbra"]
 license = "MIT"
 readme = "README.md"
-description = "Amnezia WireGuard generic netlink packet definitions"
+description = "Umbra WireGuard generic netlink packet definitions"
 
 [dependencies]
 libc = "0.2.98"

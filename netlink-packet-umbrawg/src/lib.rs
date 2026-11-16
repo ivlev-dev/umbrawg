@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 
-//! The `netlink-packet-amnezia-wireguard` crate is designed for parsing and
-//! emitting generic netlink packets for Amnezia WireGuard interface.
+//! The `netlink-packet-umbrawg` crate is designed for parsing and
+//! emitting generic netlink packets for Umbra WireGuard interface.
 
 pub mod constants;
 pub mod range;
@@ -17,13 +17,13 @@ mod test;
 
 pub use self::{
     allowedip::{
-        AmneziaWireguardAddressFamily, AmneziaWireguardAllowedIp,
-        AmneziaWireguardAllowedIpAttr,
+        UmbrawgAddressFamily, UmbrawgAllowedIp,
+        UmbrawgAllowedIpAttr,
     },
-    attribute::AmneziaWireguardAttribute,
-    message::{AmneziaWireguardCmd, AmneziaWireguardMessage},
+    attribute::UmbrawgAttribute,
+    message::{UmbrawgCmd, UmbrawgMessage},
     peer::{
-        AmneziaWireguardPeer, AmneziaWireguardPeerAttribute,
-        AmneziaWireguardTimeSpec,
+        UmbrawgPeer, UmbrawgPeerAttribute,
+        UmbrawgTimeSpec,
     },
 };

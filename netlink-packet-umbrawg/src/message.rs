@@ -5,13 +5,13 @@ use netlink_packet_core::{
 };
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 
-use crate::AmneziaWireguardAttribute;
+use crate::UmbrawgAttribute;
 
-const WG_CMD_GET_DEVICE: u8 = 0;
-const WG_CMD_SET_DEVICE: u8 = 1;
+const UWG_CMD_GET_DEVICE: u8 = 0;
+const UWG_CMD_SET_DEVICE: u8 = 1;
 
-const WG_FAMILY_NAME: &str = "amneziawg";
-const WG_FAMILY_VERSION: u8 = 2;
+const UWG_FAMILY_NAME: &str = "umbrawg";
+const UWG_FAMILY_VERSION: u8 = 2;
 
 /* =========================
    CMD
@@ -19,27 +19,27 @@ const WG_FAMILY_VERSION: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[non_exhaustive]
-pub enum AmneziaWireguardCmd {
+pub enum UmbrawgCmd {
     GetDevice,
     SetDevice,
     Other(u8),
 }
 
-impl From<AmneziaWireguardCmd> for u8 {
-    fn from(cmd: AmneziaWireguardCmd) -> Self {
+impl From<UmbrawgCmd> for u8 {
+    fn from(cmd: UmbrawgCmd) -> Self {
         match cmd {
-            AmneziaWireguardCmd::GetDevice => WG_CMD_GET_DEVICE,
-            AmneziaWireguardCmd::SetDevice => WG_CMD_SET_DEVICE,
-            AmneziaWireguardCmd::Other(d) => d,
+            UmbrawgCmd::GetDevice => UWG_CMD_GET_DEVICE,
+            UmbrawgCmd::SetDevice => UWG_CMD_SET_DEVICE,
+            UmbrawgCmd::Other(d) => d,
         }
     }
 }
 
-impl From<u8> for AmneziaWireguardCmd {
+impl From<u8> for UmbrawgCmd {
     fn from(v: u8) -> Self {
         match v {
-            WG_CMD_GET_DEVICE => Self::GetDevice,
-            WG_CMD_SET_DEVICE => Self::SetDevice,
+            UWG_CMD_GET_DEVICE => Self::GetDevice,
+            UWG_CMD_SET_DEVICE => Self::SetDevice,
             x => Self::Other(x),
         }
     }
@@ -50,22 +50,22 @@ impl From<u8> for AmneziaWireguardCmd {
 ========================= */
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AmneziaWireguardMessage {
-    pub cmd: AmneziaWireguardCmd,
-    pub attributes: Vec<AmneziaWireguardAttribute>,
+pub struct UmbrawgMessage {
+    pub cmd: UmbrawgCmd,
+    pub attributes: Vec<UmbrawgAttribute>,
 }
 
 /* =========================
    GenlFamily
 ========================= */
 
-impl GenlFamily for AmneziaWireguardMessage {
+impl GenlFamily for UmbrawgMessage {
     fn family_name() -> &'static str {
-        WG_FAMILY_NAME
+        UWG_FAMILY_NAME
     }
 
     fn version(&self) -> u8 {
-        WG_FAMILY_VERSION
+        UWG_FAMILY_VERSION
     }
 
     fn command(&self) -> u8 {
@@ -77,7 +77,7 @@ impl GenlFamily for AmneziaWireguardMessage {
    EMIT
 ========================= */
 
-impl Emitable for AmneziaWireguardMessage {
+impl Emitable for UmbrawgMessage {
     fn emit(&self, buffer: &mut [u8]) {
         self.attributes.as_slice().emit(buffer)
     }
@@ -91,7 +91,7 @@ impl Emitable for AmneziaWireguardMessage {
    PARSE
 ========================= */
 
-impl ParseableParametrized<[u8], GenlHeader> for AmneziaWireguardMessage {
+impl ParseableParametrized<[u8], GenlHeader> for UmbrawgMessage {
     fn parse_with_param(
         buf: &[u8],
         header: GenlHeader,
@@ -109,12 +109,12 @@ impl ParseableParametrized<[u8], GenlHeader> for AmneziaWireguardMessage {
 
 fn parse_attributes(
     buf: &[u8],
-) -> Result<Vec<AmneziaWireguardAttribute>, DecodeError> {
+) -> Result<Vec<UmbrawgAttribute>, DecodeError> {
     let mut attrs = Vec::new();
 
     for nla in NlasIterator::new(buf) {
         let nla = nla?;
-        attrs.push(AmneziaWireguardAttribute::parse(&nla)?);
+        attrs.push(UmbrawgAttribute::parse(&nla)?);
     }
 
     Ok(attrs)

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 
-//! Integration tests that require a Linux kernel with the AmneziaWG module
+//! Integration tests that require a Linux kernel with the UmbraWG module
 //! loaded and root privileges (CAP_NET_ADMIN).
 //!
 //! These tests are compiled only on Linux. They will soft-skip themselves
-//! when the AmneziaWG family is not available or the process lacks the
+//! when the UmbraWG family is not available or the process lacks the
 //! privileges to create network interfaces.
 
 #![cfg(target_os = "linux")]
@@ -13,9 +13,9 @@ use std::process::Command;
 
 use futures::{lock::Mutex, StreamExt};
 use genetlink::new_connection;
-use netlink_packet_amnezia_wireguard::{
-    range::u32_range_from_string, AmneziaWireguardAttribute,
-    AmneziaWireguardCmd, AmneziaWireguardMessage,
+use netlink_packet_umbrawg::{
+    range::u32_range_from_string, UmbrawgAttribute,
+    UmbrawgCmd, UmbrawgMessage,
 };
 use netlink_packet_core::{
     NetlinkMessage, NetlinkPayload, NLM_F_ACK, NLM_F_DUMP, NLM_F_REQUEST,
@@ -51,7 +51,7 @@ fn delete_interface(name: &str) {
 
 fn create_interface(name: &str) -> Result<(), String> {
     delete_interface(name);
-    run_ip(&["link", "add", name, "type", "amneziawg"])
+    run_ip(&["link", "add", name, "type", "umbrawg"])
 }
 
 fn unique_ifname(prefix: &str) -> String {
@@ -60,20 +60,20 @@ fn unique_ifname(prefix: &str) -> String {
 
 async fn family_available(handle: &mut genetlink::GenetlinkHandle) -> bool {
     handle
-        .resolve_family_id::<AmneziaWireguardMessage>()
+        .resolve_family_id::<UmbrawgMessage>()
         .await
         .is_ok()
 }
 
-/// Queries the genl family version of the amneziawg module: 2 for the
-/// v1.0 module, 3 for AmneziaWG 3.0. The magic header wire format depends
+/// Queries the genl family version of the umbrawg module: 2 for the
+/// v1.0 module, 3 for UmbraWG 3.0. The magic header wire format depends
 /// on it (string vs packed u64 range).
 async fn family_version(
     handle: &mut genetlink::GenetlinkHandle,
 ) -> Option<u32> {
     let genlmsg: GenlMessage<GenlCtrl> = GenlMessage::from_payload(GenlCtrl {
         cmd: GenlCtrlCmd::GetFamily,
-        nlas: vec![GenlCtrlAttrs::FamilyName("amneziawg".to_string())],
+        nlas: vec![GenlCtrlAttrs::FamilyName("umbrawg".to_string())],
     });
     let mut nlmsg = NetlinkMessage::from(genlmsg);
     nlmsg.header.flags = NLM_F_REQUEST | NLM_F_ACK;
@@ -95,10 +95,10 @@ async fn family_version(
 
 async fn send_request(
     handle: &mut genetlink::GenetlinkHandle,
-    msg: AmneziaWireguardMessage,
+    msg: UmbrawgMessage,
     flags: u16,
-) -> Vec<AmneziaWireguardMessage> {
-    let genlmsg: GenlMessage<AmneziaWireguardMessage> =
+) -> Vec<UmbrawgMessage> {
+    let genlmsg: GenlMessage<UmbrawgMessage> =
         GenlMessage::from_payload(msg);
     let mut nlmsg = NetlinkMessage::from(genlmsg);
     nlmsg.header.flags = flags;
@@ -121,7 +121,7 @@ async fn send_request(
 }
 
 #[tokio::test]
-async fn test_get_device_on_amneziawg_interface() {
+async fn test_get_device_on_umbrawg_interface() {
     if !is_root() {
         eprintln!("Skipping integration test: not running as root");
         return;
@@ -133,16 +133,16 @@ async fn test_get_device_on_amneziawg_interface() {
     tokio::spawn(connection);
 
     if !family_available(&mut handle).await {
-        eprintln!("Skipping integration test: amneziawg family not available");
+        eprintln!("Skipping integration test: umbrawg family not available");
         return;
     }
 
-    let ifname = unique_ifname("awg_get");
+    let ifname = unique_ifname("uwg_get");
     create_interface(&ifname).expect("failed to create test interface");
 
-    let get_msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::GetDevice,
-        attributes: vec![AmneziaWireguardAttribute::IfName(ifname.clone())],
+    let get_msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![UmbrawgAttribute::IfName(ifname.clone())],
     };
 
     let responses =
@@ -155,7 +155,7 @@ async fn test_get_device_on_amneziawg_interface() {
 
     let found_name = responses.iter().any(|r| {
         r.attributes.iter().any(|attr| {
-            matches!(attr, AmneziaWireguardAttribute::IfName(n) if *n == ifname)
+            matches!(attr, UmbrawgAttribute::IfName(n) if *n == ifname)
         })
     });
     assert!(found_name, "expected IfName attribute in get response");
@@ -164,7 +164,7 @@ async fn test_get_device_on_amneziawg_interface() {
 }
 
 #[tokio::test]
-async fn test_set_and_get_amnezia_parameters() {
+async fn test_set_and_get_umbra_parameters() {
     if !is_root() {
         eprintln!("Skipping integration test: not running as root");
         return;
@@ -176,58 +176,58 @@ async fn test_set_and_get_amnezia_parameters() {
     tokio::spawn(connection);
 
     if !family_available(&mut handle).await {
-        eprintln!("Skipping integration test: amneziawg family not available");
+        eprintln!("Skipping integration test: umbrawg family not available");
         return;
     }
 
-    let ifname = unique_ifname("awg_set");
+    let ifname = unique_ifname("uwg_set");
     create_interface(&ifname).expect("failed to create test interface");
 
-    // AmneziaWG 3.0 (genl version 3) expects magic headers as packed u64
+    // UmbraWG 3.0 (genl version 3) expects magic headers as packed u64
     // ranges; older modules expect spec strings.
     let version = family_version(&mut handle).await.unwrap_or(2);
     let (h1, h2, h3, h4) = if version >= 3 {
         (
-            AmneziaWireguardAttribute::H1Range(
+            UmbrawgAttribute::H1Range(
                 u32_range_from_string("61220074-118999195").unwrap(),
             ),
-            AmneziaWireguardAttribute::H2Range(
+            UmbrawgAttribute::H2Range(
                 u32_range_from_string("605047389-945520346").unwrap(),
             ),
-            AmneziaWireguardAttribute::H3Range(
+            UmbrawgAttribute::H3Range(
                 u32_range_from_string("1477291385-1814368140").unwrap(),
             ),
-            AmneziaWireguardAttribute::H4Range(
+            UmbrawgAttribute::H4Range(
                 u32_range_from_string("1951993942-1997499713").unwrap(),
             ),
         )
     } else {
         (
-            AmneziaWireguardAttribute::H1("61220074-118999195".into()),
-            AmneziaWireguardAttribute::H2("605047389-945520346".into()),
-            AmneziaWireguardAttribute::H3("1477291385-1814368140".into()),
-            AmneziaWireguardAttribute::H4("1951993942-1997499713".into()),
+            UmbrawgAttribute::H1("61220074-118999195".into()),
+            UmbrawgAttribute::H2("605047389-945520346".into()),
+            UmbrawgAttribute::H3("1477291385-1814368140".into()),
+            UmbrawgAttribute::H4("1951993942-1997499713".into()),
         )
     };
 
-    // SetDevice with Amnezia-specific parameters.
-    let set_msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::SetDevice,
+    // SetDevice with Umbra-specific parameters.
+    let set_msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
-            AmneziaWireguardAttribute::IfName(ifname.clone()),
-            AmneziaWireguardAttribute::ListenPort(51820),
-            AmneziaWireguardAttribute::JC(4),
-            AmneziaWireguardAttribute::Jmin(40),
-            AmneziaWireguardAttribute::Jmax(70),
-            AmneziaWireguardAttribute::S1(92),
-            AmneziaWireguardAttribute::S2(115),
-            AmneziaWireguardAttribute::S3(44),
-            AmneziaWireguardAttribute::S4(9),
+            UmbrawgAttribute::IfName(ifname.clone()),
+            UmbrawgAttribute::ListenPort(51820),
+            UmbrawgAttribute::JC(4),
+            UmbrawgAttribute::Jmin(40),
+            UmbrawgAttribute::Jmax(70),
+            UmbrawgAttribute::S1(92),
+            UmbrawgAttribute::S2(115),
+            UmbrawgAttribute::S3(44),
+            UmbrawgAttribute::S4(9),
             h1,
             h2,
             h3,
             h4,
-            AmneziaWireguardAttribute::I1("<r 149>".into()),
+            UmbrawgAttribute::I1("<r 149>".into()),
         ],
     };
 
@@ -238,9 +238,9 @@ async fn test_set_and_get_amnezia_parameters() {
         "set device with NLM_F_ACK should return no payload on success"
     );
 
-    let get_msg = AmneziaWireguardMessage {
-        cmd: AmneziaWireguardCmd::GetDevice,
-        attributes: vec![AmneziaWireguardAttribute::IfName(ifname.clone())],
+    let get_msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![UmbrawgAttribute::IfName(ifname.clone())],
     };
 
     let responses =
@@ -253,7 +253,7 @@ async fn test_set_and_get_amnezia_parameters() {
 
     let attrs = &responses[0].attributes;
     let listen_port = attrs.iter().find_map(|a| {
-        if let AmneziaWireguardAttribute::ListenPort(p) = a {
+        if let UmbrawgAttribute::ListenPort(p) = a {
             Some(*p)
         } else {
             None
@@ -262,7 +262,7 @@ async fn test_set_and_get_amnezia_parameters() {
     assert_eq!(listen_port, Some(51820), "listen port mismatch");
 
     let jc = attrs.iter().find_map(|a| {
-        if let AmneziaWireguardAttribute::JC(v) = a {
+        if let UmbrawgAttribute::JC(v) = a {
             Some(*v)
         } else {
             None
@@ -271,7 +271,7 @@ async fn test_set_and_get_amnezia_parameters() {
     assert_eq!(jc, Some(4), "JC mismatch");
 
     let jmin = attrs.iter().find_map(|a| {
-        if let AmneziaWireguardAttribute::Jmin(v) = a {
+        if let UmbrawgAttribute::Jmin(v) = a {
             Some(*v)
         } else {
             None
@@ -280,7 +280,7 @@ async fn test_set_and_get_amnezia_parameters() {
     assert_eq!(jmin, Some(40), "Jmin mismatch");
 
     let jmax = attrs.iter().find_map(|a| {
-        if let AmneziaWireguardAttribute::Jmax(v) = a {
+        if let UmbrawgAttribute::Jmax(v) = a {
             Some(*v)
         } else {
             None
@@ -289,7 +289,7 @@ async fn test_set_and_get_amnezia_parameters() {
     assert_eq!(jmax, Some(70), "Jmax mismatch");
 
     let s1 = attrs.iter().find_map(|a| {
-        if let AmneziaWireguardAttribute::S1(v) = a {
+        if let UmbrawgAttribute::S1(v) = a {
             Some(*v)
         } else {
             None
@@ -298,7 +298,7 @@ async fn test_set_and_get_amnezia_parameters() {
     assert_eq!(s1, Some(92), "S1 mismatch");
 
     let h1 = attrs.iter().find_map(|a| {
-        if let AmneziaWireguardAttribute::H1(v) = a {
+        if let UmbrawgAttribute::H1(v) = a {
             Some(v.clone())
         } else {
             None
@@ -311,14 +311,14 @@ async fn test_set_and_get_amnezia_parameters() {
 
 #[tokio::test]
 async fn test_family_not_available_soft_skip() {
-    // This test exercises the soft-skip path on systems without AmneziaWG.
+    // This test exercises the soft-skip path on systems without UmbraWG.
     // When the family is available it still verifies that resolve works.
     let (connection, mut handle, _) = new_connection().unwrap();
     tokio::spawn(connection);
 
     let available = family_available(&mut handle).await;
     if !available {
-        eprintln!("amneziawg family not available on this system");
+        eprintln!("umbrawg family not available on this system");
     }
     // We cannot assert availability because it depends on the environment.
     // The test simply ensures the resolve call does not panic.
