@@ -125,6 +125,43 @@ src/tests/netlink-parity.sh
 7. Согласовать единую версию и обновить `umbrawg-dkms.spec`/`debian` при
    выпуске тега.
 
+## Пакетирование и релиз
+
+- `.github/workflows/packaging.yml` (CI-сборка пакетов, а не кода модуля):
+  - `arch` (`archlinux:latest`) — `makepkg -f --noconfirm --nodeps` для
+    `contrib/arch/umbrawg-dkms-git`, проверка `/usr/src/umbrawg-<pkgver>`
+    (`dkms.conf` с `PACKAGE_VERSION` и `MAKE="make LLVM=1 …"`, `version.h`,
+    `uapi/umbrawg.h`, исходники) и сборка модуля из **упакованных** исходников;
+  - `rpm` (`fedora:latest`) — тарбол из чекаута, `Version:` в
+    `umbrawg-dkms.spec` заменяется на версию из `src/version.h` в форме
+    `3.1.20261113_02` (дефис в RPM `Version` недопустим), затем `rpmbuild -ba`
+    и проверка `rpm -qlp`;
+  - `deb` (`debian:trixie`) — `dpkg-buildpackage -b -us -uc`, проверка
+    содержимого `.deb`. Нужен пакет `dh-dkms`: в trixie addon `--with dkms`
+    вынесен отдельно, без него `dh clean` падает;
+  - `релиз` на тег `v*` — `.pkg.tar.zst`, `.rpm`, `.deb`, `SHA256SUMS`.
+- Версия тега = `UMBRAWG_VERSION` из `src/version.h` (`v3.1.20261113-02`).
+  Тегов пока нет.
+- Секретов не нужно: AUR и Copr не затрагиваются, публикация ручная.
+- **`debian/changelog` содержит legacy-версию `1.0.0`**, поэтому `.deb`
+  называется `umbrawg-dkms_1.0.0_all.deb` и ставит `/usr/src/umbrawg-1.0.0`;
+  job `deb` выводит предупреждение. Перед реальным релизом changelog нужно
+  поднять. Проверено вручную: при версии `3.1.20261113-02` в changelog
+  `dh_dkms` и `override_dh_auto_install` создают в пакете оба каталога
+  (`umbrawg-1.0.0` и `umbrawg-3.1.20261113`), то есть одной правки changelog
+  недостаточно — надо чинить `debian/rules`.
+- RPM собирается с версией из `version.h`, Arch-пакет — по `UMBRAWG_VERSION`;
+  `.deb` — по `debian/changelog`. Перед первым релизом версии нужно свести.
+- DKMS-пакеты содержат только исходники: для сборки на машине нужны
+  заголовки ядра (`linux-headers`, `kernel-devel`) и тулчейн. `LLVM=1`
+  обязателен только для ядер, собранных clang; в Arch-контейнере ядро собрано
+  GCC, поэтому CI выбирает компилятор по `CONFIG_CC_IS_CLANG`.
+- Стабильный `contrib/arch/umbrawg-dkms` в CI не собирается: в `sha256sums`
+  заглушка `TODO_UPDPKGSUMS_AFTER_FIRST_TAG`, после тега нужны `updpkgsums`
+  и `makepkg --printsrcinfo > .SRCINFO`.
+- Осталось: публикация в AUR (ручная), aarch64 (сборка модуля проверена только
+  на x86_64 с ядром 7.3.4), прогон workflow в GitHub Actions.
+
 ## Соглашения
 
 - Числовые значения netlink-атрибутов и байты на проводе менять нельзя.
