@@ -1,0 +1,55 @@
+# Maintainer: Yuri Egorov <ye@umbra.org>
+# pkgver вычисляется из src/version.h; дефисы upstream-версии заменяются подчёркиваниями.
+pkgname=umbrawg-dkms-git
+pkgver=3.1.20261113_02.r0.g0000000
+pkgrel=1
+_upstream_name=umbrawg-linux-kernel-module
+pkgdesc="UmbraWG VPN tunnel kernel module (DKMS sources, git master)"
+arch=('any')
+url="https://github.com/ivlev-dev/${_upstream_name}"
+license=('GPL-2.0-only')
+depends=('dkms')
+provides=("${pkgname%-git}")
+conflicts=("${pkgname%-git}")
+install="${pkgname}.install"
+source=("${_upstream_name}::git+https://github.com/ivlev-dev/${_upstream_name}.git#branch=master")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${_upstream_name}"
+  local module_version
+  module_version=$(sed -n 's/.*UMBRAWG_VERSION "\([^"]*\)".*/\1/p' src/version.h)
+  if [[ -z ${module_version} ]]; then
+    echo "не удалось определить версию модуля из src/version.h" >&2
+    return 1
+  fi
+  printf '%s.r%s.g%s' "${module_version//-/_}" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+package() {
+  cd "${srcdir}/${_upstream_name}/src"
+
+  make dkms-install \
+    DESTDIR="${pkgdir}" \
+    PREFIX=/usr \
+    UMBRAWG_VERSION="${pkgver}"
+
+  local dkmsdir="${pkgdir}/usr/src/umbrawg-${pkgver}"
+  local module_version
+  module_version=$(sed -n 's/.*UMBRAWG_VERSION "\([^"]*\)".*/\1/p' version.h)
+  if [[ -z ${module_version} ]]; then
+    echo "не удалось определить версию модуля из src/version.h" >&2
+    return 1
+  fi
+
+  sed -i "s|^PACKAGE_VERSION=.*|PACKAGE_VERSION=\"${pkgver}\"|" "${dkmsdir}/dkms.conf"
+  if ! grep -qx "PACKAGE_VERSION=\"${pkgver}\"" "${dkmsdir}/dkms.conf"; then
+    echo "не удалось обновить PACKAGE_VERSION в dkms.conf" >&2
+    return 1
+  fi
+
+  if [[ -n $(tail -c 1 "${dkmsdir}/dkms.conf") ]]; then
+    printf '\n' >>"${dkmsdir}/dkms.conf"
+  fi
+  printf 'MAKE="make LLVM=1 UMBRAWG_VERSION=%s"\n' "${module_version}" >>"${dkmsdir}/dkms.conf"
+}

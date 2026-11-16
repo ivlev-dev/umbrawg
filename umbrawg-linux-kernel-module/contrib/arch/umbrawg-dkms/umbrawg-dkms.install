@@ -1,0 +1,31 @@
+_umbrawg_dkms_warn() {
+  echo "umbrawg-dkms: $1" >&2
+}
+
+post_install() {
+  if ! dkms add -m umbrawg -v "$1" >/dev/null 2>&1; then
+    _umbrawg_dkms_warn "не удалось добавить umbrawg/$1 в dkms"
+  fi
+  if ! dkms build -m umbrawg -v "$1" >/dev/null 2>&1; then
+    _umbrawg_dkms_warn "сборка umbrawg/$1 не удалась, проверьте установленные *-headers"
+  fi
+  if ! dkms install -m umbrawg -v "$1" >/dev/null 2>&1; then
+    _umbrawg_dkms_warn "установка umbrawg/$1 не удалась, выполните 'dkms autoinstall'"
+  fi
+}
+
+post_upgrade() {
+  post_install "$1"
+}
+
+pre_upgrade() {
+  if ! dkms remove -m umbrawg -v "$2" --all >/dev/null 2>&1; then
+    _umbrawg_dkms_warn "не удалось удалить старую версию umbrawg/$2 из dkms"
+  fi
+}
+
+pre_remove() {
+  if ! dkms remove -m umbrawg -v "$1" --all >/dev/null 2>&1; then
+    _umbrawg_dkms_warn "не удалось удалить umbrawg/$1 из dkms"
+  fi
+}
