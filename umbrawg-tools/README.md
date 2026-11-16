@@ -43,11 +43,13 @@ GitHub Actions:
 - `.github/workflows/rust-build.yml` — release-сборка `uwg` и `uwg-quick` под
   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` и
   `armv7-unknown-linux-gnueabihf`, релиз по тегу `v*`;
+- `.github/workflows/packaging.yml` — пакеты `.deb`, `.rpm` и Arch в контейнерах
+  на тег `v*`, публикация в GitHub Release (см. «Релизный CI пакетов»);
 - `.github/workflows/legacy-linux-build.yml` — прежняя C-сборка, только
   `workflow_dispatch`, без публикации релизов.
 
-Оба workflow клонируют `ivlev-dev/netlink-packet-umbrawg` вторым checkout в
-`netlink-packet-umbrawg/`, а сам репозиторий — в `tools/`. Поэтому
+Workflow с Rust-сборкой клонируют `ivlev-dev/netlink-packet-umbrawg` вторым
+checkout в `netlink-packet-umbrawg/`, а сам репозиторий — в `tools/`. Поэтому
 path-зависимость `../netlink-packet-umbrawg` разрешается без правки
 `Cargo.toml`, локальная сборка не меняется.
 
@@ -127,6 +129,75 @@ lintian dist/umbrawg-tools_*.deb
 из bookworm и генерирует maint-скрипты; на merged-/usr это тот же
 `/usr/lib/systemd/system`. Преднамеренные отклонения (`/lib`, режим `0700` у
 `/etc/umbrawg`) описаны в `debian/umbrawg-tools.lintian-overrides`.
+
+### Релизный CI пакетов
+
+`.github/workflows/packaging.yml` повторяет проверенные рецепты выше на
+раннерах GitHub Actions:
+
+| Job | Образ | Шаги |
+|---|---|---|
+| `meta` | `ubuntu-latest` | версия из `Cargo.toml`, сверка с тегом `v*` или с input `version` |
+| `deb` | `debian:trixie` | `build-essential cargo rustc dpkg-dev debhelper`, затем `scripts/package/build-deb.sh` |
+| `rpm` | `fedora:latest` | `rpm-build cargo rust gcc make systemd-rpm-macros`, затем `scripts/package/build-rpm.sh` |
+| `arch` | `archlinux:latest` | `base-devel git rust cargo`, затем `makepkg -f --noconfirm --nodeps` |
+| `release` | `ubuntu-latest` | `SHA256SUMS` и `softprops/action-gh-release` |
+
+Триггеры:
+
+- push тега `v*` — сборка и публикация в GitHub Release;
+- `workflow_dispatch` — только артефакты, без релиза; необязательный input
+  `version` (без префикса `v`) сверяется с `Cargo.toml`:
+
+  ```sh
+  gh workflow run packaging.yml -f version=0.2.0
+  ```
+
+Каждый build-job выкладывает артефакт со сроком хранения 14 дней:
+`umbrawg-tools-deb` (`dist/*.deb`, `*.changes`, `*.buildinfo`),
+`umbrawg-tools-rpm` и `umbrawg-tools-arch` (`*.pkg.tar.zst`). В rpm-артефакт
+попадают SRPM и `-debuginfo`/`-debugsource`, в arch — `-debug`: это обычный
+вывод `rpmbuild` и `makepkg`, они же уходят в релиз. Job `release` скачивает
+все три артефакта, считает `SHA256SUMS` и прикладывает их к релизу того же
+тега, куда `rust-build.yml` кладёт тарболы бинарников; оба релизных job'а
+используют общую concurrency-группу `release-${{ github.ref }}`, поэтому не
+перезаписывают релиз одновременно.
+
+Особенности:
+
+- `deb` и `rpm` чекаутят оба дерева (`tools/` и `netlink-packet-umbrawg/`) —
+  этого требует `make-dist.sh`. В `debian:trixie` `rustc` уже >= 1.85, так что
+  `dpkg-checkbuilddeps` подтверждает `Build-Depends` и `-d` не нужен;
+  на `rust:1.85-bookworm` скрипт, как и локально, сверит версию и добавит `-d`.
+- Версия netlink в default-ветке должна совпадать с `Cargo.lock`. Иначе
+  `.deb`/`.rpm` соберутся, но cargo перепишет lock; а Arch `-git` упадёт на
+  `cargo fetch --locked`. Перед тегом tools приведите `main` netlink к версии
+  из lock или обновите `Cargo.lock`.
+- Arch `-git` PKGBUILD тянет исходники сам: `master` tools и `main` netlink из
+  GitHub, локальный checkout для него не используется. Пакет поэтому
+  VCS-снимок (`pkgver` вида `0.2.0.r<N>.g<хэш>`), а job дополнительно проверяет,
+  что версия в имени файла начинается с версии из `Cargo.toml`: тег должен
+  указывать на HEAD той ветки, которую клонирует PKGBUILD.
+- Стабильный Arch-пакет собирается только если в
+  `contrib/arch/umbrawg-tools/PKGBUILD` нет заглушки
+  `TODO_UPDPKGSUMS_AFTER_FIRST_TAG`. До первого тега netlink и `updpkgsums`
+  job печатает `skip` и кладёт в артефакт только `-git`. Источники стабильного
+  пакета — архивы тегов из его `PKGBUILD` (`pkgver`, `_netlink_ver`), поэтому
+  перед тегом версии и суммы обновляют вручную; при рассинхроне `makepkg`
+  упадёт на проверке контрольных сумм.
+- `scripts/check-packaging.sh` (job `packaging` в `rust-ci.yml`) разбирает все
+  YAML workflow, поэтому синтаксические ошибки в `packaging.yml` видны до тега;
+  локальные рецепты — раздел «Сборка в Docker».
+
+Секреты и права:
+
+- отдельных секретов не нужно, достаточно автоматического `GITHUB_TOKEN`;
+- на уровне workflow `permissions: contents: read`, у job `release` —
+  `contents: write` (создание релиза и загрузка файлов);
+- оба репозитория должны оставаться публичными: `actions/checkout` второго
+  дерева и `makepkg` клонируют `ivlev-dev/netlink-packet-umbrawg` без токена;
+- публикация в AUR не автоматизирована — нужен отдельный AUR-репозиторий и
+  SSH-ключ (см. `contrib/arch/README.md`).
 
 ## Использование
 
