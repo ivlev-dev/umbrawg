@@ -17,6 +17,11 @@ use std::path::{Path, PathBuf};
 
 const MAX_RULE_DELETIONS: usize = 1024;
 
+/// `uwg setconf` reads the configuration from a file; `/dev/stdin` lets
+/// `uwg-quick up` feed it through a pipe like the shell version's process
+/// substitution does.
+const CONFIGURATION_STDIN: &str = "/dev/stdin";
+
 #[derive(Default)]
 struct RunState {
     have_set_dns: bool,
@@ -186,7 +191,11 @@ fn set_config(config: &QuickConfig, runner: &dyn CommandRunner) -> QuickResult<(
     data.push('\n');
     let spec = echo_command(
         UWG_PROGRAM,
-        vec!["setconf".to_string(), config.interface.clone()],
+        vec![
+            "setconf".to_string(),
+            config.interface.clone(),
+            CONFIGURATION_STDIN.to_string(),
+        ],
     )
     .stdin(data);
     runner.run_checked(&spec)
@@ -908,7 +917,7 @@ mod tests {
         let expected = [
             "ip link show dev wg0",
             "ip link add wg0 type umbrawg",
-            "uwg setconf wg0",
+            "uwg setconf wg0 /dev/stdin",
             "ip -4 address add 10.0.0.2/24 dev wg0",
             "uwg show wg0 endpoints",
             "ip route show default",
@@ -929,6 +938,28 @@ mod tests {
             "nft -f",
         ];
         assert_eq!(runner.call_strings(), expected);
+    }
+
+    #[test]
+    fn set_config_passes_the_configuration_as_a_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = config_with(
+            directory.path(),
+            "wg0.conf",
+            "[Interface]\nPrivateKey = abc=\nAddress = 10.0.0.2/24\n",
+        );
+        let runner = MockRunner::empty();
+
+        set_config(&config, &runner).unwrap();
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].program, "uwg");
+        assert_eq!(calls[0].args, ["setconf", "wg0", "/dev/stdin"]);
+        assert_eq!(
+            calls[0].stdin.as_deref(),
+            Some(format!("{}\n", config.wg_config).as_bytes())
+        );
     }
 
     #[test]
@@ -1002,7 +1033,7 @@ mod tests {
         );
         let runner = mock_from(|command, _| match command {
             "ip link show dev wg0" => (1, String::new()),
-            "uwg setconf wg0" => (1, String::new()),
+            "uwg setconf wg0 /dev/stdin" => (1, String::new()),
             "uwg show wg0 fwmark" => (1, String::new()),
             _ => (0, String::new()),
         });
