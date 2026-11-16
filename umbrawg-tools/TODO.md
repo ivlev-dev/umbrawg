@@ -12,9 +12,10 @@
   парсинг `uwg-quick` переведён на общие примитивы `umbrawg-config`.
 - AdvancedSecurity пира: чтение флага из netlink (`uwg show`,
   `uwg show <iface> advanced-security`), ключ `AdvancedSecurity` в `[Peer]`,
-  `showconf`/`save` и отправка в ядро через `UWGPEER_A_ADVANCED_SECURITY`;
-  ядро выставляет его само, а userspace UAPI такого ключа не имеет.
-- Тесты: 190 (unit, 10 CLI на фейковом UAPI-сокете, 2 parity-теста `strip`
+  `showconf`/`save`, отправка в ядро через `UWGPEER_A_ADVANCED_SECURITY` и
+  передача в userspace UAPI (`advanced_security=1|0`, демон только хранит и
+  отдаёт значение).
+- Тесты: 212 (unit, 16 CLI на фейковом UAPI-сокете, 2 parity-теста `strip`
   против bash-версии).
 - CI: fmt/clippy/test, тесты стенда (`bench`) и статические проверки упаковки
   (`packaging`), релизные сборки x86_64/aarch64/armv7; упаковка
@@ -85,9 +86,9 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # 17 тестов �
 
 ## Известные проблемы
 
-- AdvancedSecurity пира поддерживает только kernel netlink: userspace UAPI
-  такого ключа не знает, поэтому `uwg` предупреждает и пропускает его. Полная
-  поддержка в демоне — отдельная задача.
+- `AdvancedSecurity` через userspace UAPI — информационный: демон хранит и
+  отдаёт значение, но не применяет его; реально его включает только модуль ядра
+  (`UWGPEER_A_ADVANCED_SECURITY`).
 - Пакеты (`debian/`, spec) собираются из Rust-дерева; для source-upload в Debian
   нужен vendor `netlink-packet-umbrawg`.
 - CI собирает ARM-тарболы, но не запускает тесты на ARM-хостах.

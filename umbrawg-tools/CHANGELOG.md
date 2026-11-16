@@ -3,6 +3,24 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
+## [Не выпущено]
+
+### Добавлено
+
+- `AdvancedSecurity` пира передаётся в userspace UAPI: `uwg set` и
+  `uwg setconf`/`addconf`/`syncconf` отправляют `advanced_security=1|0`
+  (явный `off` — это `0`, отсутствие ключа в файле — ключ не отправляется).
+  Демон сохраняет и возвращает значение (`reported`), но не применяет его.
+- `uwg show`, `uwg show <iface> advanced-security` и `showconf` показывают
+  состояние из userspace UAPI как `yes`/`no` и `AdvancedSecurity = on|off`;
+  `unsupported`/отсутствие строки остаются для интерфейсов, которые ключ
+  не отдают. Формат kernel-пути не изменился.
+
+### Изменено
+
+- `uwg` больше не предупреждает, что `AdvancedSecurity` поддерживает только
+  ядро: ключ теперь проходят через userspace UAPI без ошибок и предупреждений.
+
 ## [0.2.0] — 2026-11-16
 
 Паритет с legacy-C `awg` и совместимость с модулем ядра UmbraWG 3.1 и
