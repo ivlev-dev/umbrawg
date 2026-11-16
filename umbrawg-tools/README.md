@@ -241,8 +241,22 @@ uwg-quick strip uwg0
 cargo test --workspace          # unit + CLI + parity strip против legacy-c
 scripts/test-kernel.sh          # утилиты против модуля ядра
 scripts/test-userspace.sh       # утилиты против userspace-демона
+scripts/test-daemon-e2e.sh      # e2e: uwg ↔ живой umbrawg через UAPI (без модуля ядра)
 scripts/test-two-nodes.sh       # 2 netns: ping + iperf3, с обфускацией и без
 ```
+
+`scripts/test-daemon-e2e.sh` поднимает Rust-демон `umbrawg --foreground` в
+отдельном namespace (`unshare -Urn`, если нет root/CAP_NET_ADMIN) с
+`UWG_RUNTIME_DIR` во временном каталоге и прогоняет через UAPI полный профиль
+3.1 (`H1..H4`, `S1..S4`, `Jc/Jmin/Jmax`, `I1..I5`, `HeaderProtectionKey`,
+`AdvancedSecurity`), `show`/`showconf`, `set`, `addconf`, `syncconf`,
+перезапуск демона и отрицательные сценарии. Каждая команда проверяется по коду
+возврата и пустому stderr (предупреждения считаются ошибкой), `showconf`
+сравнивается с исходным конфигом после нормализации. Скрипт завершается с
+кодом 0 и сообщением `SKIP`, если нет бинарников, TUN или прав на namespace.
+Пути задаются через `UWG` и `DAEMON`; при их отсутствии берутся
+`target/release/uwg` и `../rust/target/release/umbrawg`. `KEEP_ARTIFACTS=1`
+сохраняет каталог прогона.
 
 ### Стенд замеров (bench/)
 
