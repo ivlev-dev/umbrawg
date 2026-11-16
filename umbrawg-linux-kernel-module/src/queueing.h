@@ -24,6 +24,9 @@ struct sk_buff;
 int uwg_packet_queue_init(struct crypt_queue *queue, work_func_t function,
 			 unsigned int len);
 void uwg_packet_queue_free(struct crypt_queue *queue, bool purge);
+int uwg_packet_queue_init_percpu(struct crypt_queue *queue, work_func_t function,
+				unsigned int len);
+void uwg_packet_queue_free_percpu(struct crypt_queue *queue, bool purge);
 struct multicore_worker __percpu *
 uwg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr);
 
@@ -161,6 +164,8 @@ static inline int uwg_queue_enqueue_per_device_and_peer(
 	struct crypt_queue *device_queue, struct prev_queue *peer_queue,
 	struct sk_buff *skb, struct workqueue_struct *wq)
 {
+	struct multicore_worker *worker;
+	struct crypt_queue *queue;
 	int cpu;
 
 	atomic_set_release(&PACKET_CB(skb)->state, PACKET_STATE_UNCRYPTED);
@@ -174,9 +179,11 @@ static inline int uwg_queue_enqueue_per_device_and_peer(
 	 * packet as soon as it can.
 	 */
 	cpu = uwg_cpumask_next_online(&device_queue->last_cpu);
-	if (unlikely(ptr_ring_produce_bh(&device_queue->ring, skb)))
+	worker = per_cpu_ptr(device_queue->worker, cpu);
+	queue = worker->ptr;
+	if (unlikely(ptr_ring_produce_bh(&queue->ring, skb)))
 		return -EPIPE;
-	queue_work_on(cpu, wq, &per_cpu_ptr(device_queue->worker, cpu)->work);
+	queue_work_on(cpu, wq, &worker->work);
 	return 0;
 }
 

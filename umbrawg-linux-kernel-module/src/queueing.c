@@ -5,6 +5,7 @@
 
 #include "queueing.h"
 #include <linux/skb_array.h>
+#include <linux/topology.h>
 
 struct multicore_worker __percpu *
 uwg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr)
@@ -45,6 +46,74 @@ void uwg_packet_queue_free(struct crypt_queue *queue, bool purge)
 	free_percpu(queue->worker);
 	WARN_ON(!purge && !__ptr_ring_empty(&queue->ring));
 	ptr_ring_cleanup(&queue->ring, purge ? __skb_array_destroy_skb : NULL);
+}
+
+int uwg_packet_queue_init_percpu(struct crypt_queue *queue,
+				work_func_t function, unsigned int len)
+{
+	struct crypt_queue *q;
+	int cpu, ret = 0;
+
+	memset(queue, 0, sizeof(*queue));
+	queue->last_cpu = -1;
+	queue->worker = alloc_percpu(struct multicore_worker);
+	if (!queue->worker)
+		return -ENOMEM;
+
+	for_each_possible_cpu(cpu) {
+		INIT_WORK(&per_cpu_ptr(queue->worker, cpu)->work, function);
+		per_cpu_ptr(queue->worker, cpu)->ptr = NULL;
+	}
+
+	for_each_possible_cpu(cpu) {
+		q = kzalloc_node(sizeof(*q), GFP_KERNEL, cpu_to_node(cpu));
+		if (!q) {
+			ret = -ENOMEM;
+			goto err;
+		}
+		q->last_cpu = cpu;
+		ret = ptr_ring_init(&q->ring, len, GFP_KERNEL);
+		if (ret) {
+			kfree(q);
+			goto err;
+		}
+		per_cpu_ptr(queue->worker, cpu)->ptr = q;
+	}
+	return 0;
+
+err:
+	for_each_possible_cpu(cpu) {
+		q = per_cpu_ptr(queue->worker, cpu)->ptr;
+		if (!q)
+			continue;
+		ptr_ring_cleanup(&q->ring, NULL);
+		kfree(q);
+		per_cpu_ptr(queue->worker, cpu)->ptr = NULL;
+	}
+	free_percpu(queue->worker);
+	queue->worker = NULL;
+	return ret;
+}
+
+void uwg_packet_queue_free_percpu(struct crypt_queue *queue, bool purge)
+{
+	struct crypt_queue *q;
+	int cpu;
+
+	if (!queue->worker)
+		return;
+	for_each_possible_cpu(cpu) {
+		q = per_cpu_ptr(queue->worker, cpu)->ptr;
+		if (!q)
+			continue;
+		WARN_ON(!purge && !__ptr_ring_empty(&q->ring));
+		ptr_ring_cleanup(&q->ring,
+				 purge ? __skb_array_destroy_skb : NULL);
+		kfree(q);
+		per_cpu_ptr(queue->worker, cpu)->ptr = NULL;
+	}
+	free_percpu(queue->worker);
+	queue->worker = NULL;
 }
 
 #define NEXT(skb) ((skb)->prev)

@@ -22,6 +22,10 @@
 #include <net/udp.h>
 #include <net/sock.h>
 
+#define UWG_TX_MAX_ENTRIES 32
+#define UWG_TX_MAX_SKBS (UWG_TX_MAX_ENTRIES * 4)
+#define UWG_GSO_SEGS_MAX 16
+
 static void uwg_packet_send_handshake_initiation(struct uwg_peer *peer)
 {
 	struct message_handshake_initiation packet;
@@ -328,19 +332,109 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 	uwg_packet_send_staged_packets(peer);
 }
 
-static void uwg_packet_create_data_done(struct uwg_peer *peer, struct sk_buff *first)
+static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
+				bool *data_sent)
 {
-	struct sk_buff *skb, *next;
+	bool is_keepalive = PACKET_CB(skb)->is_keepalive;
+	u8 ds = PACKET_CB(skb)->ds;
+
+	if (likely(!uwg_socket_send_skb_to_peer(peer, skb, ds) && !is_keepalive))
+		*data_sent = true;
+}
+
+static struct sk_buff *uwg_packet_gso_alloc(struct sk_buff **pkts,
+					    unsigned int count, unsigned int len)
+{
+	unsigned int i;
+	struct sk_buff *skb;
+
+	skb = alloc_skb(DATA_PACKET_HEAD_ROOM + count * len, GFP_ATOMIC);
+	if (unlikely(!skb))
+		return NULL;
+
+	skb_reserve(skb, DATA_PACKET_HEAD_ROOM);
+	for (i = 0; i < count; ++i)
+		skb_put_data(skb, pkts[i]->data, len);
+
+	/* The UDP header is pushed by the tunnel xmit path right at the
+	 * current data pointer, so advertise the checksum start relative
+	 * to where it will end up being.
+	 */
+	skb->ip_summed = CHECKSUM_PARTIAL;
+	skb->csum_start = skb_headroom(skb) - sizeof(struct udphdr);
+	skb->csum_offset = offsetof(struct udphdr, check);
+
+	skb_shinfo(skb)->gso_size = len;
+	skb_shinfo(skb)->gso_segs = count;
+	skb_shinfo(skb)->gso_type = SKB_GSO_UDP_L4;
+	return skb;
+}
+
+static bool uwg_packet_send_gso(struct uwg_peer *peer, struct sk_buff **pkts,
+				unsigned int count, bool *data_sent)
+{
+	unsigned int i, len = pkts[0]->len;
+	bool keepalive = false;
+	u8 ds = PACKET_CB(pkts[0])->ds;
+	struct sk_buff *agg;
+
+	agg = uwg_packet_gso_alloc(pkts, count, len);
+	if (unlikely(!agg))
+		return false;
+
+	for (i = 0; i < count; ++i) {
+		keepalive |= PACKET_CB(pkts[i])->is_keepalive;
+		kfree_skb(pkts[i]);
+	}
+
+	if (likely(!uwg_socket_send_skb_to_peer(peer, agg, ds) && !keepalive))
+		*data_sent = true;
+	return true;
+}
+
+static void uwg_packet_create_data_done(struct uwg_peer *peer,
+					struct sk_buff **entries,
+					unsigned int entries_len)
+{
+	struct sk_buff *skbs[UWG_TX_MAX_SKBS];
+	unsigned int nskbs = 0, i, j;
 	bool data_sent = false;
+
+	for (i = 0; i < entries_len; ++i) {
+		struct sk_buff *skb, *next;
+
+		skb_list_walk_safe(entries[i], skb, next) {
+			skb_mark_not_on_list(skb);
+			if (likely(nskbs < UWG_TX_MAX_SKBS)) {
+				skbs[nskbs++] = skb;
+			} else {
+				uwg_packet_send_one(peer, skb, &data_sent);
+			}
+		}
+	}
 
 	uwg_timers_any_authenticated_packet_traversal(peer);
 	uwg_timers_any_authenticated_packet_sent(peer);
-	skb_list_walk_safe(first, skb, next) {
-		bool is_keepalive = PACKET_CB(skb)->is_keepalive;
 
-		if (likely(!uwg_socket_send_skb_to_peer(peer, skb,
-				PACKET_CB(skb)->ds) && !is_keepalive))
-			data_sent = true;
+	for (i = 0; i < nskbs; ) {
+		unsigned int len = skbs[i]->len;
+		u8 ds = PACKET_CB(skbs[i])->ds;
+
+		for (j = i + 1; j < nskbs; ++j) {
+			if (skbs[j]->len != len || PACKET_CB(skbs[j])->ds != ds)
+				break;
+			if (j - i >= UWG_GSO_SEGS_MAX)
+				break;
+		}
+
+		if (j - i > 1 && uwg_packet_send_gso(peer, skbs + i, j - i,
+						     &data_sent)) {
+			i = j;
+			continue;
+		}
+
+		for (; i < j; ++i)
+			uwg_packet_send_one(peer, skbs[i], &data_sent);
 	}
 
 	if (likely(data_sent))
@@ -352,23 +446,41 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer, struct sk_buff *f
 void uwg_packet_tx_worker(struct work_struct *work)
 {
 	struct uwg_peer *peer = container_of(work, struct uwg_peer, transmit_packet_work);
-	struct noise_keypair *keypair;
-	enum packet_state state;
-	struct sk_buff *first;
+	struct sk_buff *entries[UWG_TX_MAX_ENTRIES];
+	struct noise_keypair *keypairs[UWG_TX_MAX_ENTRIES];
+	unsigned int n, i;
 
-	while ((first = uwg_prev_queue_peek(&peer->tx_queue)) != NULL &&
-	       (state = atomic_read_acquire(&PACKET_CB(first)->state)) !=
-		       PACKET_STATE_UNCRYPTED) {
-		uwg_prev_queue_drop_peeked(&peer->tx_queue);
-		keypair = PACKET_CB(first)->keypair;
+	for (;;) {
+		struct sk_buff *first;
+		enum packet_state state;
 
-		if (likely(state == PACKET_STATE_CRYPTED))
-			uwg_packet_create_data_done(peer, first);
-		else
+		n = 0;
+		while (n < UWG_TX_MAX_ENTRIES &&
+		       (first = uwg_prev_queue_peek(&peer->tx_queue)) != NULL &&
+		       (state = atomic_read_acquire(&PACKET_CB(first)->state)) !=
+			       PACKET_STATE_UNCRYPTED) {
+			uwg_prev_queue_drop_peeked(&peer->tx_queue);
+			if (likely(state == PACKET_STATE_CRYPTED)) {
+				entries[n] = first;
+				keypairs[n] = PACKET_CB(first)->keypair;
+				++n;
+				continue;
+			}
+			uwg_noise_keypair_put(PACKET_CB(first)->keypair, false);
 			kfree_skb_list(first);
+			uwg_peer_put(peer);
+		}
 
-		uwg_noise_keypair_put(keypair, false);
-		uwg_peer_put(peer);
+		if (!n)
+			break;
+
+		uwg_packet_create_data_done(peer, entries, n);
+
+		for (i = 0; i < n; ++i) {
+			uwg_noise_keypair_put(keypairs[i], false);
+			uwg_peer_put(peer);
+		}
+
 		if (need_resched())
 			cond_resched();
 	}
