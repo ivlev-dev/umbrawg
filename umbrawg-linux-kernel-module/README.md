@@ -13,6 +13,7 @@ The module uses only the in-kernel cryptography API (`chacha20poly1305`, `blake2
   - [Ubuntu / Debian / Linux Mint](#ubuntu--debian--linux-mint)
   - [RHEL/CentOS/SUSE/Fedora Core](#rhelcentossusefedora-core)
 - [Manual build](#manual-build)
+- [Packages and releases](#packages-and-releases)
 - [Configuration](#configuration)
 - [Performance](#performance)
 - [Limitations](#limitations)
@@ -78,6 +79,44 @@ You may need to install kernel headers and/or build essentials packages before r
     > To verify that a rebuild actually happened, compare the `.ko` timestamp or
     > build log. `srcversion` is not reliable: it does not change when only
     > headers are modified.
+
+## Packages and releases
+
+`.github/workflows/packaging.yml` builds the DKMS packages:
+
+| Job | Image | Contents |
+|---|---|---|
+| `версия` | `ubuntu-latest` | reads `UMBRAWG_VERSION` from `src/version.h` (`3.1.20261113-02`), derives the RPM-safe form (`3.1.20261113_02`) and requires the tag to be `v<version>` |
+| `arch` | `archlinux:latest` | `makepkg -f --noconfirm --nodeps` for `contrib/arch/umbrawg-dkms-git`, verifies `/usr/src/umbrawg-<pkgver>/` (`dkms.conf` with `PACKAGE_VERSION` and the `MAKE="make LLVM=1 …"` line, `version.h`, `uapi/umbrawg.h`, sources) and compiles the module from the **packaged** sources |
+| `rpm` | `fedora:latest` | builds the source tarball from the checkout, replaces `Version:` in `umbrawg-dkms.spec` with the RPM-safe version, runs `rpmbuild -ba` and checks `rpm -qlp` for the same file set |
+| `deb` | `debian:trixie` | `dpkg-buildpackage -b -us -uc` and checks the `/usr/src/umbrawg-*` payload of the `.deb` |
+| `релиз` | `ubuntu-latest` | on a `v*` tag: `.pkg.tar.zst`, `.rpm`, `.deb` and `SHA256SUMS` |
+
+Notes:
+
+- no secrets are needed; nothing is uploaded to the AUR or Copr, both stay
+  manual;
+- the tag must be `v3.1.20261113-02` (no tag exists yet). `workflow_dispatch`
+  accepts an optional `version` input for a manual check;
+- the `deb` job installs `dh-dkms` on top of `dkms`: on Debian trixie the
+  `--with dkms` debhelper addon is a separate package, without it
+  `dpkg-buildpackage` fails in `dh clean`;
+- `debian/changelog` still says `1.0.0`, so the `.deb` is named
+  `umbrawg-dkms_1.0.0_all.deb` and ships `/usr/src/umbrawg-1.0.0`. The job emits a
+  warning when this version differs from `src/version.h`; bump the changelog
+  before a real release (the RPM uses the version from `version.h` instead);
+- the DKMS packages ship sources only, so building them on the target machine
+  needs kernel headers (`linux-headers`, `kernel-devel`, `linux-headers-$(uname -r)`)
+  and a toolchain; `dkms` is the only hard dependency;
+- `LLVM=1` is mandatory only for kernels built with clang (CachyOS, some Fedora
+  builds). Arch's stock kernel is GCC-built, so the `arch` job picks the flag
+  based on `CONFIG_CC_IS_CLANG` in the installed headers and builds with the same
+  compiler as the kernel;
+- the stable Arch package `contrib/arch/umbrawg-dkms` is not built in CI: its
+  `sha256sums` is the `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` placeholder and needs
+  `updpkgsums` after the first tag;
+- jobs are verified locally in Docker (Arch, Fedora, Debian), not yet in GitHub
+  Actions.
 
 ## Configuration
 
