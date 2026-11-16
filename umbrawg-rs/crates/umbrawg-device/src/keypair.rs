@@ -2,13 +2,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::Mutex;
-
 use umbrawg_crypto::aead::Aead;
 use umbrawg_noise::Keypair as NoiseKeypair;
 use umbrawg_proto::messages::limits::{REJECT_AFTER_MESSAGES, REKEY_AFTER_MESSAGES};
 
-use crate::replay::ReplayFilter;
+use crate::replay::AtomicReplayFilter;
 
 pub struct Keypair {
     created: Instant,
@@ -18,7 +16,7 @@ pub struct Keypair {
     send: Aead,
     receive: Aead,
     send_nonce: AtomicU64,
-    replay: Mutex<ReplayFilter>,
+    replay: AtomicReplayFilter,
 }
 
 impl Keypair {
@@ -32,7 +30,7 @@ impl Keypair {
             send: Aead::new(keys.send_key()),
             receive: Aead::new(keys.receive_key()),
             send_nonce: AtomicU64::new(0),
-            replay: Mutex::new(ReplayFilter::new()),
+            replay: AtomicReplayFilter::new(),
         }
     }
 
@@ -53,7 +51,7 @@ impl Keypair {
             send: Aead::new(send),
             receive: Aead::new(receive),
             send_nonce: AtomicU64::new(0),
-            replay: Mutex::new(ReplayFilter::new()),
+            replay: AtomicReplayFilter::new(),
         }
     }
 
@@ -119,7 +117,7 @@ impl Keypair {
     }
 
     pub fn validate_replay(&self, counter: u64) -> bool {
-        self.replay.lock().validate(counter, REJECT_AFTER_MESSAGES)
+        self.replay.validate(counter, REJECT_AFTER_MESSAGES)
     }
 
     pub fn exhaust(&self) {
