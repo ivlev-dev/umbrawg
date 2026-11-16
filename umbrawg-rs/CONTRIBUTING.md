@@ -19,8 +19,8 @@ cargo fmt --all -- --check
 
 ## Переменные окружения
 
-`UMBRAWG_THREADS`, `UMBRAWG_PARALLEL_RX`, `UMBRAWG_RX_WORKERS`, `UMBRAWG_RX_STATS`,
-`UMBRAWG_LOG_LEVEL`, `UMBRAWG_RUNTIME_DIR`. Подробнее — в README.
+`UMBRAWG_THREADS`, `UMBRAWG_PARALLEL_RX`, `UMBRAWG_RX_WORKERS`, `UMBRAWG_RX_SCHED`,
+`UMBRAWG_RX_STATS`, `UMBRAWG_LOG_LEVEL`, `UMBRAWG_RUNTIME_DIR`. Подробнее — в README.
 
 ## Стиль
 
@@ -40,7 +40,9 @@ cargo fmt --all -- --check
 - Тесты обязательны для нового кода: happy path, граничные случаи, ошибки.
 - Запускать `cargo test --workspace` перед отправкой PR.
 - Проверять оба режима: однопоточный и `UMBRAWG_PARALLEL_RX=1`.
-- Проверять `UMBRAWG_RX_STATS=1` при изменениях приёма.
+- Проверять `UMBRAWG_RX_STATS=1` при изменениях приёма и оба режима
+  `UMBRAWG_RX_SCHED=peer|queue` (data-plane: `scripts/test-dataplane-e2e.sh`,
+  несколько пиров: `scripts/test-dataplane-multipeer.sh`).
 
 ## Совместимость
 
