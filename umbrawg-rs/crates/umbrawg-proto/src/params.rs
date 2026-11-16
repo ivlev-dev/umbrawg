@@ -382,10 +382,13 @@ pub fn parse_u16_size(value: &str) -> Result<u16> {
 }
 
 /// Parses a Go-compatible boolean value.
+///
+/// Accepts `1`/`0`, the `strconv.ParseBool` spellings of `true`/`false`, and
+/// the `on`/`off` spellings used by `uwg` for `AdvancedSecurity`.
 pub fn parse_bool(value: &str) -> Result<bool> {
     match value.trim() {
-        "1" | "t" | "T" | "TRUE" | "true" | "True" => Ok(true),
-        "0" | "f" | "F" | "FALSE" | "false" | "False" => Ok(false),
+        "1" | "t" | "T" | "TRUE" | "true" | "True" | "on" | "ON" | "On" => Ok(true),
+        "0" | "f" | "F" | "FALSE" | "false" | "False" | "off" | "OFF" | "Off" => Ok(false),
         other => Err(ProtoError::InvalidValue {
             name: "bool".to_string(),
             value: other.to_string(),
@@ -457,10 +460,10 @@ mod tests {
 
     #[test]
     fn parses_go_booleans() {
-        for value in ["1", "t", "T", "TRUE", "true", "True"] {
+        for value in ["1", "t", "T", "TRUE", "true", "True", "on", "ON"] {
             assert!(parse_bool(value).unwrap());
         }
-        for value in ["0", "f", "F", "FALSE", "false", "False"] {
+        for value in ["0", "f", "F", "FALSE", "false", "False", "off", "OFF"] {
             assert!(!parse_bool(value).unwrap());
         }
         assert!(parse_bool("yes").is_err());

@@ -128,6 +128,9 @@ fn write_peer(output: &mut String, peer: &PeerSnapshot) {
         None => write_key(output, "preshared_key", &ZERO_KEY),
     }
     output.push_str("protocol_version=1\n");
+    if let Some(value) = peer.advanced_security {
+        write_bool(output, "advanced_security", value);
+    }
 
     if let Some(endpoint) = peer.endpoint {
         write_field(output, "endpoint", endpoint);
@@ -259,6 +262,25 @@ errno=0
     }
 
     #[test]
+    fn prints_advanced_security_only_when_reported() {
+        let peer = |value| PeerSnapshot {
+            public_key: PublicKey::from_hex(PEER_KEY).expect("valid"),
+            advanced_security: value,
+            ..PeerSnapshot::default()
+        };
+        let response = |value| {
+            format_get_response(&DeviceSnapshot {
+                peers: vec![peer(value)],
+                ..DeviceSnapshot::default()
+            })
+        };
+
+        assert!(response(Some(true)).contains("protocol_version=1\nadvanced_security=1\n"));
+        assert!(response(Some(false)).contains("protocol_version=1\nadvanced_security=0\n"));
+        assert!(!response(None).contains("advanced_security="));
+    }
+
+    #[test]
     fn formats_errno_responses() {
         assert_eq!(format_errno_response(None), "errno=0\n\n");
         assert_eq!(
@@ -314,6 +336,7 @@ errno=0
                 tx_bytes: 1000,
                 rx_bytes: 2000,
                 persistent_keepalive_interval: U16Range::single(25),
+                advanced_security: None,
                 allowed_ips: vec![
                     "10.0.0.0/8".parse::<AllowedIp>().expect("valid"),
                     "fd00::/64".parse::<AllowedIp>().expect("valid"),

@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -55,6 +55,10 @@ impl PeerState {
 static TIMER_EPOCH: LazyLock<Instant> = LazyLock::new(Instant::now);
 
 const NO_DEADLINE: u64 = u64::MAX;
+
+const ADVANCED_SECURITY_UNKNOWN: u8 = 0;
+const ADVANCED_SECURITY_DISABLED: u8 = 1;
+const ADVANCED_SECURITY_ENABLED: u8 = 2;
 
 fn encode_deadline(deadline: Option<Instant>) -> u64 {
     match deadline {
@@ -130,6 +134,7 @@ pub struct Peer {
     rx_bytes: AtomicU64,
     last_handshake_ns: AtomicU64,
     persistent_keepalive: AtomicU32,
+    advanced_security: AtomicU8,
     special_counter: AtomicU32,
     pub(crate) handshake: Mutex<PeerHandshake>,
     pub(crate) keypairs: RwLock<Keypairs>,
@@ -161,6 +166,7 @@ impl Peer {
             rx_bytes: AtomicU64::new(0),
             last_handshake_ns: AtomicU64::new(0),
             persistent_keepalive: AtomicU32::new(persistent_keepalive),
+            advanced_security: AtomicU8::new(ADVANCED_SECURITY_UNKNOWN),
             special_counter: AtomicU32::new(0),
             handshake: Mutex::new(PeerHandshake {
                 noise,
@@ -324,6 +330,29 @@ impl Peer {
         self.persistent_keepalive.store(packed, Ordering::Relaxed);
     }
 
+    /// Returns the reported advanced-security flag.
+    ///
+    /// `None` means the flag was never configured. The userspace daemon stores
+    /// the value for UAPI compatibility but does not enforce advanced security.
+    #[must_use]
+    pub fn advanced_security(&self) -> Option<bool> {
+        match self.advanced_security.load(Ordering::Relaxed) {
+            ADVANCED_SECURITY_ENABLED => Some(true),
+            ADVANCED_SECURITY_DISABLED => Some(false),
+            _ => None,
+        }
+    }
+
+    /// Stores the reported advanced-security flag without enforcing it.
+    pub fn set_advanced_security(&self, value: Option<bool>) {
+        let encoded = match value {
+            Some(true) => ADVANCED_SECURITY_ENABLED,
+            Some(false) => ADVANCED_SECURITY_DISABLED,
+            None => ADVANCED_SECURITY_UNKNOWN,
+        };
+        self.advanced_security.store(encoded, Ordering::Relaxed);
+    }
+
     #[must_use]
     pub fn state(&self, now: Instant, keychain_expire: Duration) -> PeerState {
         if !self.running() {
@@ -485,6 +514,18 @@ mod tests {
             .current_keypair()
             .is_some_and(|pair| Arc::ptr_eq(&pair, &next)));
         assert!(peer.promote_keypair(&next).is_none());
+    }
+
+    #[test]
+    fn advanced_security_is_stored_without_enforcement() {
+        let peer = peer();
+        assert_eq!(peer.advanced_security(), None);
+        peer.set_advanced_security(Some(true));
+        assert_eq!(peer.advanced_security(), Some(true));
+        peer.set_advanced_security(Some(false));
+        assert_eq!(peer.advanced_security(), Some(false));
+        peer.set_advanced_security(None);
+        assert_eq!(peer.advanced_security(), None);
     }
 
     #[test]

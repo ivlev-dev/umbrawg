@@ -703,6 +703,21 @@ fn uapi_snapshot_and_apply_patch_the_device() {
         "10.0.0.2".parse::<IpAddr>().unwrap()
     );
     assert!(snapshot.peers[0].last_handshake_time_sec > 0);
+    assert_eq!(snapshot.peers[0].advanced_security, None);
+
+    let mut advanced = PeerRequest::new(pair.b.public_key().unwrap());
+    advanced.advanced_security = Some(true);
+    let mut request = SetRequest::default();
+    request.peers.push(advanced);
+    pair.a.apply(request).unwrap();
+    assert_eq!(pair.a.snapshot().peers[0].advanced_security, Some(true));
+
+    let mut advanced = PeerRequest::new(pair.b.public_key().unwrap());
+    advanced.advanced_security = Some(false);
+    let mut request = SetRequest::default();
+    request.peers.push(advanced);
+    pair.a.apply(request).unwrap();
+    assert_eq!(pair.a.snapshot().peers[0].advanced_security, Some(false));
 
     let new_prefix = UapiAllowedIp::new("192.168.0.0".parse().unwrap(), 16).unwrap();
     let mut peer_request = PeerRequest::new(pair.b.public_key().unwrap());

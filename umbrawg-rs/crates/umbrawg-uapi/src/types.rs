@@ -429,6 +429,12 @@ pub struct PeerSnapshot {
     pub rx_bytes: u64,
     /// Persistent keepalive interval range.
     pub persistent_keepalive_interval: U16Range,
+    /// Advanced-security state reported for the peer.
+    ///
+    /// The userspace daemon stores the value reported through
+    /// `advanced_security` but does not enforce advanced security; `None` means
+    /// the value was never configured and the line is omitted from `get=1`.
+    pub advanced_security: Option<bool>,
     /// Allowed IP prefixes.
     pub allowed_ips: Vec<AllowedIp>,
 }
@@ -444,6 +450,7 @@ impl Default for PeerSnapshot {
             tx_bytes: 0,
             rx_bytes: 0,
             persistent_keepalive_interval: U16Range::default(),
+            advanced_security: None,
             allowed_ips: Vec::new(),
         }
     }
@@ -614,6 +621,12 @@ pub struct PeerRequest {
     pub endpoint: Option<SocketAddr>,
     /// New persistent keepalive interval.
     pub persistent_keepalive_interval: Option<U16Range>,
+    /// Advanced-security flag reported by the peer.
+    ///
+    /// The value is stored and returned by `get=1` but is not enforced: the
+    /// userspace daemon has no advanced-security implementation. Real
+    /// enforcement requires the kernel module.
+    pub advanced_security: Option<bool>,
     /// Drop all existing allowed IPs before applying [`Self::allowed_ips`].
     pub replace_allowed_ips: bool,
     /// Allowed-IP modifications in request order.
@@ -633,6 +646,7 @@ impl PeerRequest {
             preshared_key: None,
             endpoint: None,
             persistent_keepalive_interval: None,
+            advanced_security: None,
             replace_allowed_ips: false,
             allowed_ips: Vec::new(),
             protocol_version: None,

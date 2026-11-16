@@ -25,6 +25,8 @@ Userspace-демон UmbraWG на Rust: протокол WireGuard-совмес�
   `/var/run/umbrawg/<iface>.sock`, авторизация по `SO_PEERCRED`.
   Новый публичный метод `UapiListener::spawn_with_authorizer`; `run` и `spawn`
   сохраняют политику «только root».
+  Ключ пира `advanced_security` принимается в `set=1` и возвращается в `get=1`,
+  если был задан; значение хранится, но не влияет на поведение демона.
 - `umbrawg`: демон с запуском очередей, обработкой сигналов, `--foreground`,
   `--version`, `--help`, переменными окружения `UMBRAWG_THREADS`,
   `UMBRAWG_PARALLEL_RX`, `UMBRAWG_RX_WORKERS`, `UMBRAWG_RX_STATS`,

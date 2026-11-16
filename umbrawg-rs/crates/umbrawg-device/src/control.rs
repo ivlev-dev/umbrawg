@@ -86,6 +86,7 @@ fn peer_snapshot(device: &Device, peer: &std::sync::Arc<crate::peer::Peer>) -> P
         tx_bytes: peer.tx_bytes(),
         rx_bytes: peer.rx_bytes(),
         persistent_keepalive_interval,
+        advanced_security: peer.advanced_security(),
         allowed_ips,
     }
 }
@@ -283,6 +284,9 @@ fn apply_peer(device: &Device, request: PeerRequest) -> Result<(), UapiError> {
     }
     if let Some(range) = request.persistent_keepalive_interval {
         peer.set_persistent_keepalive_range(Some((range.lo(), range.hi())));
+    }
+    if let Some(value) = request.advanced_security {
+        peer.set_advanced_security(Some(value));
     }
     if request.replace_allowed_ips {
         device.allowed_ips().remove_by_peer(peer.id());

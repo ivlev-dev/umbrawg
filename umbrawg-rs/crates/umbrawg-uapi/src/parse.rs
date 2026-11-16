@@ -175,6 +175,9 @@ fn apply_peer_line(peer: &mut PeerRequest, key: &str, value: &str) -> Result<(),
         "persistent_keepalive_interval" => {
             peer.persistent_keepalive_interval = Some(parse_u16_range(key, value)?);
         }
+        "advanced_security" => {
+            peer.advanced_security = Some(parse_bool(key, value)?);
+        }
         "replace_allowed_ips" => {
             require_true(key, value)?;
             peer.replace_allowed_ips = true;
@@ -316,6 +319,7 @@ public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 preshared_key=606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f
 endpoint=192.0.2.1:51820
 persistent_keepalive_interval=25
+advanced_security=on
 protocol_version=1
 replace_allowed_ips=true
 allowed_ip=10.0.0.0/8
@@ -386,6 +390,7 @@ allowed_ip=fd00::/64
             peer.persistent_keepalive_interval,
             Some(U16Range::single(25))
         );
+        assert_eq!(peer.advanced_security, Some(true));
         assert_eq!(peer.protocol_version, Some(1));
         assert!(peer.replace_allowed_ips);
         assert_eq!(peer.allowed_ips.len(), 2);
@@ -469,6 +474,25 @@ allowed_ip=fd00::/64
         ];
         for case in cases {
             assert!(parse(case).is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn parses_advanced_security_booleans() {
+        let key = "public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\n";
+        for value in ["on", "true", "1", "t", "T"] {
+            let request = format!("{key}advanced_security={value}\n\n");
+            let parsed = parse(&request).expect("valid advanced_security");
+            assert_eq!(parsed.peers[0].advanced_security, Some(true), "{value}");
+        }
+        for value in ["off", "false", "0", "f", "F"] {
+            let request = format!("{key}advanced_security={value}\n\n");
+            let parsed = parse(&request).expect("valid advanced_security");
+            assert_eq!(parsed.peers[0].advanced_security, Some(false), "{value}");
+        }
+        for value in ["maybe", "", "2", "-1"] {
+            let request = format!("{key}advanced_security={value}\n\n");
+            assert!(parse(&request).is_err(), "{value}");
         }
     }
 

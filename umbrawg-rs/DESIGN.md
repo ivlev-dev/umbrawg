@@ -94,6 +94,10 @@ UDP socket ──> rx-поток: recvmmsg + detect + index lookup
 - Interop-матрица: Rust↔kernel, kernel↔Rust, Rust↔Rust, kernel↔kernel,
   с обфускацией и без, 1/4/5 пиров.
 - `uwg` (Rust CLI в отдельном репозитории `umbrawg-tools`) конфигурирует и демон, и модуль.
+- UAPI-ключ пира `advanced_security` принимается в `set=1` и отражается в
+  `get=1` (только если был задан). Userspace-демон хранит его как
+  информационное поле и не реализует advanced security; реальная защита
+  доступна только в модуле ядра (`UWGPEER_A_ADVANCED_SECURITY`).
 
 ## Производительность
 

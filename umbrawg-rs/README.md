@@ -99,6 +99,15 @@ umbrawg uwg0
 Configure with `uwg` from `umbrawg-tools` (kernel module and userspace share the
 same CLI and configuration format).
 
+## UAPI: `advanced_security`
+
+Демон принимает ключ `advanced_security` в `set=1` для пира (`on`/`off`,
+`true`/`false`, `1`/`0`) и возвращает `advanced_security=1|0` в `get=1`, если
+значение было задано. Поле информационное: userspace-демон не реализует
+advanced security и не меняет обработку пакетов или таймеры. Для реального
+включения нужен модуль ядра. Если значение не задавалось, строка в `get=1` не
+выводится — это сохраняет совместимость с Go-клиентами и `uwg`.
+
 ## systemd
 
 Юнит-шаблон `systemd/umbrawg@.service` запускает демон для интерфейса `%i`:
