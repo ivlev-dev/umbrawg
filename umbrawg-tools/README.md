@@ -1,5 +1,7 @@
 # umbrawg-tools
 
+![CI](https://github.com/ivlev-dev/umbrawg-tools/actions/workflows/rust-ci.yml/badge.svg) ![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)
+
 Rust-утилиты для настройки UmbraWG: `uwg` и `uwg-quick`.
 
 Работают с обоими бэкендами:
