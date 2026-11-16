@@ -18,6 +18,7 @@ uwg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr)
 
 	for_each_possible_cpu(cpu) {
 		per_cpu_ptr(worker, cpu)->ptr = ptr;
+		atomic_set(&per_cpu_ptr(worker, cpu)->pending, 0);
 		INIT_WORK(&per_cpu_ptr(worker, cpu)->work, function);
 	}
 	return worker;
@@ -63,6 +64,7 @@ int uwg_packet_queue_init_percpu(struct crypt_queue *queue,
 	for_each_possible_cpu(cpu) {
 		INIT_WORK(&per_cpu_ptr(queue->worker, cpu)->work, function);
 		per_cpu_ptr(queue->worker, cpu)->ptr = NULL;
+		atomic_set(&per_cpu_ptr(queue->worker, cpu)->pending, 0);
 	}
 
 	for_each_possible_cpu(cpu) {
@@ -176,3 +178,4 @@ struct sk_buff *uwg_prev_queue_dequeue(struct prev_queue *queue)
 
 #undef NEXT
 #undef STUB
+#include "selftest/queueing.c"

@@ -488,25 +488,31 @@ void uwg_packet_tx_worker(struct work_struct *work)
 
 void uwg_packet_encrypt_worker(struct work_struct *work)
 {
-	struct crypt_queue *queue = container_of(work, struct multicore_worker,
-						 work)->ptr;
+	struct multicore_worker *worker = container_of(work,
+						       struct multicore_worker,
+						       work);
+	struct crypt_queue *queue = worker->ptr;
 	struct sk_buff *first, *skb, *next;
 
-	while ((first = ptr_ring_consume_bh(&queue->ring)) != NULL) {
-		enum packet_state state = PACKET_STATE_CRYPTED;
+	for (;;) {
+		while ((first = ptr_ring_consume_bh(&queue->ring)) != NULL) {
+			enum packet_state state = PACKET_STATE_CRYPTED;
 
-		skb_list_walk_safe(first, skb, next) {
-			if (likely(encrypt_packet(skb, PACKET_CB(first)->keypair))) {
-				uwg_reset_packet(skb, true);
-			} else {
-				state = PACKET_STATE_DEAD;
-				break;
+			skb_list_walk_safe(first, skb, next) {
+				if (likely(encrypt_packet(skb, PACKET_CB(first)->keypair))) {
+					uwg_reset_packet(skb, true);
+				} else {
+					state = PACKET_STATE_DEAD;
+					break;
+				}
 			}
-		}
-		uwg_queue_enqueue_per_peer_tx(first, state);
+			uwg_queue_enqueue_per_peer_tx(first, state);
 
-		if (need_resched())
-			cond_resched();
+			if (need_resched())
+				cond_resched();
+		}
+		if (uwg_queue_wakeup_drained(worker, queue))
+			break;
 	}
 }
 
