@@ -919,6 +919,15 @@ mod tests {
     }
 
     #[test]
+    fn showconf_prints_advanced_security_states() {
+        let mut device = sample_device();
+        device.peers[0].advanced_security = Some(false);
+        assert!(showconf(&device).contains("AdvancedSecurity = off\n"));
+        device.peers[0].advanced_security = None;
+        assert!(!showconf(&device).contains("AdvancedSecurity"));
+    }
+
+    #[test]
     fn showconf_contains_obfuscation() {
         let output = showconf(&sample_device());
         assert!(output.starts_with("[Interface]\n"));

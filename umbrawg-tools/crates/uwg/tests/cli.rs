@@ -119,6 +119,17 @@ fn get_response() -> String {
          errno=0\n\n"
     )
 }
+
+fn get_response_with_advanced_security(value: &str) -> String {
+    format!(
+        "listen_port=51820\n\
+         public_key={RUNTIME_PEER_HEX}\n\
+         advanced_security={value}\n\
+         endpoint=192.0.2.1:51820\n\
+         allowed_ip=10.0.0.0/8\n\
+         errno=0\n\n"
+    )
+}
 fn write_config(directory: &Path, peers: &[(&str, &str)]) -> PathBuf {
     let mut text = format!("[Interface]\nPrivateKey = {PRIVATE}\n");
     for (key, allowed_ips) in peers {
@@ -251,7 +262,7 @@ fn syncconf_with_an_empty_runtime_replaces_all_peers() {
 }
 
 #[test]
-fn config_commands_accept_advanced_security_on_userspace() {
+fn config_commands_send_advanced_security_to_userspace() {
     let directory = runtime_dir();
     let path = directory.join("uwg0.conf");
     std::fs::write(
@@ -271,18 +282,73 @@ fn config_commands_accept_advanced_security_on_userspace() {
             "{command} stderr: {}",
             stderr(&output)
         );
-        assert_eq!(
-            stderr(&output),
-            "Warning: AdvancedSecurity is only supported by the kernel module; ignoring it for userspace interface `uwg0'\n",
-            "{command}"
-        );
+        assert!(stderr(&output).is_empty(), "{command}");
         let requests = fake.set_requests();
         assert_eq!(requests.len(), 1, "{command}");
-        assert!(!requests[0].contains("advanced_security"), "{command}");
-        assert!(!requests[0].contains("advanced-security"), "{command}");
+        assert!(requests[0].contains("advanced_security=1\n"), "{command}");
         assert!(requests[0].contains("allowed_ip=10.1.0.0/16"), "{command}");
     }
     let _ = std::fs::remove_dir_all(&directory);
+}
+
+#[test]
+fn setconf_sends_explicit_advanced_security_off() {
+    let directory = runtime_dir();
+    let fake = FakeUapi::start(&directory, get_response());
+    let path = directory.join("uwg0.conf");
+    std::fs::write(
+        &path,
+        format!(
+            "[Interface]\nPrivateKey = {PRIVATE}\n\n[Peer]\nPublicKey = {PEER_ONE}\nAdvancedSecurity = off\nAllowedIPs = 10.1.0.0/16\n"
+        ),
+    )
+    .expect("write config");
+
+    let output = run(
+        &directory,
+        &["setconf", "uwg0", path.to_str().expect("path")],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(stderr(&output).is_empty());
+    let requests = fake.set_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains("advanced_security=0\n"));
+}
+
+#[test]
+fn setconf_omits_advanced_security_when_unset() {
+    let directory = runtime_dir();
+    let fake = FakeUapi::start(&directory, get_response());
+    let config = write_config(&directory, &[(PEER_ONE, "10.1.0.0/16")]);
+
+    let output = run(
+        &directory,
+        &["setconf", "uwg0", config.to_str().expect("path")],
+    );
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let requests = fake.set_requests();
+    assert_eq!(requests.len(), 1);
+    assert!(!requests[0].contains("advanced_security"));
+}
+
+#[test]
+fn set_sends_advanced_security_to_userspace() {
+    let directory = runtime_dir();
+    let fake = FakeUapi::start(&directory, get_response());
+    for (value, expected) in [
+        ("on", "advanced_security=1\n"),
+        ("off", "advanced_security=0\n"),
+    ] {
+        let output = run(
+            &directory,
+            &["set", "uwg0", "peer", PEER_ONE, "advanced-security", value],
+        );
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        assert!(stderr(&output).is_empty(), "{value}");
+        let requests = fake.set_requests();
+        let request = requests.last().expect("request");
+        assert!(request.contains(expected), "{value}: {request}");
+    }
 }
 
 #[test]
@@ -326,6 +392,47 @@ fn show_reports_unsupported_advanced_security_for_uapi() {
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
     assert_eq!(stdout, format!("{RUNTIME_PEER_BASE64}\tunsupported\n"));
+}
+
+#[test]
+fn show_reports_advanced_security_from_uapi() {
+    for (value, expected) in [("1", "yes\n"), ("0", "no\n")] {
+        let directory = runtime_dir();
+        let _fake = FakeUapi::start(&directory, get_response_with_advanced_security(value));
+
+        let output = run(&directory, &["show", "uwg0", "advanced-security"]);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        let stdout = String::from_utf8(output.stdout).expect("utf-8");
+        assert_eq!(
+            stdout,
+            format!("{RUNTIME_PEER_BASE64}\t{expected}"),
+            "{value}"
+        );
+
+        let output = run(&directory, &["show", "uwg0"]);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        let stdout = String::from_utf8(output.stdout).expect("utf-8");
+        assert!(
+            stdout.contains(&format!("  advanced security: {}", expected.trim_end())),
+            "{value}: {stdout}"
+        );
+    }
+}
+
+#[test]
+fn showconf_prints_advanced_security_from_uapi() {
+    for (value, expected) in [
+        ("1", "AdvancedSecurity = on\n"),
+        ("0", "AdvancedSecurity = off\n"),
+    ] {
+        let directory = runtime_dir();
+        let _fake = FakeUapi::start(&directory, get_response_with_advanced_security(value));
+
+        let output = run(&directory, &["showconf", "uwg0"]);
+        assert!(output.status.success(), "stderr: {}", stderr(&output));
+        let stdout = String::from_utf8(output.stdout).expect("utf-8");
+        assert!(stdout.contains(expected), "{value}: {stdout}");
+    }
 }
 
 #[test]
