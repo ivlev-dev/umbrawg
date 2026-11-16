@@ -6,12 +6,13 @@
 
 use std::fs;
 use std::io::{self, Write};
+use std::net::Shutdown;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
 
 use crate::error::UapiError;
@@ -64,11 +65,13 @@ pub fn validate_interface_name(name: &str) -> Result<(), UapiError> {
 ///
 /// Dropping the listener closes the socket and removes the socket file if it
 /// still belongs to this listener.
+#[derive(Debug)]
 pub struct UapiListener {
     listener: UnixListener,
     path: PathBuf,
     identity: (u64, u64),
     stop: Arc<AtomicBool>,
+    active: Arc<Mutex<Option<UnixStream>>>,
     wake_reader: UnixStream,
     wake_writer: UnixStream,
 }
@@ -102,6 +105,7 @@ impl UapiListener {
             path,
             identity,
             stop: Arc::new(AtomicBool::new(false)),
+            active: Arc::new(Mutex::new(None)),
             wake_reader,
             wake_writer,
         })
@@ -117,6 +121,7 @@ impl UapiListener {
     pub fn handle(&self) -> Result<ServerHandle, UapiError> {
         Ok(ServerHandle {
             stop: Arc::clone(&self.stop),
+            active: Arc::clone(&self.active),
             wake: self.wake_writer.try_clone()?,
             join: None,
         })
@@ -165,10 +170,21 @@ impl UapiListener {
                 continue;
             }
 
+            let Ok(active) = stream.try_clone() else {
+                log::debug!("UAPI could not clone connection for shutdown tracking");
+                continue;
+            };
+            set_active(&self.active, Some(active));
+            if self.stop.load(Ordering::SeqCst) {
+                break;
+            }
+
             if let Err(error) = serve_stream(stream, control) {
                 log::debug!("UAPI connection closed with error: {error}");
             }
+            set_active(&self.active, None);
         }
+        set_active(&self.active, None);
         Ok(())
     }
 
@@ -244,8 +260,10 @@ impl Drop for UapiListener {
 /// Handle used to stop a running listener.
 ///
 /// Dropping the handle requests shutdown and waits for the listener thread.
+#[derive(Debug)]
 pub struct ServerHandle {
     stop: Arc<AtomicBool>,
+    active: Arc<Mutex<Option<UnixStream>>>,
     wake: UnixStream,
     join: Option<JoinHandle<()>>,
 }
@@ -254,6 +272,12 @@ impl ServerHandle {
     /// Requests shutdown of the listener.
     pub fn shutdown(&self) -> Result<(), UapiError> {
         self.stop.store(true, Ordering::SeqCst);
+        {
+            let active = lock_active(&self.active);
+            if let Some(stream) = active.as_ref() {
+                let _ = stream.shutdown(Shutdown::Both);
+            }
+        }
         let mut wake = &self.wake;
         match wake.write_all(b"x") {
             Ok(()) => Ok(()),
@@ -296,6 +320,14 @@ fn create_directory(directory: &Path) -> Result<(), UapiError> {
     fs::create_dir_all(directory)?;
     fs::set_permissions(directory, fs::Permissions::from_mode(0o700))?;
     Ok(())
+}
+
+fn lock_active(slot: &Mutex<Option<UnixStream>>) -> MutexGuard<'_, Option<UnixStream>> {
+    slot.lock().unwrap_or_else(|error| error.into_inner())
+}
+
+fn set_active(slot: &Mutex<Option<UnixStream>>, stream: Option<UnixStream>) {
+    *lock_active(slot) = stream;
 }
 
 fn remove_stale_socket(path: &Path) -> Result<(), UapiError> {
@@ -366,5 +398,20 @@ fn peer_uid(stream: &UnixStream) -> Result<u32, UapiError> {
 
 #[cfg(not(target_os = "linux"))]
 fn peer_uid(_stream: &UnixStream) -> Result<u32, UapiError> {
-    Ok(0)
+    Err(UapiError::Internal(
+        "SO_PEERCRED authorization is only implemented on Linux".to_owned(),
+    ))
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn peer_uid_matches_effective_uid() {
+        let (first, _second) = UnixStream::pair().expect("socket pair");
+        // SAFETY: `geteuid` has no memory-safety preconditions.
+        let uid = unsafe { libc::geteuid() };
+        assert_eq!(peer_uid(&first).expect("peer credentials"), uid);
+    }
 }

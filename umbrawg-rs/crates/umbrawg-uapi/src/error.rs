@@ -31,6 +31,9 @@ pub enum UapiError {
     /// The request used a key that the protocol does not define.
     #[error("unknown UAPI key: `{0}`")]
     UnknownKey(String),
+    /// The request conflicts with the effective device configuration.
+    #[error("invalid UAPI configuration: {0}")]
+    InvalidConfiguration(String),
     /// The requested socket or listen port is already in use.
     #[error("address is already in use")]
     AddressInUse,
@@ -51,7 +54,9 @@ impl UapiError {
         match self {
             Self::Io(_) => -i64::from(libc::EIO),
             Self::Protocol(_) => -i64::from(libc::EPROTO),
-            Self::InvalidValue { .. } | Self::UnknownKey(_) => -i64::from(libc::EINVAL),
+            Self::InvalidValue { .. }
+            | Self::UnknownKey(_)
+            | Self::InvalidConfiguration(_) => -i64::from(libc::EINVAL),
             Self::AddressInUse => -i64::from(libc::EADDRINUSE),
             Self::PermissionDenied => -i64::from(libc::EACCES),
             Self::Internal(_) => ERRNO_UNKNOWN,

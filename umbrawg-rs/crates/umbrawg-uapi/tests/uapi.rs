@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 //! End-to-end tests for the UAPI listener, parser and serializer.
 
 use std::fs;
@@ -6,14 +8,15 @@ use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use umbrawg_crypto::{Key, PublicKey};
 use umbrawg_uapi::{
     format_get_response, AllowedIp, AllowedIpChange, DeviceControl, DeviceSnapshot,
-    ObfuscationSnapshot, PeerSnapshot, SetRequest, TimingSnapshot, U16Range, UapiError,
-    UapiListener,
+    ObfuscationSnapshot, PeerSnapshot, SetRequest, SpecialPacketUpdate, TimingSnapshot, U16Range,
+    UapiError, UapiListener,
 };
 
 const SET_REQUEST: &str = "\
@@ -28,12 +31,12 @@ jmax=70
 s1=92
 s2=115
 s3=44
-s4=9
+s4=16
 h1=61220074-118999195
 h2=605047389-945520346
 h3=1477291385-1814368140
 h4=1951993942-1997499713
-i1=<b 0x1><c>
+i1=<b 0x01><c>
 i2=<r 8>
 i3=<rc 4>
 i4=<rd 3>
@@ -205,21 +208,11 @@ impl DeviceControl for MockControl {
         if let Some(value) = obfuscation.h4 {
             state.obfuscation.h4 = value;
         }
-        if let Some(value) = obfuscation.i1 {
-            state.obfuscation.i1 = Some(value);
-        }
-        if let Some(value) = obfuscation.i2 {
-            state.obfuscation.i2 = Some(value);
-        }
-        if let Some(value) = obfuscation.i3 {
-            state.obfuscation.i3 = Some(value);
-        }
-        if let Some(value) = obfuscation.i4 {
-            state.obfuscation.i4 = Some(value);
-        }
-        if let Some(value) = obfuscation.i5 {
-            state.obfuscation.i5 = Some(value);
-        }
+        apply_special_packet(&mut state.obfuscation.i1, obfuscation.i1);
+        apply_special_packet(&mut state.obfuscation.i2, obfuscation.i2);
+        apply_special_packet(&mut state.obfuscation.i3, obfuscation.i3);
+        apply_special_packet(&mut state.obfuscation.i4, obfuscation.i4);
+        apply_special_packet(&mut state.obfuscation.i5, obfuscation.i5);
         if let Some(key) = obfuscation.header_protection_key {
             state.obfuscation.header_protection_key = (!key.is_zero()).then_some(key);
         }
@@ -298,6 +291,14 @@ impl DeviceControl for MockControl {
         }
 
         Ok(())
+    }
+}
+
+fn apply_special_packet(slot: &mut Option<String>, update: SpecialPacketUpdate) {
+    match update {
+        SpecialPacketUpdate::Keep => {}
+        SpecialPacketUpdate::Clear => *slot = None,
+        SpecialPacketUpdate::Set(value) => *slot = Some(value),
     }
 }
 
@@ -405,12 +406,12 @@ fn round_trips_every_31_field() {
         "s1=92\n",
         "s2=115\n",
         "s3=44\n",
-        "s4=9\n",
+        "s4=16\n",
         "h1=61220074-118999195\n",
         "h2=605047389-945520346\n",
         "h3=1477291385-1814368140\n",
         "h4=1951993942-1997499713\n",
-        "i1=<b 0x1><c>\n",
+        "i1=<b 0x01><c>\n",
         "i2=<r 8>\n",
         "i3=<rc 4>\n",
         "i4=<rd 3>\n",
@@ -441,7 +442,7 @@ fn round_trips_every_31_field() {
         assert!(response.contains(line), "missing `{line}` in:\n{response}");
     }
     assert_eq!(
-        response,
+        format!("{response}\n"),
         format_get_response(&control.snapshot()),
         "wire format must match the serializer"
     );
@@ -475,7 +476,7 @@ fn reports_protocol_errors_over_the_socket() {
         .expect("malformed line");
     assert_eq!(read_response(&mut reader), "errno=-71\n");
 
-    stream.write_all(b"get=1\n\nextra\n").expect("bad get");
+    stream.write_all(b"get=1\nextra\n").expect("bad get");
     let response = read_response(&mut reader);
     assert_eq!(response, "errno=-71\n");
 
@@ -526,4 +527,236 @@ fn closes_on_unknown_operation() {
 
     drop(reader);
     handle.join().expect("listener thread");
+}
+
+#[test]
+fn round_trips_boundary_values() {
+    let request = "\
+set=1
+private_key=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+listen_port=65535
+fwmark=4294967295
+replace_peers=true
+jc=65535
+jmin=65535
+jmax=65535
+s1=65535
+s2=65535
+s3=65535
+s4=65535
+h1=0-1000000
+h2=1000001-2000000
+h3=2000001-3000000
+h4=3000001-4294967295
+i1=<b 0x00ff>
+i2=<r 1>
+i3=<rc 2>
+i4=<rd 3>
+i5=<t>
+header_protection_key=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+content_padding_addition=0-65535
+rekey_after_time=0-65535
+rekey_timeout=0-65535
+reject_after_time=0-65535
+keepalive_timeout=0-65535
+max_handshake_attempts=0-65535
+random_trailers=1
+disable_cookies=1
+public_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+preshared_key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+endpoint=[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535
+persistent_keepalive_interval=0-65535
+protocol_version=1
+replace_allowed_ips=true
+allowed_ip=0.0.0.0/0
+allowed_ip=::/0
+
+";
+    let expected = [
+        "private_key=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n",
+        "listen_port=65535\n",
+        "fwmark=4294967295\n",
+        "jc=65535\n",
+        "jmin=65535\n",
+        "jmax=65535\n",
+        "s1=65535\n",
+        "s2=65535\n",
+        "s3=65535\n",
+        "s4=65535\n",
+        "h1=0-1000000\n",
+        "h2=1000001-2000000\n",
+        "h3=2000001-3000000\n",
+        "h4=3000001-4294967295\n",
+        "i1=<b 0x00ff>\n",
+        "i2=<r 1>\n",
+        "i3=<rc 2>\n",
+        "i4=<rd 3>\n",
+        "i5=<t>\n",
+        "header_protection_key=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\n",
+        "content_padding_addition=0-65535\n",
+        "rekey_after_time=0-65535\n",
+        "rekey_timeout=0-65535\n",
+        "reject_after_time=0-65535\n",
+        "keepalive_timeout=0-65535\n",
+        "max_handshake_attempts=0-65535\n",
+        "random_trailers=1\n",
+        "disable_cookies=1\n",
+        "public_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        "preshared_key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
+        "protocol_version=1\n",
+        "endpoint=[ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff]:65535\n",
+        "last_handshake_time_sec=0\n",
+        "last_handshake_time_nsec=0\n",
+        "tx_bytes=0\n",
+        "rx_bytes=0\n",
+        "persistent_keepalive_interval=0-65535\n",
+        "allowed_ip=0.0.0.0/0\n",
+        "allowed_ip=::/0\n",
+        "errno=0\n",
+    ]
+    .concat();
+
+    let directory = TempDir::new("boundary");
+    let control = MockControl::new();
+    let handle = UapiListener::bind(directory.path(), "uwg0")
+        .expect("bind")
+        .spawn(control)
+        .expect("spawn");
+    let socket_path = directory.path().join("uwg0.sock");
+
+    let mut stream = UnixStream::connect(&socket_path).expect("connect");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    stream.write_all(request.as_bytes()).expect("set");
+    assert_eq!(read_response(&mut reader), "errno=0\n");
+
+    stream.write_all(b"get=1\n\n").expect("get");
+    assert_eq!(read_response(&mut reader), expected);
+
+    drop(reader);
+    drop(stream);
+    handle.join().expect("listener thread");
+}
+
+#[test]
+fn clears_optional_fields() {
+    let directory = TempDir::new("clear");
+    let control = MockControl::new();
+    let handle = UapiListener::bind(directory.path(), "uwg0")
+        .expect("bind")
+        .spawn(control)
+        .expect("spawn");
+    let socket_path = directory.path().join("uwg0.sock");
+
+    let mut stream = UnixStream::connect(&socket_path).expect("connect");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    stream.write_all(SET_REQUEST.as_bytes()).expect("set");
+    assert_eq!(read_response(&mut reader), "errno=0\n");
+
+    stream
+        .write_all(
+            b"set=1\nprivate_key=0000000000000000000000000000000000000000000000000000000000000000\ni1=\nheader_protection_key=0000000000000000000000000000000000000000000000000000000000000000\npublic_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\npreshared_key=0000000000000000000000000000000000000000000000000000000000000000\npersistent_keepalive_interval=0\n\n",
+        )
+        .expect("clear");
+    assert_eq!(read_response(&mut reader), "errno=0\n");
+
+    stream.write_all(b"get=1\n\n").expect("get");
+    let response = read_response(&mut reader);
+    assert!(!response.contains("private_key="), "{response}");
+    assert!(!response.contains("i1="), "{response}");
+    assert!(!response.contains("header_protection_key="), "{response}");
+    assert!(!response.contains("persistent_keepalive_interval="), "{response}");
+    assert!(response.contains("i2=<r 8>\n"), "{response}");
+    assert!(
+        response.contains(&format!("preshared_key={}\n", "00".repeat(32))),
+        "{response}"
+    );
+
+    drop(reader);
+    drop(stream);
+    handle.join().expect("listener thread");
+}
+
+#[test]
+fn rejects_invalid_merged_obfuscation() {
+    let directory = TempDir::new("semantic");
+    let control = MockControl::new();
+    let handle = UapiListener::bind(directory.path(), "uwg0")
+        .expect("bind")
+        .spawn(control)
+        .expect("spawn");
+    let socket_path = directory.path().join("uwg0.sock");
+
+    let mut stream = UnixStream::connect(&socket_path).expect("connect");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+
+    stream.write_all(b"set=1\nh1=1-2\n\n").expect("overlap");
+    assert_eq!(read_response(&mut reader), "errno=-22\n");
+    stream.write_all(b"get=1\n\n").expect("get");
+    let response = read_response(&mut reader);
+    assert!(response.contains("h1=1\n"), "{response}");
+    assert!(!response.contains("h1=1-2\n"), "{response}");
+
+    let key = "cc".repeat(32);
+    let small = format!(
+        "set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=11\n\n"
+    );
+    stream.write_all(small.as_bytes()).expect("small padding");
+    assert_eq!(read_response(&mut reader), "errno=-22\n");
+
+    let valid = format!(
+        "set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=12\n\n"
+    );
+    stream.write_all(valid.as_bytes()).expect("valid padding");
+    assert_eq!(read_response(&mut reader), "errno=0\n");
+
+    stream.write_all(b"get=1\n\n").expect("get");
+    let response = read_response(&mut reader);
+    assert!(
+        response.contains(&format!("header_protection_key={key}\n")),
+        "{response}"
+    );
+    assert!(response.contains("s4=12\n"), "{response}");
+
+    drop(reader);
+    drop(stream);
+    handle.join().expect("listener thread");
+}
+
+#[test]
+fn shutdown_closes_idle_connection() {
+    let directory = TempDir::new("shutdown");
+    let control = MockControl::new();
+    let handle = UapiListener::bind(directory.path(), "uwg0")
+        .expect("bind")
+        .spawn(control)
+        .expect("spawn");
+    let socket_path = directory.path().join("uwg0.sock");
+
+    let mut stream = UnixStream::connect(&socket_path).expect("connect");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+    stream.write_all(b"get=1\n\n").expect("get");
+    let _ = read_response(&mut reader);
+
+    let (finished, wait) = mpsc::channel();
+    let joiner = std::thread::spawn(move || {
+        let _ = handle.join();
+        let _ = finished.send(());
+    });
+    wait.recv_timeout(Duration::from_secs(5))
+        .expect("listener must stop with an idle client");
+    joiner.join().expect("joiner thread");
+
+    drop(reader);
+    drop(stream);
+    assert!(!socket_path.exists(), "socket must be removed on shutdown");
+}
+
+#[test]
+fn refuses_non_socket_path() {
+    let directory = TempDir::new("non-socket");
+    let socket_path = directory.path().join("uwg0.sock");
+    fs::write(&socket_path, b"not a socket").expect("write");
+    let error = UapiListener::bind(directory.path(), "uwg0").expect_err("must reject");
+    assert!(matches!(error, UapiError::Protocol(_)));
+    assert!(socket_path.exists(), "foreign file must not be removed");
 }

@@ -44,11 +44,7 @@ pub fn format_errno(errno: i64) -> String {
 }
 
 fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
-    if let Some(key) = snapshot
-        .private_key
-        .as_ref()
-        .filter(|key| !key.is_zero())
-    {
+    if let Some(key) = snapshot.private_key.as_ref().filter(|key| !key.is_zero()) {
         write_key(output, "private_key", key.as_bytes());
     }
     if snapshot.listen_port != 0 {
@@ -136,7 +132,11 @@ fn write_peer(output: &mut String, peer: &PeerSnapshot) {
     if let Some(endpoint) = peer.endpoint {
         write_field(output, "endpoint", endpoint);
     }
-    write_field(output, "last_handshake_time_sec", peer.last_handshake_time_sec);
+    write_field(
+        output,
+        "last_handshake_time_sec",
+        peer.last_handshake_time_sec,
+    );
     write_field(
         output,
         "last_handshake_time_nsec",
@@ -177,18 +177,15 @@ fn write_key(output: &mut String, name: &str, key: &[u8; 32]) {
 mod tests {
     use super::*;
     use crate::types::{
-        AllowedIp, ObfuscationSnapshot, PeerSnapshot, TimingSnapshot, U32Range, U16Range,
+        AllowedIp, ObfuscationSnapshot, PeerSnapshot, TimingSnapshot, U16Range, U32Range,
     };
     use umbrawg_crypto::{Key, PublicKey};
 
-    const PRIVATE_KEY: &str =
-        "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    const PRIVATE_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
     const HEADER_PROTECTION_KEY: &str =
         "202122232425262728292a2b2c2d2e2f303132333435363738393a3b3c3d3e3f";
-    const PEER_KEY: &str =
-        "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f";
-    const PRESHARED_KEY: &str =
-        "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f";
+    const PEER_KEY: &str = "404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f";
+    const PRESHARED_KEY: &str = "606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f";
 
     /// Reply parsed by the `umbrawg-ctl` test-suite
     /// (`umbrawg-tools/crates/umbrawg-ctl/src/uapi.rs`, `GET_RESPONSE`).
@@ -296,9 +293,7 @@ errno=0
                 i3: None,
                 i4: None,
                 i5: None,
-                header_protection_key: Some(
-                    Key::from_hex(HEADER_PROTECTION_KEY).expect("valid"),
-                ),
+                header_protection_key: Some(Key::from_hex(HEADER_PROTECTION_KEY).expect("valid")),
                 content_padding_addition: U16Range::new(0, 100),
                 random_trailers: true,
                 disable_cookies: false,

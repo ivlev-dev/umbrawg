@@ -9,6 +9,7 @@ members = [
     "crates/umbrawg-tun",
     "crates/umbrawg-uapi",
     "crates/umbrawg",
+    "crates/umbrawg-bench",
 ]
 
 [workspace.package]

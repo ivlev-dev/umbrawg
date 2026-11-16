@@ -6,10 +6,11 @@
 //! addresses.
 
 use std::fmt;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::str::FromStr;
 
 use umbrawg_crypto::{Key, PublicKey};
+use umbrawg_proto::header_protection::MIN_PADDING;
 use umbrawg_proto::messages::{
     MESSAGE_DATA, MESSAGE_HANDSHAKE_COOKIE, MESSAGE_HANDSHAKE_INITIATION, MESSAGE_HANDSHAKE_RESPONSE,
 };
@@ -207,11 +208,17 @@ pub struct AllowedIp {
 
 impl AllowedIp {
     /// Creates a prefix after validating the prefix length.
+    ///
+    /// Host bits outside the prefix are cleared, so `10.1.2.3/8` becomes
+    /// `10.0.0.0/8`, matching the Go allowed-IP table.
     pub fn new(address: IpAddr, cidr: u8) -> Result<Self, ValueError> {
         if cidr > max_prefix_len(address) {
             return Err(ValueError::AllowedIp(format!("{address}/{cidr}")));
         }
-        Ok(Self { address, cidr })
+        Ok(Self {
+            address: mask_address(address, cidr),
+            cidr,
+        })
     }
 
     /// Returns the network address.
@@ -279,6 +286,31 @@ fn parse_cidr(text: &str, address: IpAddr, original: &str) -> Result<u8, ValueEr
         return Err(ValueError::AllowedIp(original.to_owned()));
     }
     Ok(cidr as u8)
+}
+
+fn mask_address(address: IpAddr, cidr: u8) -> IpAddr {
+    match address {
+        IpAddr::V4(address) => IpAddr::V4(mask_v4(address, cidr)),
+        IpAddr::V6(address) => IpAddr::V6(mask_v6(address, cidr)),
+    }
+}
+
+fn mask_v4(address: Ipv4Addr, cidr: u8) -> Ipv4Addr {
+    let mask = if cidr == 0 {
+        0
+    } else {
+        u32::MAX << (32 - u32::from(cidr))
+    };
+    Ipv4Addr::from(u32::from(address) & mask)
+}
+
+fn mask_v6(address: Ipv6Addr, cidr: u8) -> Ipv6Addr {
+    let mask = if cidr == 0 {
+        0
+    } else {
+        u128::MAX << (128 - u32::from(cidr))
+    };
+    Ipv6Addr::from(u128::from(address) & mask)
 }
 
 /// Returns the maximum prefix length for `address`.
@@ -433,9 +465,23 @@ pub struct DeviceSnapshot {
     pub peers: Vec<PeerSnapshot>,
 }
 
+/// Update for one of the `i1..i5` special-packet templates.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum SpecialPacketUpdate {
+    /// The field was not mentioned and must be left unchanged.
+    #[default]
+    Keep,
+    /// The field was mentioned without tags and must be cleared.
+    Clear,
+    /// The field must be replaced with this template.
+    Set(String),
+}
+
 /// Obfuscation 3.1 fields present in a `set=1` request.
 ///
 /// `None` means the field was not mentioned and must be left unchanged.
+/// Special-packet fields use [`SpecialPacketUpdate::Keep`] for the same
+/// purpose.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ObfuscationRequest {
     /// Number of junk packets (`jc`).
@@ -460,16 +506,16 @@ pub struct ObfuscationRequest {
     pub h3: Option<U32Range>,
     /// Magic header range for transport packets (`h4`).
     pub h4: Option<U32Range>,
-    /// Special packet template `i1`.
-    pub i1: Option<String>,
-    /// Special packet template `i2`.
-    pub i2: Option<String>,
-    /// Special packet template `i3`.
-    pub i3: Option<String>,
-    /// Special packet template `i4`.
-    pub i4: Option<String>,
-    /// Special packet template `i5`.
-    pub i5: Option<String>,
+    /// Update for special packet template `i1`.
+    pub i1: SpecialPacketUpdate,
+    /// Update for special packet template `i2`.
+    pub i2: SpecialPacketUpdate,
+    /// Update for special packet template `i3`.
+    pub i3: SpecialPacketUpdate,
+    /// Update for special packet template `i4`.
+    pub i4: SpecialPacketUpdate,
+    /// Update for special packet template `i5`.
+    pub i5: SpecialPacketUpdate,
     /// Header protection key.
     pub header_protection_key: Option<Key>,
     /// Extra random content padding range.
@@ -478,6 +524,57 @@ pub struct ObfuscationRequest {
     pub random_trailers: Option<bool>,
     /// Whether cookie replies are disabled.
     pub disable_cookies: Option<bool>,
+}
+
+/// Validates the obfuscation configuration produced by applying `request` to
+/// `current`.
+///
+/// Mirrors `ipcSetDevice.mergeWithDevice` from the Go implementation: the four
+/// magic-header ranges must not overlap, and enabling header protection
+/// requires every `s1..s4` value to be at least [`MIN_PADDING`]. Other
+/// cross-field constraints are left to the device implementation.
+pub fn validate_obfuscation_update(
+    current: &ObfuscationSnapshot,
+    request: &ObfuscationRequest,
+) -> Result<(), UapiError> {
+    let headers = [
+        ("h1", request.h1.unwrap_or(current.h1)),
+        ("h2", request.h2.unwrap_or(current.h2)),
+        ("h3", request.h3.unwrap_or(current.h3)),
+        ("h4", request.h4.unwrap_or(current.h4)),
+    ];
+    for (index, (first_name, first)) in headers.iter().enumerate() {
+        for (second_name, second) in headers.iter().skip(index + 1) {
+            if first.lo() <= second.hi() && second.lo() <= first.hi() {
+                return Err(UapiError::InvalidConfiguration(format!(
+                    "header ranges `{first_name}` and `{second_name}` overlap"
+                )));
+            }
+        }
+    }
+
+    let key = request
+        .header_protection_key
+        .as_ref()
+        .or(current.header_protection_key.as_ref());
+    if key.is_some_and(|key| !key.is_zero()) {
+        let paddings = [
+            ("s1", request.s1.unwrap_or(current.s1)),
+            ("s2", request.s2.unwrap_or(current.s2)),
+            ("s3", request.s3.unwrap_or(current.s3)),
+            ("s4", request.s4.unwrap_or(current.s4)),
+        ];
+        if let Some((name, value)) = paddings
+            .into_iter()
+            .find(|(_, value)| *value < MIN_PADDING)
+        {
+            return Err(UapiError::InvalidConfiguration(format!(
+                "`{name}` must be at least {MIN_PADDING} when header protection is enabled, got {value}"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 /// Handshake timing fields present in a `set=1` request.
@@ -547,10 +644,10 @@ impl PeerRequest {
 
 /// A parsed `set=1` request.
 ///
-/// `None` and empty values mean "not mentioned", so applying the request is a
-/// patch operation. Requests are parsed completely before
-/// [`DeviceControl::apply`] is called, which makes them transactional compared
-/// to the incremental Go parser.
+/// `None`, [`SpecialPacketUpdate::Keep`] and empty collections mean "not
+/// mentioned", so applying the request is a patch operation. Requests are
+/// parsed completely before [`DeviceControl::apply`] is called, which makes
+/// them transactional compared to the incremental Go parser.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SetRequest {
     /// Device private key; applies only when present.
@@ -652,5 +749,64 @@ mod tests {
         assert_eq!(obfuscation.h2, U32Range::single(2));
         assert_eq!(obfuscation.h3, U32Range::single(3));
         assert_eq!(obfuscation.h4, U32Range::single(4));
+    }
+
+    #[test]
+    fn masks_host_bits_in_allowed_ips() {
+        assert_eq!(
+            "10.1.2.3/8".parse::<AllowedIp>().expect("valid").to_string(),
+            "10.0.0.0/8"
+        );
+        assert_eq!(
+            "fd00::1/64".parse::<AllowedIp>().expect("valid").to_string(),
+            "fd00::/64"
+        );
+        assert_eq!(
+            "10.1.2.3/32".parse::<AllowedIp>().expect("valid").to_string(),
+            "10.1.2.3/32"
+        );
+        assert_eq!(
+            "10.1.2.3/0".parse::<AllowedIp>().expect("valid").to_string(),
+            "0.0.0.0/0"
+        );
+    }
+
+    #[test]
+    fn validates_merged_obfuscation() {
+        let current = ObfuscationSnapshot::default();
+        let mut request = ObfuscationRequest {
+            h1: Some(U32Range::new(1, 2)),
+            ..ObfuscationRequest::default()
+        };
+        assert!(matches!(
+            validate_obfuscation_update(&current, &request),
+            Err(UapiError::InvalidConfiguration(_))
+        ));
+
+        request.h1 = Some(U32Range::single(10));
+        request.h2 = Some(U32Range::single(11));
+        request.h3 = Some(U32Range::single(12));
+        request.h4 = Some(U32Range::single(13));
+        validate_obfuscation_update(&current, &request).expect("non-overlapping headers");
+
+        let key = Key::from_hex(&"aa".repeat(32)).expect("valid key");
+        request = ObfuscationRequest {
+            header_protection_key: Some(key),
+            ..ObfuscationRequest::default()
+        };
+        assert!(matches!(
+            validate_obfuscation_update(&current, &request),
+            Err(UapiError::InvalidConfiguration(_))
+        ));
+
+        request.s1 = Some(12);
+        request.s2 = Some(12);
+        request.s3 = Some(12);
+        request.s4 = Some(12);
+        validate_obfuscation_update(&current, &request).expect("sufficient padding");
+
+        request.header_protection_key = Some(Key::from_bytes([0u8; 32]));
+        request.s4 = Some(0);
+        validate_obfuscation_update(&current, &request).expect("cleared protection key");
     }
 }

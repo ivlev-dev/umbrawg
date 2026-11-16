@@ -442,25 +442,25 @@ mod tests {
 
     fn tcp4_packet(payload_len: usize, seq: u32, flags: u8) -> Vec<u8> {
         let mut packet = ipv4_header(IPPROTO_TCP, 20 + payload_len);
-        packet.extend_from_slice(&tcp_header(payload_len, seq, flags));
+        packet[20..].copy_from_slice(&tcp_header(payload_len, seq, flags));
         packet
     }
 
     fn tcp6_packet(payload_len: usize, seq: u32, flags: u8) -> Vec<u8> {
         let mut packet = ipv6_header(IPPROTO_TCP, 20 + payload_len);
-        packet.extend_from_slice(&tcp_header(payload_len, seq, flags));
+        packet[40..].copy_from_slice(&tcp_header(payload_len, seq, flags));
         packet
     }
 
     fn udp4_packet(payload_len: usize) -> Vec<u8> {
         let mut packet = ipv4_header(IPPROTO_UDP, 8 + payload_len);
-        packet.extend_from_slice(&udp_header(payload_len));
+        packet[20..].copy_from_slice(&udp_header(payload_len));
         packet
     }
 
     fn udp6_packet(payload_len: usize) -> Vec<u8> {
         let mut packet = ipv6_header(IPPROTO_UDP, 8 + payload_len);
-        packet.extend_from_slice(&udp_header(payload_len));
+        packet[40..].copy_from_slice(&udp_header(payload_len));
         packet
     }
 
@@ -547,7 +547,7 @@ mod tests {
             &packet[IPV4_SRC_ADDR_OFFSET + 4..IPV4_SRC_ADDR_OFFSET + 8],
             (packet.len() - 20) as u16,
         );
-        packet[36..38].copy_from_slice(&(pseudo as u16).to_be_bytes());
+        packet[36..38].copy_from_slice(&checksum(&[], pseudo).to_be_bytes());
         gso_none_checksum(&mut packet, 20, 16).unwrap();
         assert_eq!(checksum(&packet[20..], pseudo), 0xFFFF);
     }
@@ -573,8 +573,8 @@ mod tests {
     fn splits_tcp4_into_segments_with_valid_headers() {
         let packet = tcp4_packet(200, 1000, TCP_FLAG_PSH | 0x10);
         let mut header = tcp4_header(100);
-        let mut first = vec![0u8; 200];
-        let mut second = vec![0u8; 200];
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
         let mut bufs = [&mut first[..], &mut second[..]];
         let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
 
@@ -599,8 +599,8 @@ mod tests {
     fn splits_tcp6_into_segments_with_valid_headers() {
         let packet = tcp6_packet(200, 5000, TCP_FLAG_PSH | 0x10);
         let mut header = tcp6_header(100);
-        let mut first = vec![0u8; 200];
-        let mut second = vec![0u8; 200];
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
         let mut bufs = [&mut first[..], &mut second[..]];
         let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
 
@@ -618,8 +618,8 @@ mod tests {
     fn splits_udp4_into_segments_with_valid_headers() {
         let packet = udp4_packet(200);
         let mut header = udp4_header(100);
-        let mut first = vec![0u8; 200];
-        let mut second = vec![0u8; 200];
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
         let mut bufs = [&mut first[..], &mut second[..]];
         let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
 
@@ -635,8 +635,8 @@ mod tests {
     fn splits_udp6_into_segments_with_valid_headers() {
         let packet = udp6_packet(200);
         let mut header = udp6_header(100);
-        let mut first = vec![0u8; 200];
-        let mut second = vec![0u8; 200];
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
         let mut bufs = [&mut first[..], &mut second[..]];
         let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
 
@@ -653,8 +653,8 @@ mod tests {
     fn splits_last_segment_when_payload_is_not_a_multiple() {
         let packet = tcp4_packet(150, 1, 0x10);
         let mut header = tcp4_header(100);
-        let mut first = vec![0u8; 200];
-        let mut second = vec![0u8; 200];
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
         let mut bufs = [&mut first[..], &mut second[..]];
         let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
 
@@ -790,7 +790,7 @@ mod tests {
     fn split_rejects_non_gso_packets() {
         let packet = tcp4_packet(0, 1, 0x10);
         let mut header = VirtioNetHdr::new();
-        let mut out = vec![0u8; 128];
+        let mut out = [0u8; 128];
         let mut bufs = [&mut out[..]];
         assert_eq!(
             split_gso(&packet, &mut header, &mut bufs),
@@ -802,8 +802,8 @@ mod tests {
     fn split_reports_too_many_segments() {
         let packet = tcp4_packet(300, 1, 0x10);
         let mut header = tcp4_header(100);
-        let mut first = vec![0u8; 200];
-        let mut second = vec![0u8; 200];
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
         let mut bufs = [&mut first[..], &mut second[..]];
         assert_eq!(
             split_gso(&packet, &mut header, &mut bufs),
@@ -818,8 +818,8 @@ mod tests {
     fn split_reports_small_output_buffer() {
         let packet = tcp4_packet(200, 1, 0x10);
         let mut header = tcp4_header(100);
-        let mut first = vec![0u8; 200];
-        let mut second = vec![0u8; 10];
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 10];
         let mut bufs = [&mut first[..], &mut second[..]];
         assert_eq!(
             split_gso(&packet, &mut header, &mut bufs),
@@ -834,7 +834,7 @@ mod tests {
     fn split_rejects_gso_packet_without_payload() {
         let packet = udp4_packet(0);
         let mut header = udp4_header(100);
-        let mut out = vec![0u8; 128];
+        let mut out = [0u8; 128];
         let mut bufs = [&mut out[..]];
         assert_eq!(
             split_gso(&packet, &mut header, &mut bufs),
@@ -898,8 +898,8 @@ mod tests {
         let packet = tcp4_packet(200, 1000, TCP_FLAG_PSH | 0x10);
         let mut header = tcp4_header(100);
         header.gso_type |= VIRTIO_NET_HDR_GSO_ECN;
-        let mut first = vec![0u8; 200];
-        let mut second = vec![0u8; 200];
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
         let mut bufs = [&mut first[..], &mut second[..]];
 
         let count = split_gso(&packet, &mut header, &mut bufs).unwrap();

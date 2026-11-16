@@ -8,8 +8,8 @@ use std::io::{BufReader, Read, Write};
 
 use crate::error::UapiError;
 use crate::parse::{parse_set_request, read_line};
-use crate::serialize::{format_errno, format_get_response, format_errno_response};
-use crate::types::DeviceControl;
+use crate::serialize::{format_errno, format_errno_response, format_get_response};
+use crate::types::{validate_obfuscation_update, DeviceControl};
 
 /// Serves all operations on one accepted connection.
 ///
@@ -29,23 +29,27 @@ pub(crate) fn serve_stream<S: Read + Write>(
 
         match operation.as_str() {
             "get=1" => {
-                match read_line(&mut buffered)? {
-                    Some(trailing) if trailing.is_empty() => {}
-                    Some(trailing) => {
-                        let error = UapiError::Protocol(format!(
-                            "trailing data after `get=1`: `{trailing}`"
-                        ));
-                        write_error(buffered.get_mut(), &error)?;
-                        continue;
-                    }
-                    None => return Ok(()),
+                let result = match read_line(&mut buffered) {
+                    Ok(Some(trailing)) if trailing.is_empty() => Ok(()),
+                    Ok(Some(trailing)) => Err(UapiError::Protocol(format!(
+                        "trailing data after `get=1`: `{trailing}`"
+                    ))),
+                    Ok(None) => return Ok(()),
+                    Err(error) => Err(error),
+                };
+                if let Err(error) = result {
+                    write_error(buffered.get_mut(), &error)?;
+                    continue;
                 }
                 let response = format_get_response(&control.snapshot());
                 write_response(buffered.get_mut(), &response)?;
             }
             "set=1" => {
-                let result =
-                    parse_set_request(&mut buffered).and_then(|request| control.apply(request));
+                let result = parse_set_request(&mut buffered).and_then(|request| {
+                    let current = control.snapshot();
+                    validate_obfuscation_update(&current.obfuscation, &request.obfuscation)?;
+                    control.apply(request)
+                });
                 if let Err(error) = &result {
                     log::warn!("UAPI set=1 failed: {error}");
                 }
@@ -92,16 +96,19 @@ mod tests {
         }
     }
 
+    fn serve(input: &[u8]) -> String {
+        let mut reader = std::io::Cursor::new(input.to_vec());
+        let mut output = Vec::new();
+        {
+            let mut duplex = Duplex::new(&mut reader, &mut output);
+            serve_stream(&mut duplex, &FixedControl).expect("served");
+        }
+        String::from_utf8(output).expect("utf-8")
+    }
+
     #[test]
     fn handles_get_then_set_on_one_stream() {
-        let mut input = std::io::Cursor::new(
-            b"get=1\n\nset=1\nlisten_port=0\n\nget=1\n\n".to_vec(),
-        );
-        let mut output = Vec::new();
-        let mut duplex = Duplex::new(&mut input, &mut output);
-        serve_stream(&mut duplex, &FixedControl).expect("served");
-        drop(duplex);
-        let text = String::from_utf8(output).expect("utf-8");
+        let text = serve(b"get=1\n\nset=1\nlisten_port=0\n\nget=1\n\n");
         assert_eq!(text.matches("errno=0\n\n").count(), 2);
         assert!(text.contains("errno=-98\n\n"));
         assert!(text.contains("h1=1\n"));
@@ -109,12 +116,35 @@ mod tests {
 
     #[test]
     fn closes_on_unknown_operation() {
-        let mut input = std::io::Cursor::new(b"bogus\n".to_vec());
-        let mut output = Vec::new();
-        let mut duplex = Duplex::new(&mut input, &mut output);
-        serve_stream(&mut duplex, &FixedControl).expect("served");
-        drop(duplex);
-        assert!(output.is_empty());
+        assert!(serve(b"bogus\n").is_empty());
+    }
+
+    #[test]
+    fn rejects_overlapping_headers_before_apply() {
+        let text = serve(b"set=1\nh1=1-2\n\nget=1\n\n");
+        assert!(text.starts_with("errno=-22\n\n"), "{text}");
+        assert!(text.contains("h1=1\n"), "{text}");
+    }
+
+    #[test]
+    fn rejects_small_padding_with_header_protection() {
+        let key = "aa".repeat(32);
+        let request = format!(
+            "set=1\nheader_protection_key={key}\ns1=12\ns2=12\ns3=12\ns4=11\n\n"
+        );
+        assert_eq!(serve(request.as_bytes()), "errno=-22\n\n");
+    }
+
+    #[test]
+    fn replies_to_trailing_get_data_and_keeps_stream() {
+        let text = serve(b"get=1\nextra\nget=1\n\n");
+        assert!(text.starts_with("errno=-71\n\n"), "{text}");
+        assert!(text.contains("errno=0\n\n"), "{text}");
+    }
+
+    #[test]
+    fn replies_to_non_utf8_get_trailing_data() {
+        assert_eq!(serve(b"get=1\n\xff\n"), "errno=-71\n\n");
     }
 
     /// Minimal read/write adapter over two independent cursors.

@@ -12,7 +12,7 @@ use umbrawg_proto::SpecialPacket;
 
 use crate::error::{invalid_value, UapiError};
 use crate::types::{
-    AllowedIp, AllowedIpChange, PeerRequest, SetRequest, U16Range, U32Range,
+    AllowedIp, AllowedIpChange, PeerRequest, SetRequest, SpecialPacketUpdate, U16Range, U32Range,
 };
 
 /// Maximum accepted length of a single UAPI line.
@@ -189,6 +189,9 @@ fn apply_peer_line(peer: &mut PeerRequest, key: &str, value: &str) -> Result<(),
                 Some(spec) => (true, spec),
                 None => (false, value),
             };
+            if !spec.contains('/') {
+                return Err(invalid_value(key, value));
+            }
             let prefix = spec.parse::<AllowedIp>().map_err(|_| invalid_value(key, value))?;
             peer.allowed_ips.push(if remove {
                 AllowedIpChange::Remove(prefix)
@@ -259,12 +262,12 @@ fn parse_endpoint(key: &str, value: &str) -> Result<SocketAddr, UapiError> {
         .map_err(|_| invalid_value(key, value))
 }
 
-fn parse_special_packet(key: &str, value: &str) -> Result<Option<String>, UapiError> {
+fn parse_special_packet(key: &str, value: &str) -> Result<SpecialPacketUpdate, UapiError> {
     let packet = SpecialPacket::parse(value).map_err(|_| invalid_value(key, value))?;
     if packet.tags().is_empty() {
-        Ok(None)
+        Ok(SpecialPacketUpdate::Clear)
     } else {
-        Ok(Some(value.to_owned()))
+        Ok(SpecialPacketUpdate::Set(value.to_owned()))
     }
 }
 
@@ -298,7 +301,7 @@ h1=61220074-118999195
 h2=605047389-945520346
 h3=1477291385-1814368140
 h4=1951993942-1997499713
-i1=<b 0x1><c>
+i1=<b 0x01><c>
 i2=<r 8>
 i3=<rc 4>
 i4=<rd 3>
@@ -341,8 +344,11 @@ allowed_ip=fd00::/64
         assert_eq!(obfuscation.s4, Some(9));
         assert_eq!(obfuscation.h1, Some(U32Range::new(61_220_074, 118_999_195)));
         assert_eq!(obfuscation.h4, Some(U32Range::new(1_951_993_942, 1_997_499_713)));
-        assert_eq!(obfuscation.i1.as_deref(), Some("<b 0x1><c>"));
-        assert_eq!(obfuscation.i5.as_deref(), Some("<t>"));
+        assert_eq!(
+            obfuscation.i1,
+            SpecialPacketUpdate::Set("<b 0x01><c>".to_owned())
+        );
+        assert_eq!(obfuscation.i5, SpecialPacketUpdate::Set("<t>".to_owned()));
         assert!(obfuscation.header_protection_key.is_some());
         assert_eq!(
             obfuscation.content_padding_addition,
@@ -475,11 +481,11 @@ allowed_ip=fd00::/64
     }
 
     #[test]
-    fn empty_special_packet_disables_slot() {
+    fn empty_special_packet_clears_slot() {
         let request = parse("i1=\n\n").expect("valid");
-        assert_eq!(request.obfuscation.i1, None);
+        assert_eq!(request.obfuscation.i1, SpecialPacketUpdate::Clear);
         let request = parse("i1=plain text\n\n").expect("valid");
-        assert_eq!(request.obfuscation.i1, None);
+        assert_eq!(request.obfuscation.i1, SpecialPacketUpdate::Clear);
     }
 
     #[test]
