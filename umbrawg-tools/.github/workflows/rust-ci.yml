@@ -95,3 +95,42 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace
+
+  bench:
+    name: bench tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Check bench scripts
+        run: |
+          set -euo pipefail
+          bash -n bench/bench.sh bench/bench-lib.sh bench/tests/test-bench-lib.sh
+          bash bench/tests/test-bench-lib.sh
+          python3 -m unittest discover -s bench/tests -p 'test_*.py'
+
+  packaging:
+    name: packaging
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Install check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y groff-base fish python3-yaml python3-debian
+
+      - name: Check packaging
+        run: scripts/check-packaging.sh
