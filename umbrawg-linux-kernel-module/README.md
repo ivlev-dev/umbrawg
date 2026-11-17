@@ -138,6 +138,12 @@ Measured on 6 vCPU, underlay MTU 9000, TUN MTU 1420, `iperf3` pinned to a
 separate CPU, medians of 3–5 repeats, one peer, `obf0`/`obf1` = obfuscation
 off/on. Baseline is `master` at `2cd5972`.
 
+`master` also includes crypto-wakeup coalescing (`03654de`, merged as
+`f0333de`): `queue_work_on` runs only on the `0 → 1` transition of the pending
+flag. It is safe and gives **+2…+4%** on CPU-bound single-stream TCP and about
++1% on UDP capacity, while the aggregate effect over the whole matrix is near
+zero — an incidental optimization, not the path to multi-core scaling.
+
 | Mode | Profile | `umbrawg` | `amneziawg` |
 |---|---|---|---|
 | 1 connection | obf0 / obf1 | 2265 / 2167 | 1806 / 1764 |
@@ -145,28 +151,30 @@ off/on. Baseline is `master` at `2cd5972`.
 
 Mbit/s, TCP. The gain over the original implementation is **+13…+25%** for a
 single connection, depending on the profile and run-to-run spread — it is not a
-fixed +15%. With three connections there is no gain: the difference stays
-within the run-to-run spread.
+fixed +15%. With three connections there is no gain on one peer: the difference
+stays within the run-to-run spread.
 
-Three connections do not scale because one peer means one outer UDP socket,
-one threaded NAPI thread and one in-order queue; only the crypto stage is
-actually parallel, and RPS/XPS on veth are disabled in these runs.
+One peer is limited by its own threaded NAPI at **~2.2–2.4 Gbit/s TCP**,
+regardless of the number of connections. Sharding by peers lifts the limit:
+four peers reach **4.1–4.8 Gbit/s TCP** (+146…+178%), both with four outer
+sockets and with a single socket on the server. UDP plateaus at ~3.6 Gbit/s,
+limited by softirq and the application.
 
-Details, rejected experiments and open items: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Details, tables and rejected experiments: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
 ## Limitations
 
-- One peer is served by one outer UDP socket and one threaded NAPI thread.
-  Several connections to the same peer do not add throughput; multi-peer
-  sharding is still being measured.
+- One peer is limited by its own threaded NAPI (~2.2–2.4 Gbit/s TCP); several
+  connections to the same peer do not add throughput. Throughput scales with
+  the number of peers: four peers reach 4.1–4.8 Gbit/s TCP.
 - Threaded NAPI cannot be disabled: turning it off costs 11–13% TCP.
 - GSO aggregation is part of the send path: the module builds standard UDP GSO
   skbs (up to 23 KB) and the kernel segments them before they hit the wire, so
   no IP fragments are produced. Interoperability with `go`, `rust` and
   `amneziawg` is verified in both directions.
 - UDP GRO on the module socket is not implemented (`gro_receive` is `NULL`,
-  `ACCEPT_L4` is not set); the estimated gain is 2–4% and it is not a path to
-  multi-core scaling.
+  `ACCEPT_L4` is not set); the estimated gain for a single peer is 2–4% and
+  remains a hypothesis. It does not address multi-peer scaling.
 - Linux 7.0 or newer is required; the in-tree compatibility layer for older
   kernels has been removed.
 - UDP loss seen in benchmarks comes from `iperf3` receive-buffer overflow
