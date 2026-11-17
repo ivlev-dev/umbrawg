@@ -29,6 +29,8 @@
   `bench/verify*.sh` (проверки userspace↔userspace и userspace↔ядро),
   `bench/obf-params.conf`. Пути к соседним репозиториям не зашиты: см.
   `bench/README.md`.
+- Итоговые результаты замеров final2 (2026-11-17) зафиксированы в
+  `docs/RESULTS.md`.
 - Статические проверки упаковки: `scripts/check-packaging.sh` (версии,
   man-страницы, systemd-юниты, completions, YAML, артефакты в правилах
   сборки), job `packaging` в CI.

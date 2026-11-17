@@ -392,3 +392,9 @@ python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнени
 Обзор четырёх компонентов (модуль ядра, Rust-демон, tools, netlink-крейт),
 потоков данных и управления, форматов и тестовой пирамиды — в
 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## Результаты замеров
+
+Итоговые результаты финального стенда (final2, 2026-11-17): условия, TCP- и
+UDP-матрицы, multi-peer ёмкость, CPU-вердикты и выводы — в
+[docs/RESULTS.md](docs/RESULTS.md).
