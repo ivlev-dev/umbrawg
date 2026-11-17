@@ -177,32 +177,26 @@ Notes:
 ## Performance
 
 Measured on 6 vCPU, underlay MTU 9000, TUN MTU 1420, `iperf3` pinned to a
-separate CPU, medians of 3–5 repeats, one peer, `obf0`/`obf1` = obfuscation
-off/on. Baseline is `master` at `2cd5972`.
-
-`master` also includes crypto-wakeup coalescing (`03654de`, merged as
-`f0333de`): `queue_work_on` runs only on the `0 → 1` transition of the pending
-flag. It is safe and gives **+2…+4%** on CPU-bound single-stream TCP and about
-+1% on UDP capacity, while the aggregate effect over the whole matrix is near
-zero — an incidental optimization, not the path to multi-core scaling.
+separate CPU, medians of 3 repeats (unified final4 run, 240 cells, 0 failures),
+one peer, `obf0`/`obf1` = obfuscation off/on. Kernel module vs `amneziawg`.
 
 | Mode | Profile | `umbrawg` | `amneziawg` |
 |---|---|---|---|
-| 1 connection | obf0 / obf1 | 2265 / 2167 | 1806 / 1764 |
-| 3 connections | obf0 / obf1 | 2032 / 1843 | 1810 / 1716 |
+| 1 connection | obf0 / obf1 | 2344.6 / 2267.9 | 1871.2 / 1705.1 |
+| 3 connections | obf0 / obf1 | 2430.0 / 2252.9 | 1888.0 / 1692.0 |
 
-Mbit/s, TCP. The gain over the original implementation is **+13…+25%** for a
-single connection, depending on the profile and run-to-run spread — it is not a
-fixed +15%. With three connections there is no gain on one peer: the difference
-stays within the run-to-run spread.
+Mbit/s, TCP, c=1. Gain over `amneziawg`: **+25.3…+33.2%** for a single
+connection (obf0/obf1). With 10 connections per client the gain is smaller
+(+31.0% 1c, +22.2% 3c on obf0). `go` leads in 3c mode (3.0–4.7 Gbit/s).
 
 One peer is limited by its own threaded NAPI at **~2.2–2.4 Gbit/s TCP**,
 regardless of the number of connections. Sharding by peers lifts the limit:
-four peers reach **4.1–4.8 Gbit/s TCP** (+146…+178%), both with four outer
-sockets and with a single socket on the server. UDP plateaus at ~3.6 Gbit/s,
-limited by softirq and the application.
+four peers reach **4.99 Gbit/s TCP** (kernel, obf0) / 4.65 (obf1); `go`
+4.66 / 4.49. UDP holds the 1 Gbit/s line (kernel).
 
 Details, tables and rejected experiments: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Full matrix (rust/rust-par, UDP, CPU, multi-peer, e2e):
+`umbrawg-tools/docs/RESULTS.md` (final4).
 
 ### Per-peer receive sharding
 
