@@ -386,3 +386,9 @@ python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнени
 Состояние проекта, известные проблемы и план работ — в [TODO.md](TODO.md).
 Порядок выпуска, теги, публикация в crates.io, AUR и пакеты — в
 [RELEASE.md](RELEASE.md).
+
+## Архитектура
+
+Обзор четырёх компонентов (модуль ядра, Rust-демон, tools, netlink-крейт),
+потоков данных и управления, форматов и тестовой пирамиды — в
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
