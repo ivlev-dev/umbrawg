@@ -35,3 +35,4 @@ go/*.exe
 .idea/
 .vscode/
 bench/matrix/profile/*.data
+.local/
