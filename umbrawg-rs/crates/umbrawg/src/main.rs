@@ -44,6 +44,7 @@ fn print_help() {
     println!();
     println!("Переменные окружения:");
     println!("  UMBRAWG_THREADS       число рабочих потоков");
+    println!("  UMBRAWG_SOCKET_BUFFER размер буферов UDP-сокета в байтах: 212 КиБ..64 МиБ (4 МиБ)");
     println!("  UMBRAWG_PARALLEL_RX   1 — параллельный приём (RX-поток + крипто-воркеры)");
     println!("  UMBRAWG_RX_WORKERS    число крипто-воркеров параллельного приёма");
     println!("  UMBRAWG_RX_SCHED      выбор воркера: peer (по умолчанию) или queue");
