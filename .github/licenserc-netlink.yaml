@@ -13,5 +13,7 @@ header:
     - 'netlink-packet-umbrawg/CHANGELOG'
     - 'netlink-packet-umbrawg/LICENSE'
     - 'netlink-packet-umbrawg/.gitignore'
+    - 'netlink-packet-umbrawg/contrib/**'
+    - '**/*.proptest-regressions'
 
   comment: on-failure

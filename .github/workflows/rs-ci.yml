@@ -8,9 +8,12 @@ on:
       - "rs-v*"
     paths:
       - "umbrawg-rs/**"
+      - ".github/workflows/rs-ci.yml"
   pull_request:
     paths:
       - "umbrawg-rs/**"
+      - ".github/workflows/rs-ci.yml"
+  workflow_dispatch:
 
 permissions:
   contents: read

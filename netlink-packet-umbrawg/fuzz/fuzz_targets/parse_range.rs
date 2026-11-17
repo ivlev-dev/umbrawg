@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+
 #![no_main]
 use libfuzzer_sys::fuzz_target;
 use netlink_packet_umbrawg::range::{u32_range_from_string, u32_range_unpack};

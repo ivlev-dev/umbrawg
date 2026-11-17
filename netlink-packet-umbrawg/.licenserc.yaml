@@ -11,5 +11,7 @@ header:
     - 'CHANGELOG'
     - 'LICENSE-MIT'
     - '.gitignore'
+    - 'contrib/**'
+    - '**/*.proptest-regressions'
 
   comment: on-failure

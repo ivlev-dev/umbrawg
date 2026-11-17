@@ -5,12 +5,14 @@ on:
     types: [opened, synchronize, reopened]
     paths:
       - "netlink-packet-umbrawg/**"
+      - ".github/workflows/netlink-ci.yml"
   push:
     branches:
       - master
       - "feature/**"
     paths:
       - "netlink-packet-umbrawg/**"
+      - ".github/workflows/netlink-ci.yml"
   workflow_dispatch:
 
 permissions:
