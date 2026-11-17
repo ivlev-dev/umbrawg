@@ -1127,12 +1127,9 @@ impl Device {
             return PreparedIncoming::Dropped;
         }
         let obfuscator = Obfuscator::new(&snapshot.params);
-        let Some(detected) = obfuscator.detect(packet) else {
+        let Some(detected) = obfuscator.open_incoming(packet) else {
             return PreparedIncoming::Dropped;
         };
-        if obfuscator.unprotect_detected(packet, detected).is_err() {
-            return PreparedIncoming::Dropped;
-        }
         if detected.kind != MessageKind::Transport {
             return PreparedIncoming::Control(detected);
         }
