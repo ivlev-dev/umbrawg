@@ -381,32 +381,62 @@ impl<'a> Obfuscator<'a> {
     pub fn detect(&self, packet: &[u8]) -> Option<DetectedPacket> {
         let mask = self.type_mask(packet);
         for kind in MessageKind::ALL {
-            let padding = usize::from(self.params.padding(kind));
-            let expected = if kind == MessageKind::Transport {
-                padding.checked_add(crate::messages::TRANSPORT_MIN_SIZE)?
-            } else {
-                padding.checked_add(kind.body_len())?
-            };
-            let length_ok = if kind == MessageKind::Transport || self.params.random_trailers {
-                packet.len() >= expected
-            } else {
-                packet.len() == expected
-            };
-            if !length_ok {
-                continue;
-            }
-            let Some(header) = self.decode_masked_type(packet, padding, mask.as_ref()) else {
-                continue;
-            };
-            if self.params.header_range(kind).contains(&header) {
-                return Some(DetectedPacket {
-                    kind,
-                    padding,
-                    body_len: kind.body_len(),
-                });
+            if let Some(detected) = self.match_kind(packet, kind, mask.as_ref()) {
+                return Some(detected);
             }
         }
         None
+    }
+
+    fn match_kind(
+        &self,
+        packet: &[u8],
+        kind: MessageKind,
+        mask: Option<&[u8; 4]>,
+    ) -> Option<DetectedPacket> {
+        let padding = usize::from(self.params.padding(kind));
+        let expected = if kind == MessageKind::Transport {
+            padding.checked_add(crate::messages::TRANSPORT_MIN_SIZE)?
+        } else {
+            padding.checked_add(kind.body_len())?
+        };
+        let length_ok = if kind == MessageKind::Transport || self.params.random_trailers {
+            packet.len() >= expected
+        } else {
+            packet.len() == expected
+        };
+        if !length_ok {
+            return None;
+        }
+        let header = self.decode_masked_type(packet, padding, mask)?;
+        if !self.params.header_range(kind).contains(&header) {
+            return None;
+        }
+        Some(DetectedPacket {
+            kind,
+            padding,
+            body_len: kind.body_len(),
+        })
+    }
+
+    /// Classifies an incoming packet and removes header protection in place.
+    ///
+    /// The ChaCha20 block that masks the message type is reused for the first
+    /// [`header_protection::BLOCK_LEN`] bytes of the header, so a transport
+    /// packet needs a single keystream block instead of two.
+    pub fn open_incoming(&self, packet: &mut [u8]) -> Option<DetectedPacket> {
+        let Some(key) = self.header_key() else {
+            return self.detect(packet);
+        };
+        let nonce = header_protection::nonce_from_packet(packet)?;
+        let mut stream = header_protection::HeaderStream::new(key, &nonce);
+        let mask = stream.mask4();
+        let detected = MessageKind::ALL
+            .into_iter()
+            .find_map(|kind| self.match_kind(packet, kind, Some(&mask)))?;
+        let end = detected.padding + detected.body_len;
+        stream.apply(packet.get_mut(detected.padding..end)?);
+        Some(detected)
     }
 
     /// Removes header protection from a detected packet body.
@@ -450,5 +480,135 @@ mod tests {
         for (index, kind) in MessageKind::ALL.into_iter().enumerate() {
             assert_eq!(kind.message_type(), index as u32 + 1);
         }
+    }
+
+    struct FixedRng(u64);
+
+    impl RngCore for FixedRng {
+        fn next_u32(&mut self) -> u32 {
+            self.0 = self
+                .0
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (self.0 >> 32) as u32
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            (u64::from(self.next_u32()) << 32) | u64::from(self.next_u32())
+        }
+
+        fn fill_bytes(&mut self, dst: &mut [u8]) {
+            for chunk in dst.chunks_mut(4) {
+                let bytes = self.next_u32().to_le_bytes();
+                let length = chunk.len();
+                chunk.copy_from_slice(&bytes[..length]);
+            }
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> std::result::Result<(), rand_core::Error> {
+            self.fill_bytes(dst);
+            Ok(())
+        }
+    }
+
+    fn protected_params() -> ObfParams {
+        let mut params = ObfParams::default();
+        params.set_param("s1", "16").unwrap();
+        params.set_param("s2", "16").unwrap();
+        params.set_param("s3", "16").unwrap();
+        params.set_param("s4", "16").unwrap();
+        params.set_param("h1", "1000-2000").unwrap();
+        params.set_param("h2", "3000-4000").unwrap();
+        params.set_param("h3", "5000-6000").unwrap();
+        params.set_param("h4", "7000-8000").unwrap();
+        params
+            .set_param("header_protection_key", &"5a".repeat(32))
+            .unwrap();
+        params.validate().unwrap();
+        params
+    }
+
+    #[test]
+    fn open_incoming_matches_detect_and_unprotect() {
+        let params = protected_params();
+        let obfuscator = Obfuscator::new(&params);
+        for kind in MessageKind::ALL {
+            let mut rng = FixedRng(u64::from(kind.message_type()));
+            let trailer = if kind == MessageKind::Transport {
+                48
+            } else {
+                0
+            };
+            let mut packet = vec![0u8; 16 + kind.body_len() + trailer];
+            match kind {
+                MessageKind::Transport => {
+                    obfuscator
+                        .begin_transport(&mut rng, &mut packet, 0x1122_3344, 7)
+                        .unwrap();
+                }
+                _ => {
+                    let (_, layout) = obfuscator
+                        .begin_fixed(kind, &mut rng, 500, &mut packet)
+                        .unwrap();
+                    obfuscator.finish_fixed(kind, &mut packet, &layout).unwrap();
+                }
+            }
+            let detected = obfuscator.detect(&packet).unwrap();
+            assert_eq!(detected.kind, kind);
+            let mut expected = packet.clone();
+            obfuscator
+                .unprotect_detected(&mut expected, detected)
+                .unwrap();
+            let mut actual = packet.clone();
+            let detected = obfuscator.open_incoming(&mut actual).unwrap();
+            assert_eq!(detected.kind, kind);
+            assert_eq!(detected.padding, 16);
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn open_incoming_without_header_protection_keeps_bytes() {
+        let mut params = ObfParams::default();
+        params.set_param("s4", "12").unwrap();
+        let obfuscator = Obfuscator::new(&params);
+        let mut rng = FixedRng(3);
+        let mut packet = vec![0u8; 12 + MessageKind::Transport.body_len() + 16];
+        obfuscator
+            .begin_transport(&mut rng, &mut packet, 1, 2)
+            .unwrap();
+        let original = packet.clone();
+        let detected = obfuscator.open_incoming(&mut packet).unwrap();
+        assert_eq!(detected.kind, MessageKind::Transport);
+        assert_eq!(packet, original);
+    }
+
+    #[test]
+    fn open_incoming_rejects_short_packets() {
+        let params = protected_params();
+        let obfuscator = Obfuscator::new(&params);
+        assert!(obfuscator.open_incoming(&mut [0u8; 8]).is_none());
+        assert!(obfuscator.open_incoming(&mut [0u8; 40]).is_none());
+    }
+
+    #[test]
+    fn open_incoming_reuses_one_block_for_control_messages() {
+        let params = protected_params();
+        let obfuscator = Obfuscator::new(&params);
+        let mut rng = FixedRng(11);
+        let kind = MessageKind::Initiation;
+        let mut packet = vec![0u8; 16 + kind.body_len()];
+        let (_, layout) = obfuscator
+            .begin_fixed(kind, &mut rng, 500, &mut packet)
+            .unwrap();
+        obfuscator.finish_fixed(kind, &mut packet, &layout).unwrap();
+        let mut expected = packet.clone();
+        let detected = obfuscator.detect(&packet).unwrap();
+        obfuscator
+            .unprotect_detected(&mut expected, detected)
+            .unwrap();
+        let detected = obfuscator.open_incoming(&mut packet).unwrap();
+        assert_eq!(detected.body_len, kind.body_len());
+        assert_eq!(packet, expected);
     }
 }
