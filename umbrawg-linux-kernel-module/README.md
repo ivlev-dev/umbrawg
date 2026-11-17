@@ -245,6 +245,13 @@ This will log messages to dmesg, which can be watched live with:
 dmesg -wT
 ```
 
+## Документация для разработчика
+
+Состояние проекта, измерения и отклонённые эксперименты — в
+[TODO.md](TODO.md) и [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+Порядок выпуска всех четырёх репозиториев — в
+[RELEASE.md](https://github.com/ivlev-dev/umbrawg-tools/blob/master/RELEASE.md).
+
 ## License
 
 This project is released under the [GPLv2](COPYING).
