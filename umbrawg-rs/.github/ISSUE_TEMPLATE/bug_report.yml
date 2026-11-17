@@ -1,0 +1,90 @@
+name: Сообщение об ошибке
+description: Сообщить об ошибке в umbrawg (rust daemon)
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо за сообщение. Заполните поля ниже.
+  - type: input
+    id: version
+    attributes:
+      label: Версия / коммит
+      description: Вывод `umbrawg --version` или SHA коммита
+      placeholder: "0.1.0 / abc1234"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: ОС / ядро
+      description: Дистрибутив и версия ядра
+      placeholder: "Arch Linux, kernel 6.12.x"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Режим
+      description: Используемый бэкенд
+      options:
+        - kernel
+        - rust
+        - go
+    validations:
+      required: true
+  - type: dropdown
+    id: obfuscation
+    attributes:
+      label: Обфускация
+      options:
+        - "вкл"
+        - "выкл"
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Переменные окружения
+      description: Значения UMBRAWG_* (если применимо)
+      placeholder: |
+        UMBRAWG_PARALLEL_RX=1
+        UMBRAWG_RX_WORKERS=3
+        UMBRAWG_RX_STATS=1
+        UMBRAWG_THREADS=...
+        UMBRAWG_LOG_LEVEL=...
+        UMBRAWG_RUNTIME_DIR=...
+      render: shell
+  - type: textarea
+    id: rx_stats
+    attributes:
+      label: Вывод UMBRAWG_RX_STATS
+      description: Логи счётчиков приёма (каждые 5 секунд)
+      render: shell
+  - type: textarea
+    id: command
+    attributes:
+      label: Команда / конфиг
+      description: Точная команда и (обезличенный) конфиг
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Логи
+      description: Вывод команды, journalctl и т.п.
+      render: shell
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ожидаемое поведение
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Фактическое поведение
+    validations:
+      required: true

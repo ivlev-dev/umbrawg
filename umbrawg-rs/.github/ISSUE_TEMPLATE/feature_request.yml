@@ -1,0 +1,34 @@
+name: Запрос функции
+description: Предложить новую функцию для umbrawg (rust daemon)
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Опишите идею и мотивацию.
+  - type: input
+    id: version
+    attributes:
+      label: Версия / коммит
+      placeholder: "0.1.0"
+  - type: textarea
+    id: problem
+    attributes:
+      label: Какую проблему решает
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Предлагаемое решение
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Альтернативы
+  - type: textarea
+    id: context
+    attributes:
+      label: Дополнительный контекст

@@ -1,0 +1,15 @@
+[package]
+name = "umbrawg-noise"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+umbrawg-crypto.workspace = true
+umbrawg-proto.workspace = true
+rand_core.workspace = true
+subtle = "2"
+thiserror.workspace = true
+zeroize.workspace = true

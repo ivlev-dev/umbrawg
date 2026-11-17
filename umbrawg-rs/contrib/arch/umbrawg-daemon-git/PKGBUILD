@@ -1,0 +1,60 @@
+# Maintainer: Yuri Egorov <ye@umbra.org>
+pkgname=umbrawg-daemon-git
+pkgver=0.1.0.r0.g0000000
+pkgrel=1
+_upstream_name=umbrawg-rs
+pkgdesc="UmbraWG userspace daemon (git master)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/ivlev-dev/${_upstream_name}"
+license=('MIT')
+depends=('glibc' 'gcc-libs')
+makedepends=('cargo' 'rust')
+optdepends=('umbrawg-tools: управление интерфейсами через uwg и uwg-quick')
+provides=("${pkgname%-git}")
+conflicts=("${pkgname%-git}")
+source=("${_upstream_name}::git+https://github.com/ivlev-dev/${_upstream_name}.git#branch=master")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "${srcdir}/${_upstream_name}"
+  local version
+  version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)
+  if [[ -z ${version} ]]; then
+    echo "не удалось определить версию workspace из Cargo.toml" >&2
+    return 1
+  fi
+  printf '%s.r%s.g%s' "${version}" "$(git rev-list --count HEAD)" "$(git rev-parse --short HEAD)"
+}
+
+prepare() {
+  cd "${srcdir}/${_upstream_name}"
+  cargo fetch --locked
+}
+
+build() {
+  cd "${srcdir}/${_upstream_name}"
+  cargo build --release --frozen --package umbrawg
+}
+
+check() {
+  cd "${srcdir}/${_upstream_name}"
+  cargo test --release --frozen --workspace --exclude umbrawg-bench --exclude umbrawg-uapi
+  cargo test --release --frozen --package umbrawg-uapi --lib
+}
+
+package() {
+  cd "${srcdir}/${_upstream_name}"
+
+  install -Dpm0755 target/release/umbrawg "${pkgdir}/usr/bin/umbrawg"
+
+  install -Dpm0644 systemd/umbrawg@.service "${pkgdir}/usr/lib/systemd/system/umbrawg@.service"
+
+  install -dpm0755 "${pkgdir}/usr/lib/tmpfiles.d"
+  printf 'd /run/umbrawg 0700 root root -\n' >"${pkgdir}/usr/lib/tmpfiles.d/umbrawg.conf"
+  chmod 0644 "${pkgdir}/usr/lib/tmpfiles.d/umbrawg.conf"
+
+  install -dpm0700 "${pkgdir}/etc/umbrawg"
+
+  install -Dpm0644 LICENSE "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  install -Dpm0644 README.md "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+}

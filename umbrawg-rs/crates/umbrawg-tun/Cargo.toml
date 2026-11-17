@@ -1,0 +1,17 @@
+[package]
+name = "umbrawg-tun"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+log.workspace = true
+libc = "0.2"
+rustix = { version = "1", features = ["fs"] }
+
+[dev-dependencies]
+libc = "0.2"
+umbrawg-transport.workspace = true

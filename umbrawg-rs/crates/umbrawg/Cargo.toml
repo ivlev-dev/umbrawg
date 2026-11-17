@@ -1,0 +1,26 @@
+[package]
+name = "umbrawg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UmbraWG userspace daemon"
+
+[[bin]]
+name = "umbrawg"
+path = "src/main.rs"
+
+[dependencies]
+umbrawg-crypto.workspace = true
+umbrawg-proto.workspace = true
+umbrawg-noise.workspace = true
+umbrawg-device.workspace = true
+umbrawg-transport.workspace = true
+umbrawg-tun.workspace = true
+umbrawg-uapi.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+libc = "0.2"
+rand_core.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "umbrawg-device"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+umbrawg-crypto.workspace = true
+umbrawg-proto.workspace = true
+umbrawg-noise.workspace = true
+umbrawg-uapi.workspace = true
+thiserror.workspace = true
+rand_core.workspace = true
+parking_lot = "0.12"
+arc-swap = "1"

@@ -1,0 +1,18 @@
+[package]
+name = "umbrawg-uapi"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UmbraWG UAPI parser, serializer and Unix-socket server"
+
+[dependencies]
+umbrawg-crypto.workspace = true
+umbrawg-proto.workspace = true
+thiserror.workspace = true
+log.workspace = true
+libc = "0.2"
+
+[dev-dependencies]
+libc = "0.2"
