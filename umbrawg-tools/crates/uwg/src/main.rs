@@ -58,8 +58,25 @@ async fn main() -> ExitCode {
 }
 
 fn parse_cli() -> Result<Cli, clap::Error> {
+    if let Some(error) = top_level_flag_with_arguments() {
+        return Err(error);
+    }
     let matches = cli::command().try_get_matches()?;
     Cli::from_arg_matches(&matches)
+}
+
+fn top_level_flag_with_arguments() -> Option<clap::Error> {
+    let mut arguments = std::env::args_os().skip(1);
+    let first = arguments.next()?;
+    arguments.next()?;
+    let flag = first.to_str()?;
+    if !matches!(flag, "-h" | "--help" | "-v" | "--version") {
+        return None;
+    }
+    Some(cli::command().error(
+        ErrorKind::InvalidSubcommand,
+        format!("Invalid subcommand: `{flag}'"),
+    ))
 }
 
 fn report_parse_error(error: &clap::Error) -> ExitCode {
