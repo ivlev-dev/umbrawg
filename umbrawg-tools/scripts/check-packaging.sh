@@ -78,7 +78,7 @@ import pathlib
 
 import yaml
 
-for path in sorted(pathlib.Path(".github/workflows").glob("*.yml")):
+for path in sorted(pathlib.Path("../.github/workflows").glob("*.yml")):
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(data, dict) or not data.get("jobs"):
         raise SystemExit(f"{path}: нет секции jobs")
@@ -153,7 +153,8 @@ check_units() {
         return 0
     fi
     out="$(systemd-analyze verify --man=no systemd/*.service systemd/*.target 2>&1 || true)"
-    filtered="$(printf '%s\n' "$out" | grep -v 'is not executable' | grep -v '^$' || true)"
+    filtered="$(printf '%s\n' "$out" | grep -v 'is not executable' | grep -v '^$' |
+        grep -vE '^(/usr)?/lib/systemd/system/' || true)"
     if [ -n "$filtered" ]; then
         bad "systemd-analyze verify: $filtered"
     fi
@@ -176,7 +177,7 @@ check_artifacts() {
     for f in man/*.8 completions/* systemd/*; do
         grep -q -- "$f" debian/rules || bad "debian/rules не ставит $f"
         grep -q -- "$f" umbrawg-tools.spec || bad "umbrawg-tools.spec не ставит $f"
-        grep -q -- "$f" .github/workflows/rust-build.yml || bad "rust-build.yml не ставит $f"
+        grep -q -- "$f" ../.github/workflows/tools-ci.yml || bad "tools-ci.yml не ставит $f"
     done
 
     while IFS= read -r src; do
@@ -188,7 +189,7 @@ check_artifacts() {
         fi
     done < <(
         {
-            grep -hE '^[[:space:]]*install -Dm[0-7]+ ' .github/workflows/*.yml debian/rules 2>/dev/null |
+            grep -hE '^[[:space:]]*install -Dm[0-7]+ ' ../.github/workflows/tools-ci.yml ../.github/workflows/tools-packaging.yml debian/rules 2>/dev/null |
                 awk '{ print $3 }' | tr -d '"'
             grep -hE '^[[:space:]]*install -Dpm[0-7]+ ' umbrawg-tools.spec |
                 awk '{ print $3 }' | sed 's|^target/.*||'

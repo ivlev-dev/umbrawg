@@ -25,7 +25,7 @@ const NLM_F_DUMP: u16 = 0x300;
 const UMBRAWG_KIND: &str = "umbrawg";
 const HEADER_LEN: usize = 16;
 const IFINFO_LEN: usize = 16;
-const RECEIVE_TIMEOUT_SECONDS: i64 = 5;
+const RECEIVE_TIMEOUT_SECONDS: libc::time_t = 5;
 
 pub fn get_kernel_interfaces() -> Result<Vec<String>, Error> {
     let socket = Socket::open()?;
