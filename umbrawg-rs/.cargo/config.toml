@@ -1,2 +1,5 @@
+# poly1305_force_soft привязан к poly1305 0.8 из Cargo.lock: на пакетах
+# размером с MTU скалярный backend быстрее AVX2 из-за стоимости инициализации
+# на сообщение. При обновлении poly1305 флаг нужно перепроверить замером.
 [target.'cfg(any(target_arch = "x86", target_arch = "x86_64"))']
 rustflags = ["--cfg", "poly1305_force_soft"]
