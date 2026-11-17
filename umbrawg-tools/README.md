@@ -57,12 +57,16 @@ path-зависимость `../netlink-packet-umbrawg` разрешается �
 
 Кроме fmt/clippy/test в `rust-ci.yml` есть:
 
-- `bench` — `bash -n` стенда, тесты хелперов (62) и тесты отчёта (17);
+- `deny` — `cargo deny check --all-features` (политика зависимостей, `deny.toml`);
+- `bench` — `bash -n` стенда, тесты хелперов (62) и тесты отчёта (17 из 47);
+- `e2e-daemon` — сборка `uwg` и демона `umbrawg`, прогон
+  `scripts/test-daemon-e2e.sh` (автоскип без бинарей/TUN);
 - `packaging` — `scripts/check-packaging.sh`: версии `Cargo.toml` /
   `debian/changelog` / spec, `bash`/`sh`/`fish` синтаксис, YAML workflow,
   `groff -man -z`, `systemd-analyze verify` и проверка, что каждый
   поставляемый артефакт (man, completions, unit-файлы) реально ставится
-  `debian/rules`, spec и `rust-build.yml`.
+  `debian/rules`, spec и `rust-build.yml`;
+- `docs` — сборка документации (`cargo doc`) с `-D warnings`.
 
 ## Упаковка
 

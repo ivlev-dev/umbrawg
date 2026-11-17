@@ -57,7 +57,7 @@ uwg-quick strip uwg0 > /tmp/config
 ```
 
 Конфиги: `/etc/umbrawg/<iface>.conf`; runtime: `/var/run/umbrawg/`.
-Переменные окружения: `UWG_QUICK_USERSPACE_IMPLEMENTATION`, `UWG_COLOR_MODE`, `UWG_HIDE_KEYS`,
+Переменные окружения: `UWG_QUICK_USERSPACE_IMPLEMENTATION`, `WG_COLOR_MODE`, `WG_HIDE_KEYS`,
 `UWG_RUNTIME_DIR`.
 
 ## Стенд (bench/)
@@ -70,7 +70,7 @@ bench/verify-userspace.sh      # userspace ↔ userspace
 MODE=user-first bench/verify-interop.sh   # interop с модулем ядра
 bench/verify.sh                # kernel ↔ kernel (umbrawg)
 bash bench/tests/test-bench-lib.sh                    # 62 проверки хелперов
-python3 -m unittest discover -s bench/tests -p 'test_*.py'   # 17 тестов отчёта
+python3 -m unittest discover -s bench/tests -p 'test_*.py'   # 47 тестов (17 отчёта + 22 сравнения + 8 графиков)
 ```
 
 Переменные матрицы: `IMPL_LIST`, `MODE_LIST`, `PROTO_LIST`, `CONNS_LIST`, `LOSS_LIST`,
@@ -93,7 +93,7 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # 17 тестов �
   нужен vendor `netlink-packet-umbrawg`.
 - CI собирает ARM-тарболы, но не запускает тесты на ARM-хостах.
 - `Cargo.lock` синхронен с веткой `main` репозитория `netlink-packet-umbrawg`
-  (0.2.1); при сборке против другой ветки (0.3.0) cargo обновляет lock, поэтому
+  (0.3.0); при сборке против другой ветки cargo обновляет lock, поэтому
   `--locked` в CI не используется.
 - Стенд (netns/insmod/iperf3) в CI не запускается: только `bash -n` и юнит-тесты
   хелперов; реальные замеры — на выделенной машине.
