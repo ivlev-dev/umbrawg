@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 use umbrawg_crypto::random::BufferedRng;
 use umbrawg_device::{
     DatagramSink, Device, DeviceConfig, DeviceError, IncomingMeta, IoContext, PacketIo, Peer,
+    DEFAULT_UNDER_LOAD_PPS,
 };
 use umbrawg_transport::{
     AddressFamily, Endpoint, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
@@ -101,6 +102,28 @@ pub fn worker_count(requested: Option<&str>, available: usize) -> usize {
             .map_or(default, |count| count.min(available)),
         None => default,
     }
+}
+
+fn under_load_detection_enabled(value: Option<&str>) -> bool {
+    !matches!(
+        value.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("0" | "false" | "no" | "off")
+    )
+}
+
+fn under_load_threshold(value: Option<&str>) -> u32 {
+    value
+        .and_then(|raw| raw.trim().parse::<u32>().ok())
+        .filter(|threshold| *threshold > 0)
+        .unwrap_or(DEFAULT_UNDER_LOAD_PPS)
+}
+
+fn apply_under_load_config(device: &Device) {
+    let threshold = under_load_threshold(env::var("UMBRAWG_UNDER_LOAD_PPS").ok().as_deref());
+    device.set_under_load_threshold(threshold);
+    let enabled = under_load_detection_enabled(env::var("UMBRAWG_UNDER_LOAD").ok().as_deref());
+    device.set_under_load_detection(enabled);
+    log::info!("under-load detector: enabled={enabled} threshold={threshold} initiations/s");
 }
 
 /// Запрашивает остановку демона.
@@ -419,6 +442,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
 
     while !shutdown_requested() {
         let now = Instant::now();
+        device.refresh_under_load(now);
         let want_port = device.listen_port();
         let rebind = match socket.as_ref() {
             None => true,
@@ -615,6 +639,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         .unwrap_or(1);
 
     let device = Arc::new(Device::new(DeviceConfig::default())?);
+    apply_under_load_config(&device);
     device.up();
 
     if let Some(parallel) =
@@ -721,6 +746,17 @@ fn run_parallel(
             }
         })?;
 
+    let control_device = Arc::clone(&device);
+    let control_shared = Arc::clone(&shared);
+    let control_failure = Arc::clone(&shared);
+    let control_handle = thread::Builder::new()
+        .name("umbrawg-control".to_owned())
+        .spawn(move || {
+            if let Err(error) = parallel::control_loop(control_device, control_shared) {
+                control_failure.register_failure(format!("control thread stopped: {error}"));
+            }
+        })?;
+
     let mut handles = Vec::with_capacity(workers);
     for (index, tun) in tun_set.into_queues().into_iter().enumerate() {
         let device = Arc::clone(&device);
@@ -741,7 +777,12 @@ fn run_parallel(
         let stopped = parallel::supervise(
             rx_handle.is_finished(),
             handles.iter().any(|handle| handle.is_finished()),
-        );
+        )
+        .or_else(|| {
+            control_handle
+                .is_finished()
+                .then_some("control thread exited unexpectedly")
+        });
         if let Some(reason) = stopped {
             shared.register_failure(reason.to_owned());
             break;
@@ -754,6 +795,9 @@ fn run_parallel(
     }
     if rx_handle.join().is_err() {
         shared.register_failure("rx thread panicked".to_owned());
+    }
+    if control_handle.join().is_err() {
+        shared.register_failure("control thread panicked".to_owned());
     }
     let mut worker_panicked = false;
     for handle in handles {
@@ -818,6 +862,26 @@ mod tests {
         assert_eq!(worker_count(Some("6"), 8), 6);
         assert_eq!(worker_count(Some("0"), 8), 4);
         assert_eq!(worker_count(Some("64"), 8), 8);
+    }
+
+    #[test]
+    fn under_load_flag_defaults_to_enabled() {
+        assert!(under_load_detection_enabled(None));
+        assert!(under_load_detection_enabled(Some("1")));
+        assert!(under_load_detection_enabled(Some("on")));
+        assert!(!under_load_detection_enabled(Some("0")));
+        assert!(!under_load_detection_enabled(Some("off")));
+        assert!(!under_load_detection_enabled(Some("FALSE")));
+    }
+
+    #[test]
+    fn under_load_threshold_uses_default_and_rejects_bad_values() {
+        assert_eq!(under_load_threshold(None), DEFAULT_UNDER_LOAD_PPS);
+        assert_eq!(under_load_threshold(Some("250")), 250);
+        assert_eq!(under_load_threshold(Some(" 250 ")), 250);
+        assert_eq!(under_load_threshold(Some("0")), DEFAULT_UNDER_LOAD_PPS);
+        assert_eq!(under_load_threshold(Some("-5")), DEFAULT_UNDER_LOAD_PPS);
+        assert_eq!(under_load_threshold(Some("abc")), DEFAULT_UNDER_LOAD_PPS);
     }
 
     #[test]

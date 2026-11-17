@@ -272,6 +272,110 @@ fn handshake_establishes_sessions_on_both_devices() {
 }
 
 #[test]
+fn initiation_flood_enables_under_load_and_cookie_reply() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    pair.b.set_under_load_threshold(4);
+    {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a.initiate_handshake(&pair.peer_b, &mut ctx).unwrap();
+    }
+    let initiation = pair.io_a.take_sent().pop().expect("handshake initiation");
+    assert!(!pair.b.under_load());
+
+    for _ in 0..3 {
+        let outcome = deliver_one(
+            initiation.clone(),
+            pair.addr_a,
+            &pair.b,
+            &mut pair.io_b,
+            &mut pair.rng,
+            now,
+            &mut pair.scratch,
+        );
+        assert_ne!(outcome, IncomingOutcome::Cookie);
+        assert!(!pair.b.under_load());
+    }
+    pair.io_b.take_sent();
+
+    let outcome = deliver_one(
+        initiation.clone(),
+        pair.addr_a,
+        &pair.b,
+        &mut pair.io_b,
+        &mut pair.rng,
+        now,
+        &mut pair.scratch,
+    );
+    assert_eq!(outcome, IncomingOutcome::Cookie);
+    assert!(pair.b.under_load());
+    let replies = pair.io_b.take_sent();
+    assert_eq!(replies.len(), 1);
+    let outcome = deliver_one(
+        replies.into_iter().next().unwrap(),
+        pair.addr_b,
+        &pair.a,
+        &mut pair.io_a,
+        &mut pair.rng,
+        now,
+        &mut pair.scratch,
+    );
+    assert_eq!(outcome, IncomingOutcome::Cookie);
+
+    pair.b.refresh_under_load(now + Duration::from_secs(2));
+    assert!(!pair.b.under_load());
+    let outcome = deliver_one(
+        initiation,
+        pair.addr_a,
+        &pair.b,
+        &mut pair.io_b,
+        &mut pair.rng,
+        now + Duration::from_secs(2),
+        &mut pair.scratch,
+    );
+    assert_ne!(outcome, IncomingOutcome::Cookie);
+}
+
+#[test]
+fn disabled_under_load_detector_keeps_cookies_off() {
+    let mut pair = pair(ObfParams::default());
+    let now = Instant::now();
+    pair.b.set_under_load_threshold(1);
+    pair.b.set_under_load_detection(false);
+    {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a.initiate_handshake(&pair.peer_b, &mut ctx).unwrap();
+    }
+    let initiation = pair.io_a.take_sent().pop().expect("handshake initiation");
+    let outcome = deliver_one(
+        initiation.clone(),
+        pair.addr_a,
+        &pair.b,
+        &mut pair.io_b,
+        &mut pair.rng,
+        now,
+        &mut pair.scratch,
+    );
+    assert_ne!(outcome, IncomingOutcome::Cookie);
+    assert!(!pair.b.under_load());
+
+    pair.b.set_under_load_detection(true);
+    pair.io_b.take_sent();
+    let outcome = deliver_one(
+        initiation,
+        pair.addr_a,
+        &pair.b,
+        &mut pair.io_b,
+        &mut pair.rng,
+        now,
+        &mut pair.scratch,
+    );
+    assert_eq!(outcome, IncomingOutcome::Cookie);
+    assert!(pair.b.under_load());
+    assert_eq!(pair.b.under_load_threshold(), 1);
+}
+
+#[test]
 fn transport_round_trip_respects_allowed_ips() {
     let mut pair = pair(ObfParams::default());
     let now = Instant::now();

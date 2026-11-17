@@ -35,6 +35,7 @@ use crate::obf::{build_fixed_message, endpoint_bytes, send_pre_handshake, unix_t
 use crate::peer::{Peer, PeerConfig, PeerState};
 use crate::ratelimiter::RateLimiter;
 use crate::timers::{Range16, TimerKind, Timings};
+use crate::underload::{UnderLoadDetector, DEFAULT_UNDER_LOAD_PPS};
 
 const TRANSPORT_FLOOD_INTERVAL: Duration = Duration::from_millis(1000 / INITIATIONS_PER_SECOND);
 
@@ -148,6 +149,8 @@ pub struct Device {
     rate_limiter: RateLimiter,
     up: AtomicBool,
     under_load: AtomicBool,
+    under_load_detection: AtomicBool,
+    under_load_detector: UnderLoadDetector,
     listen_port: AtomicU16,
     fwmark: AtomicU32,
     mtu: AtomicU16,
@@ -186,6 +189,8 @@ impl Device {
             rate_limiter: RateLimiter::new(),
             up: AtomicBool::new(true),
             under_load: AtomicBool::new(false),
+            under_load_detection: AtomicBool::new(true),
+            under_load_detector: UnderLoadDetector::new(DEFAULT_UNDER_LOAD_PPS),
             listen_port: AtomicU16::new(config.listen_port),
             fwmark: AtomicU32::new(config.fwmark),
             mtu: AtomicU16::new(config.mtu),
@@ -255,6 +260,53 @@ impl Device {
 
     pub fn set_under_load(&self, value: bool) {
         self.under_load.store(value, Ordering::Relaxed);
+    }
+
+    /// Возвращает порог детектора флуда в инициациях на секунду.
+    #[must_use]
+    pub fn under_load_threshold(&self) -> u32 {
+        self.under_load_detector.threshold()
+    }
+
+    /// Устанавливает порог детектора флуда в инициациях на секунду.
+    pub fn set_under_load_threshold(&self, threshold: u32) {
+        self.under_load_detector.set_threshold(threshold);
+    }
+
+    /// Возвращает `true`, если автоматический детектор флуда включён.
+    #[must_use]
+    pub fn under_load_detection_enabled(&self) -> bool {
+        self.under_load_detection.load(Ordering::Relaxed)
+    }
+
+    /// Включает или выключает автоматический детектор флуда.
+    ///
+    /// При выключении окно сбрасывается и флаг `under_load` снимается: вызывающий
+    /// код может управлять флагом вручную через [`Device::set_under_load`].
+    pub fn set_under_load_detection(&self, enabled: bool) {
+        self.under_load_detection.store(enabled, Ordering::Relaxed);
+        self.under_load_detector.reset(Instant::now());
+        if !enabled {
+            self.under_load.store(false, Ordering::Relaxed);
+        }
+    }
+
+    /// Учитывает валидную по MAC1 инициацию и обновляет флаг `under_load`.
+    pub fn note_initiation(&self, now: Instant) {
+        if !self.under_load_detection_enabled() {
+            return;
+        }
+        let next = self.under_load_detector.note(now, self.under_load());
+        self.under_load.store(next, Ordering::Relaxed);
+    }
+
+    /// Пересчитывает `under_load` по скользящему окну без новой инициации.
+    pub fn refresh_under_load(&self, now: Instant) {
+        if !self.under_load_detection_enabled() {
+            return;
+        }
+        let next = self.under_load_detector.refresh(now, self.under_load());
+        self.under_load.store(next, Ordering::Relaxed);
     }
 
     #[must_use]
@@ -1224,6 +1276,7 @@ impl Device {
                 return Ok(IncomingOutcome::Dropped);
             }
         }
+        self.note_initiation(ctx.now);
         let mut address = [0u8; 18];
         let address_len = endpoint_bytes(source, &mut address);
         let params = self.obfuscation.load();
