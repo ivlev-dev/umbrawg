@@ -1,0 +1,12 @@
+
+ Performance counter stats for 'CPU(s) 0':
+
+         369524232      cycles                                                                
+         145116272      instructions                                                          
+          20219547      branches                                                              
+           3129742      branch-misses                                                         
+           9871332      cache-misses                                                          
+              2094      cache-references                                                      
+
+       6.001278617 seconds time elapsed
+

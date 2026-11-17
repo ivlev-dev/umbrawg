@@ -1,0 +1,36 @@
+# Артефакты сборки и локальные данные — не коммитим.
+target/
+dist/
+*.o
+*.o.d
+*.ko
+*.mod
+*.mod.c
+*.cmd
+Module.symvers
+modules.order
+.*.cmd
+.tmp_versions/
+
+# Бенчмарк-стенд: результаты, кэши и секреты остаются на сервере.
+bench/keys.env
+bench/results/
+bench/tmp/
+bench/zed/
+bench/ab/
+bench/agent-rx/
+bench/bins/
+bench/umbrawg
+bench/state/
+__pycache__/
+*.pyc
+
+# Go
+go/umbrawg
+go/*.exe
+
+# Редакторы и ОС
+.DS_Store
+*.swp
+.idea/
+.vscode/
