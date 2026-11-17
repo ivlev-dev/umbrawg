@@ -1,7 +1,15 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand_core::{impls::fill_bytes_via_next, Error as RandError, RngCore};
 
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Instant;
+
 use umbrawg_crypto::{aead, blake2s, Key, PrivateKey, KEY_LEN};
+use umbrawg_device::{
+    AllowedIp, DatagramSink, Device, DeviceConfig, IncomingMeta, IoContext, PacketIo, Peer,
+    PeerConfig, Timings,
+};
 use umbrawg_proto::{obf::MessageKind, ObfParams, Obfuscator};
 use umbrawg_transport::{coalesce_into, split_into_segments, GsoLayout, GsoSize};
 use umbrawg_tun::VirtioNetHdr;
@@ -388,6 +396,133 @@ fn bench_gso(c: &mut Criterion) {
     group.finish();
 }
 
+struct BenchIo {
+    sent: Vec<Vec<u8>>,
+}
+
+impl DatagramSink for BenchIo {
+    fn send_datagram(
+        &mut self,
+        _endpoint: SocketAddr,
+        _peer: Option<&Peer>,
+        payload: &[u8],
+        _gso_size: Option<usize>,
+    ) {
+        self.sent.push(payload.to_vec());
+    }
+}
+
+impl PacketIo for BenchIo {
+    fn deliver(&mut self, _peer: &Peer, _packet: &[u8]) {}
+}
+
+fn allowed(address: &str) -> AllowedIp {
+    AllowedIp::new(address.parse().expect("allowed ip"), 32).expect("allowed prefix")
+}
+
+fn incoming_fixture(
+    obf: bool,
+) -> (
+    Arc<Device>,
+    Vec<u8>,
+    umbrawg_device::IncomingSnapshot,
+    Instant,
+) {
+    let mut params = ObfParams::default();
+    if obf {
+        params.s1 = 16;
+        params.s2 = 16;
+        params.s3 = 16;
+        params.s4 = 16;
+        params.random_trailers = true;
+        params.header_protection_key = Some(Key::from_bytes([0x22; KEY_LEN]));
+    }
+    let a = Arc::new(
+        Device::new(DeviceConfig {
+            private_key: Some(Key::from_bytes([0x11; KEY_LEN])),
+            obfuscation: params.clone(),
+            timings: Timings::new(),
+            ..DeviceConfig::default()
+        })
+        .expect("device a"),
+    );
+    let b = Arc::new(
+        Device::new(DeviceConfig {
+            private_key: Some(Key::from_bytes([0x22; KEY_LEN])),
+            obfuscation: params,
+            timings: Timings::new(),
+            ..DeviceConfig::default()
+        })
+        .expect("device b"),
+    );
+    let addr_a: SocketAddr = "10.0.0.1:1111".parse().unwrap();
+    let addr_b: SocketAddr = "10.0.0.2:2222".parse().unwrap();
+    let mut config_b = PeerConfig::new(b.public_key().expect("public key b"));
+    config_b.endpoint = Some(addr_b);
+    config_b.allowed_ips = vec![allowed("10.0.0.2")];
+    let peer_b = a.add_peer(config_b).expect("peer b");
+    let mut config_a = PeerConfig::new(a.public_key().expect("public key a"));
+    config_a.endpoint = Some(addr_a);
+    config_a.allowed_ips = vec![allowed("10.0.0.1")];
+    let peer_a = b.add_peer(config_a).expect("peer a");
+
+    let now = Instant::now();
+    let mut rng = FixedRng(0x1234_5678);
+    let mut scratch = vec![0u8; 65_535];
+    let mut io_a = BenchIo { sent: Vec::new() };
+    let mut io_b = BenchIo { sent: Vec::new() };
+
+    {
+        let mut ctx = IoContext::new(&mut rng, now, &mut scratch, &mut io_a);
+        a.initiate_handshake(&peer_b, &mut ctx).expect("initiation");
+    }
+    for mut packet in std::mem::take(&mut io_a.sent) {
+        let mut ctx = IoContext::new(&mut rng, now, &mut scratch, &mut io_b);
+        b.handle_incoming(&mut packet, IncomingMeta::new(addr_a, None), &mut ctx)
+            .expect("response input");
+    }
+    for mut packet in std::mem::take(&mut io_b.sent) {
+        let mut ctx = IoContext::new(&mut rng, now, &mut scratch, &mut io_a);
+        a.handle_incoming(&mut packet, IncomingMeta::new(addr_b, None), &mut ctx)
+            .expect("handshake input");
+    }
+    for mut packet in std::mem::take(&mut io_a.sent) {
+        let mut ctx = IoContext::new(&mut rng, now, &mut scratch, &mut io_b);
+        b.handle_incoming(&mut packet, IncomingMeta::new(addr_a, None), &mut ctx)
+            .expect("keepalive input");
+    }
+
+    let mut dst = vec![0u8; 4096];
+    let plaintext = vec![0x5a; 1420];
+    {
+        let mut ctx = IoContext::new(&mut rng, now, &mut scratch, &mut io_a);
+        a.send_packet(&peer_b, &plaintext, &mut dst, &mut ctx)
+            .expect("data packet");
+    }
+    let packet = io_a.sent.pop().expect("transport datagram");
+    let snapshot = b.incoming_snapshot();
+    let _ = peer_a;
+    (b, packet, snapshot, now)
+}
+
+fn bench_incoming(c: &mut Criterion) {
+    let mut group = c.benchmark_group("incoming_open");
+    for obf in [false, true] {
+        let (device, packet, snapshot, now) = incoming_fixture(obf);
+        let label = if obf { "obf1" } else { "obf0" };
+        group.bench_function(label, |bench| {
+            bench.iter_batched(
+                || packet.clone(),
+                |mut data| {
+                    black_box(device.prepare_incoming(&mut data, &snapshot, now));
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.finish();
+}
+
 fn bench_batch(c: &mut Criterion) {
     let key = fixed_key();
     let aad = b"aad";
@@ -416,6 +551,7 @@ criterion_group!(
     bench_x25519,
     bench_obf,
     bench_gso,
+    bench_incoming,
     bench_batch
 );
 criterion_main!(benches);
