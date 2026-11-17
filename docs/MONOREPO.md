@@ -39,6 +39,19 @@
 6. **Секреты не коммитим.** `bench/keys.env` в `.gitignore`, в репозитории
    только `bench/keys.env.example`.
 
+## Как выпустить релиз
+
+1. Обновить версию в манифесте компонента (`src/version.h`, `Cargo.toml`,
+   `debian/changelog`, spec — что применимо).
+2. Прогнать упаковку вручную (без публикации, релиз пропускается):
+   `gh workflow run kernel-packaging.yml -f version=X.Y.Z` (аналогично
+   `netlink-packaging.yml`, `tools-packaging.yml`, `rs-packaging.yml`).
+3. Поставить тег с префиксом и запушить его:
+   ```sh
+   git tag kernel-vX.Y.Z && git push origin kernel-vX.Y.Z
+   ```
+   CI соберёт пакеты и опубликует GitHub Release для этого компонента.
+
 ## Архивные репозитории
 
 После проверки монорепо старые репозитории переводятся в архив (read-only) с
