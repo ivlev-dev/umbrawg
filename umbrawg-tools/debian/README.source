@@ -1,0 +1,21 @@
+Building the Debian package
+===========================
+
+The Cargo workspace depends on the sibling repository
+`../netlink-packet-umbrawg` through a path dependency. A binary build must
+therefore run from a combined tree:
+
+    <root>/umbrawg-tools/
+    <root>/netlink-packet-umbrawg/
+
+scripts/package/make-dist.sh creates such a tree and
+scripts/package/build-deb.sh runs dpkg-buildpackage inside it.
+
+Crates from crates.io are fetched during the build unless they have already
+been vendored. For an offline or reproducible build, run `cargo vendor` in
+the umbrawg-tools directory, add the generated source replacement to
+.cargo/config.toml, and build with `DEB_BUILD_OPTIONS="nocheck"` if the test
+suite is not required.
+
+A source upload (-S) needs the netlink crate vendored or packaged separately;
+this package currently targets binary builds (-b).

@@ -1,0 +1,79 @@
+#compdef uwg
+
+local -a commands params interfaces
+
+commands=(
+  'genkey:generate a private key'
+  'genpsk:generate a preshared key'
+  'pubkey:derive a public key from stdin'
+  'set:change interface configuration'
+  'setconf:apply a configuration file'
+  'addconf:append a configuration file'
+  'syncconf:synchronize a configuration file'
+  'show:show configuration and runtime state'
+  'showconf:show configuration as an INI file'
+  'version:show the version'
+  'help:show usage information'
+)
+
+params=(
+  public-key private-key listen-port fwmark peers preshared-keys endpoints
+  allowed-ips latest-handshakes persistent-keepalive advanced-security transfer
+  dump jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5
+  header-protection-key content-padding-addition rekey-after-time rekey-timeout
+  reject-after-time keepalive-timeout max-handshake-attempts max_handshake_attempts random-trailers
+  disable-cookies
+)
+
+_uwg_interfaces() {
+  local -a found
+  found=(${(z)"$(uwg show interfaces 2>/dev/null)"})
+  compadd -a found
+}
+
+_arguments -C \
+  '1:command:->command' \
+  '*::argument:->args'
+
+case $state in
+  command)
+    _describe -t commands 'uwg command' commands
+    ;;
+  args)
+    case $words[1] in
+      show)
+        if (( CURRENT == 2 )); then
+          _uwg_interfaces
+          compadd all interfaces
+        elif (( CURRENT == 3 )) && [[ $words[2] != interfaces ]]; then
+          compadd -a params
+        fi
+        ;;
+      showconf|setconf|addconf|syncconf|down)
+        if (( CURRENT == 2 )); then
+          _uwg_interfaces
+        elif (( CURRENT == 3 )); then
+          case $words[1] in
+            setconf|addconf|syncconf) _files ;;
+          esac
+        fi
+        ;;
+      set)
+        if (( CURRENT == 2 )); then
+          _uwg_interfaces
+        else
+          compadd listen-port fwmark private-key jc jmin jmax s1 s2 s3 s4 \
+            h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key \
+            content-padding-addition rekey-after-time rekey-timeout \
+            reject-after-time keepalive-timeout max-handshake-attempts \
+            random-trailers disable-cookies peer
+          if [[ $words[CURRENT-1] == peer ]]; then
+            local -a peers
+            peers=(${(z)"$(uwg show $words[2] peers 2>/dev/null)"})
+            compadd -a peers
+          fi
+        fi
+        ;;
+    esac
+    ;;
+esac

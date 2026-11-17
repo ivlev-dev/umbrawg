@@ -1,0 +1,250 @@
+name: Packaging
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Ожидаемая версия без префикса v (пусто — взять из Cargo.toml)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packaging-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+env:
+  NETLINK_REPOSITORY: ivlev-dev/netlink-packet-umbrawg
+
+jobs:
+  meta:
+    name: версия
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Определить версию
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' tools/Cargo.toml | head -n1)"
+          if [ -z "$version" ]; then
+            echo "error: не удалось определить версию workspace из Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "push" ]; then
+            expected="v${version}"
+            if [ "$REF_NAME" != "$expected" ]; then
+              echo "error: тег $REF_NAME не совпадает с версией $version (ожидался $expected)" >&2
+              exit 1
+            fi
+          elif [ -n "${REQUESTED:-}" ] && [ "$REQUESTED" != "$version" ]; then
+            echo "error: запрошена версия $REQUESTED, в Cargo.toml $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  deb:
+    name: deb
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: debian:trixie
+    steps:
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential ca-certificates cargo debhelper dpkg-dev git rustc
+
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NETLINK_REPOSITORY }}
+          path: netlink-packet-umbrawg
+
+      - name: Собрать .deb
+        working-directory: tools
+        run: scripts/package/build-deb.sh
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-tools-deb
+          path: |
+            tools/dist/*.deb
+            tools/dist/*.changes
+            tools/dist/*.buildinfo
+          if-no-files-found: error
+          retention-days: 14
+
+  rpm:
+    name: rpm
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: fedora:latest
+    steps:
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          dnf install -y --setopt=install_weak_deps=False \
+            cargo gcc git make rpm-build rust systemd-rpm-macros
+
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Checkout netlink-packet-umbrawg
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.NETLINK_REPOSITORY }}
+          path: netlink-packet-umbrawg
+
+      - name: Собрать .rpm
+        working-directory: tools
+        run: scripts/package/build-rpm.sh
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-tools-rpm
+          path: tools/dist/*.rpm
+          if-no-files-found: error
+          retention-days: 14
+
+  arch:
+    name: arch
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed base-devel cargo git rust
+          useradd -m builder
+
+      - name: Checkout umbrawg-tools
+        uses: actions/checkout@v4
+        with:
+          path: tools
+
+      - name: Передать каталоги упаковки пользователю сборки
+        working-directory: tools/contrib/arch
+        run: |
+          set -euo pipefail
+          chown -R builder:builder .
+
+      - name: Собрать umbrawg-tools-git
+        working-directory: tools/contrib/arch/umbrawg-tools-git
+        run: |
+          set -euo pipefail
+          pkgdir="$PWD"
+          su builder -c "cd '$pkgdir' && makepkg -f --noconfirm --nodeps"
+
+      - name: Проверить версию собранного -git пакета
+        working-directory: tools/contrib/arch/umbrawg-tools-git
+        env:
+          EXPECTED: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pkg=""
+          for candidate in ./*.pkg.tar.zst; do
+            name="$(basename "$candidate")"
+            case "$name" in
+              "umbrawg-tools-git-${EXPECTED}.r"*) pkg="$name"; break ;;
+            esac
+          done
+          if [ -z "$pkg" ]; then
+            echo "error: нет пакета umbrawg-tools-git-${EXPECTED}.r* среди *.pkg.tar.zst" >&2
+            echo "error: ветка, которую клонирует PKGBUILD, не совпадает с версией сборки" >&2
+            exit 1
+          fi
+
+      - name: Собрать umbrawg-tools, если заполнены суммы
+        working-directory: tools/contrib/arch/umbrawg-tools
+        run: |
+          set -euo pipefail
+          if grep -q TODO_UPDPKGSUMS PKGBUILD; then
+            echo "skip: в стабильном PKGBUILD заглушка sha256sums, нужны теги и updpkgsums" >&2
+            exit 0
+          fi
+          pkgdir="$PWD"
+          su builder -c "cd '$pkgdir' && makepkg -f --noconfirm --nodeps"
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-tools-arch
+          path: tools/contrib/arch/*/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: релиз
+    needs:
+      - meta
+      - deb
+      - rpm
+      - arch
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Скачать артефакты
+        uses: actions/download-artifact@v4
+        with:
+          pattern: umbrawg-tools-*
+          path: dist
+          merge-multiple: true
+
+      - name: Посчитать SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum ./*.deb ./*.rpm ./*.pkg.tar.zst > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Опубликовать релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.deb
+            dist/*.rpm
+            dist/*.pkg.tar.zst
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true

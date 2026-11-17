@@ -1,0 +1,8 @@
+umbrawg-tools (0.2.0) unstable; urgency=medium
+
+  * Rust-based package built from the Cargo workspace.
+  * Ship uwg and uwg-quick with addconf, syncconf, and advanced-security.
+  * Install man pages, bash/zsh/fish completions, and systemd units.
+  * Replace the legacy C packaging with a cargo build.
+
+ -- Yuri Egorov <ye@umbra.org>  Mon, 16 Nov 2026 20:00:00 +0300

@@ -1,0 +1,21 @@
+[package]
+name = "uwg"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "uwg"
+path = "src/main.rs"
+
+[dependencies]
+umbrawg-config.workspace = true
+umbrawg-ctl.workspace = true
+clap.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+log.workspace = true
+env_logger.workspace = true
+libc.workspace = true

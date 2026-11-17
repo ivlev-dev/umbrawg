@@ -1,0 +1,54 @@
+name: Legacy C (Linux)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  Build-for-Ubuntu:
+    name: Build for Ubuntu
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build UmbraWG legacy C tools
+      run: |
+        apt -y update &&
+        apt -y install build-essential &&
+        cd legacy-c &&
+        make &&
+        mkdir build &&
+        cp wg ./build/uwg &&
+        cp wg-quick/linux.bash ./build/uwg-quick
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: ubuntu-22.04-legacy-c
+        path: ./legacy-c/build
+
+  Build-for-Alpine:
+    name: Build for Alpine
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.19
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Build UmbraWG legacy C tools
+      run: |
+        apk add linux-headers build-base &&
+        cd legacy-c &&
+        make &&
+        mkdir build &&
+        cp wg ./build/uwg &&
+        cp wg-quick/linux.bash ./build/uwg-quick
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: alpine-3.19-legacy-c
+        path: ./legacy-c/build

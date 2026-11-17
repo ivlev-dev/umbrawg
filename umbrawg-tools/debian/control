@@ -1,0 +1,38 @@
+Source: umbrawg-tools
+Section: net
+Priority: optional
+Maintainer: Yuri Egorov <ye@umbra.org>
+Build-Depends:
+ cargo,
+ debhelper-compat (= 13),
+ rustc (>= 1.85)
+Standards-Version: 4.6.2
+Homepage: https://github.com/ivlev-dev/umbrawg-tools
+Vcs-Git: https://github.com/ivlev-dev/umbrawg-tools
+Vcs-Browser: https://github.com/ivlev-dev/umbrawg-tools
+Rules-Requires-Root: no
+
+Package: umbrawg-tools
+Architecture: linux-any
+Depends:
+ iproute2,
+ ${misc:Depends},
+ ${shlibs:Depends}
+Recommends:
+ nftables | iptables,
+ resolvconf,
+ umbrawg-modules | umbrawg-dkms
+Suggests:
+ umbrawg
+Description: Rust command-line tools for UmbraWG
+ UmbraWG is a WireGuard-compatible VPN protocol with an additional
+ obfuscation layer.
+ .
+ This package provides the Rust utilities:
+ .
+  * uwg - read and change UmbraWG interface configuration;
+  * uwg-quick - bring interfaces up and down from configuration files.
+ .
+ Both kernel netlink and the userspace umbrawg daemon (UAPI sockets) are
+ supported. The package also ships man pages, shell completions, and
+ systemd units.

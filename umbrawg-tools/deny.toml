@@ -1,0 +1,33 @@
+# Конфигурация cargo-deny (формат cargo-deny 0.21).
+
+[advisories]
+# Только unmaintained-записи с известными причинами; уязвимости и yanked не игнорируются.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 приходит транзитивно через netlink-packet-core; проект архивирован, безопасной замены без мажорного обновления нет" },
+]
+
+[licenses]
+# GPL-2.0-only — лицензия самого umbrawg-tools (workspace), остальные приходят транзитивно.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-1-Clause",
+    "BSD-3-Clause",
+    "GPL-2.0-only",
+    "LGPL-2.1-or-later",
+    "Unicode-3.0",
+    "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Дубликаты (syn, thiserror) не схлопываются без мажорных обновлений, поэтому только warn.
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

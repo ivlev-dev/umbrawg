@@ -1,0 +1,7 @@
+# /lib is a symlink to /usr/lib on merged-/usr systems. Units are installed
+# below /lib/systemd/system because debhelper 13 in bookworm only discovers
+# units there and would otherwise skip the systemd maintainer scripts.
+umbrawg-tools: aliased-location
+
+# /etc/umbrawg stores private keys and must not be world readable.
+umbrawg-tools: non-standard-dir-perm

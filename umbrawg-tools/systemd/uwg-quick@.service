@@ -1,0 +1,17 @@
+[Unit]
+Description=UmbraWG via uwg-quick(8) for %I
+Documentation=man:uwg-quick(8)
+Documentation=man:uwg(8)
+After=network-online.target nss-lookup.target
+Wants=network-online.target nss-lookup.target
+PartOf=uwg-quick.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/uwg-quick up %i
+ExecStop=/usr/bin/uwg-quick down %i
+ExecReload=/bin/bash -c 'exec /usr/bin/uwg syncconf %i <(exec /usr/bin/uwg-quick strip %i)'
+
+[Install]
+WantedBy=multi-user.target
