@@ -301,6 +301,7 @@ scripts/aur-publish.sh --all --push
 ```sh
 uwg genkey | uwg pubkey
 uwg version
+uwg -v
 uwg help
 uwg show uwg0
 uwg show uwg0 advanced-security
@@ -315,6 +316,11 @@ uwg-quick strip uwg0
 ```
 
 Конфиги: `/etc/umbrawg/<iface>.conf`. Runtime: `/var/run/umbrawg/`.
+
+Коды возврата: `0` — успех, а также `--help`/`-h`/`help` и
+`--version`/`-v`/`version`; `1` — ошибка использования (неизвестная команда
+или параметр, отсутствующий или лишний аргумент) и любая ошибка выполнения.
+Usage и диагностика печатаются в stderr, как в legacy `wg`/`awg`.
 
 Переменные окружения:
 

@@ -15,8 +15,12 @@
   `showconf`/`save`, отправка в ядро через `UWGPEER_A_ADVANCED_SECURITY` и
   передача в userspace UAPI (`advanced_security=1|0`, демон только хранит и
   отдаёт значение).
-- Тесты: 212 (unit, 16 CLI на фейковом UAPI-сокете, 2 parity-теста `strip`
-  против bash-версии).
+- Тесты: 219 (189 unit, 19 CLI-тестов `uwg` на фейковом UAPI-сокете,
+  8 CLI-тестов `uwg-quick`, контрактный тест `setconf` и 2 parity-теста
+  `strip` против bash-версии).
+- Коды возврата `uwg`/`uwg-quick` соответствуют legacy `wg`/`awg`: ошибки
+  использования и выполнения — 1 (usage в stderr), `--help`/`-h`/`help` и
+  `--version`/`-v`/`version` — 0.
 - CI: fmt/clippy/test, тесты стенда (`bench`) и статические проверки упаковки
   (`packaging`), релизные сборки x86_64/aarch64/armv7; упаковка
   deb/rpm/man/completions/systemd из Rust-дерева; на тег `v*` —

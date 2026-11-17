@@ -119,6 +119,11 @@ uwg-quick up uwg0
 uwg-quick down uwg0
 .fi
 
+.SH EXIT STATUS
+Zero on success and after printing help. A usage error (unknown subcommand,
+missing or unexpected argument) or a runtime failure returns 1; diagnostics
+and usage text are written to standard error.
+
 .SH SEE ALSO
 .BR uwg (8),
 .BR ip (8),

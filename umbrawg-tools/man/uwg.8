@@ -113,7 +113,8 @@ sessions.
 Prints the program name and version.
 .TP
 \fBhelp\fP
-Prints usage information.
+Prints usage information. The top-level options \fB-h\fP/\fB--help\fP are
+equivalent to \fBhelp\fP, and \fB-v\fP/\fB--version\fP to \fBversion\fP.
 .TP
 \fBgenkey\fP
 Generates a private key and writes it to standard output.
@@ -171,7 +172,9 @@ Configuration files used by
 UAPI sockets of the userspace daemon.
 
 .SH EXIT STATUS
-Zero on success, non-zero on error. Errors are written to standard error.
+Zero on success, and after printing help or version. A usage error (unknown
+command or parameter, missing or unexpected argument) or a runtime failure
+returns 1; diagnostics and usage text are written to standard error.
 
 .SH SEE ALSO
 .BR uwg-quick (8),
