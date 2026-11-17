@@ -24,6 +24,10 @@ pub enum KeyError {
     },
 }
 
+fn zero_bytes(bytes: &[u8]) -> bool {
+    bytes.iter().fold(0u8, |acc, byte| acc | byte) == 0
+}
+
 fn decode_hex<const N: usize>(input: &str) -> Result<[u8; N], KeyError> {
     let bytes = input.as_bytes();
     if bytes.len() != N * 2 {
@@ -90,7 +94,7 @@ impl Key {
     /// Returns `true` if every byte of the key is zero.
     #[must_use]
     pub fn is_zero(&self) -> bool {
-        bool::from(self.0.ct_eq(&[0u8; KEY_LEN]))
+        zero_bytes(&self.0)
     }
 }
 
@@ -151,7 +155,7 @@ impl PublicKey {
     /// Returns `true` if every byte of the public key is zero.
     #[must_use]
     pub fn is_zero(&self) -> bool {
-        bool::from(self.0.ct_eq(&[0u8; KEY_LEN]))
+        zero_bytes(&self.0)
     }
 }
 
