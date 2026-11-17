@@ -401,6 +401,6 @@ python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнени
 
 ## Результаты замеров
 
-Итоговые результаты финального стенда (final2, 2026-11-17): условия, TCP- и
-UDP-матрицы, multi-peer ёмкость, CPU-вердикты и выводы — в
-[docs/RESULTS.md](docs/RESULTS.md).
+Итоговые результаты финального стенда (final3, 2026-11-17): условия, TCP- и
+UDP-матрицы, сравнение с final2, multi-peer ёмкость, CPU-вердикты, data-plane
+e2e и выводы — в [docs/RESULTS.md](docs/RESULTS.md).
