@@ -20,7 +20,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-netlink-packet-umbrawg = "0.2"
+netlink-packet-umbrawg = "0.3"
 ```
 
 ## Quick Start
@@ -152,12 +152,18 @@ UmbraWG 3.0 sends a `u32` (packed `u16` range), parsed into
 
 GitHub Actions runs:
 
-- `cargo test --lib` for unit tests;
-- `cargo test --test properties` for the `proptest` suite;
+- `deny` job: `cargo deny check --all-features` (dependency policy, `deny.toml`);
+- `cargo test --lib` for unit tests (38);
+- `cargo test --test builders` (42 builder tests);
+- `cargo test --test properties` for the `proptest` suite (15);
 - `cargo +nightly fuzz build` to keep both fuzz targets compiling;
 - `cargo +nightly fmt --all -- --check` and
   `cargo +nightly clippy --all-targets -- -D warnings`;
-- integration tests against a loaded `umbrawg` kernel module.
+- integration tests against a loaded `umbrawg` kernel module (7), with a
+  preflight probe that skips the job (with a warning) when the module is
+  unavailable;
+- `.github/workflows/packaging.yml` — Arch package, `.crate`, `cargo publish
+  --dry-run` and a GitHub Release on a `v*` tag.
 
 Integration tests need root, `iproute2`, and the module. A dedicated preflight
 job probes `ip link add ... type umbrawg`; if the family is unavailable the
@@ -191,6 +197,12 @@ Release mechanics:
 - the stable Arch package `contrib/arch/rust-netlink-packet-umbrawg` is **not**
   built in CI: `sha256sums` is the `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` placeholder
   and has to be recalculated with `updpkgsums` after the first tag.
+
+## Документация для разработчика
+
+Состояние проекта и план работ — в [TODO.md](TODO.md).
+Порядок выпуска всех четырёх репозиториев (теги, crates.io, AUR, пакеты) —
+в [RELEASE.md](https://github.com/ivlev-dev/umbrawg-tools/blob/master/RELEASE.md).
 
 ## License
 

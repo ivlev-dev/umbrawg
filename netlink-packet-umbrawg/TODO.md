@@ -10,8 +10,9 @@
   `I1..I5`, rekey/keepalive-параметры.
 - Паритет с `uapi/umbrawg.h`: `AdvancedSecurity`, `UWGPEER_F_HAS_ADVANCED_SECURITY`,
   `UWGALLOWEDIP_A_FLAGS`, `UWGALLOWEDIP_F_REMOVE_ME`, `UmbrawgCmd::UnknownPeer`.
-- Тесты: 32 unit, 7 интеграционных против реального модуля `umbrawg`, 10 property-тестов
-  (`proptest`), каркас фаззинга в `fuzz/`; форматирование — nightly `rustfmt`.
+- Тесты: 38 unit, 42 builder-тестов (`tests/builders.rs`), 7 интеграционных против
+  реального модуля `umbrawg`, 15 property-тестов (`proptest`), каркас фаззинга
+  в `fuzz/`; форматирование — nightly `rustfmt`.
 - `scripts/check-uapi-parity.sh` сверяет 27 констант с заголовком ядра.
 - Интеграционные тесты и примеры проверены на сервере с загруженным модулем.
 

@@ -35,7 +35,7 @@
  - Conversions from messages and peers back into configurations:
    `UmbrawgDeviceConfig::from_message`, `UmbrawgPeerConfig::from_peer` and
    the corresponding `TryFrom` implementations.
- - 42 new integration tests covering happy paths, range boundaries, invalid
+ - 42 builder tests covering happy paths, range boundaries, invalid
    key lengths, empty lists, IPv4/IPv6 and wire round trips.
 
 ### Other
