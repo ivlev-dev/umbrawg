@@ -142,10 +142,11 @@ Notes:
 - the `deb` job installs `dh-dkms` on top of `dkms`: on Debian trixie the
   `--with dkms` debhelper addon is a separate package, without it
   `dpkg-buildpackage` fails in `dh clean`;
-- `debian/changelog` still says `1.0.0`, so the `.deb` is named
-  `umbrawg-dkms_1.0.0_all.deb` and ships `/usr/src/umbrawg-1.0.0`. The job emits a
-  warning when this version differs from `src/version.h`; bump the changelog
-  before a real release (the RPM uses the version from `version.h` instead);
+- `debian/changelog` и `umbrawg-dkms.spec` несут версию `3.1.20261113-02`
+  (`3.1.20261113_02` в RPM-поле `Version`), поэтому `.deb` называется
+  `umbrawg-dkms_3.1.20261113-02_all.deb` и ставит
+  `/usr/src/umbrawg-3.1.20261113-02`; `src/Makefile` и `src/dkms.conf`
+  по умолчанию содержат `1.0.0`, упаковщики переопределяют их;
 - the DKMS packages ship sources only, so building them on the target machine
   needs kernel headers (`linux-headers`, `kernel-devel`, `linux-headers-$(uname -r)`)
   and a toolchain; `dkms` is the only hard dependency;

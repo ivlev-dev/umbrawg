@@ -1,7 +1,8 @@
 %global debug_package %{nil}
+%global upstream_version 3.1.20261113-02
 
 Name:           umbrawg-dkms
-Version:        1.0.20241112
+Version:        3.1.20261113_02
 Release:        1%{?dist}
 Epoch:          1
 URL:            https://github.com/ivlev-dev/umbrawg-linux-kernel-module
@@ -40,7 +41,7 @@ sed -i 's/install .* -D -t\(.\+\) /mkdir -p \1 \&\& \0/' %{_builddir}/umbrawg-li
 
 # Set version in dkms.conf and Makefile
 sed -i "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"%{version}\"/" %{_builddir}/umbrawg-linux-kernel-module-%{version}/src/dkms.conf
-sed -i "s/^UMBRAWG_VERSION = .*/UMBRAWG_VERSION = %{version}/" %{_builddir}/umbrawg-linux-kernel-module-%{version}/src/Makefile
+sed -i "s/^UMBRAWG_VERSION = .*/UMBRAWG_VERSION = %{upstream_version}/" %{_builddir}/umbrawg-linux-kernel-module-%{version}/src/Makefile
 
 %build
 
@@ -85,7 +86,10 @@ exit 0
 %{_usrsrc}/umbrawg-%{version}
 
 %changelog
-* Thu Oct 23 2024 Yuri Egorov <ye@amnezia.org> - 1.0.20241023-1
+* Tue Nov 17 2026 Yuri Egorov <ye@umbra.org> - 3.1.20261113_02-1
+- Update to UmbraWG 3.1.20261113-02
+
+* Wed Oct 23 2024 Yuri Egorov <ye@amnezia.org> - 1.0.20241023-1
 - Update to 1.0.20241023
 
 * Thu Oct 22 2024 Yuri Egorov <ye@amnezia.org> - 1.0.20241022-1

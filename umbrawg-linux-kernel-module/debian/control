@@ -3,7 +3,7 @@ Section: net
 Priority: optional
 Maintainer: Alex Ivlev <ai@itegroup.ru>
 Build-Depends:
- debhelper,
+ debhelper-compat (= 13),
  dkms
 Standards-Version: 4.5.1
 Homepage: https://github.com/ivlev-dev/umbrawg-linux-kernel-module
@@ -16,7 +16,6 @@ Architecture: all
 Section: kernel
 Depends:
  ${misc:Depends},
- ${perl:Depends},
 Recommends:
  umbrawg (>= 0.0.20191219),
  umbrawg-tools (>= 0.0.20191219),
