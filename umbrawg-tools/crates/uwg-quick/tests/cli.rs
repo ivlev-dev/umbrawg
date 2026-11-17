@@ -80,6 +80,35 @@ fn help_with_extra_argument_fails() {
 }
 
 #[test]
+fn missing_configuration_argument_fails() {
+    let output = binary().arg("up").output().expect("run uwg-quick");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.starts_with("Usage: uwg-quick"));
+}
+
+#[test]
+fn extra_arguments_fail() {
+    let output = binary()
+        .arg("up")
+        .arg("wg0")
+        .arg("extra")
+        .output()
+        .expect("run uwg-quick");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.starts_with("Usage: uwg-quick"));
+}
+
+#[test]
+fn unknown_option_fails() {
+    let output = binary().arg("--version").output().expect("run uwg-quick");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8(output.stderr).expect("utf-8 stderr");
+    assert!(stderr.starts_with("Usage: uwg-quick"));
+}
+
+#[test]
 fn strip_does_not_require_root() {
     let directory = temporary_directory("strip");
     let tools = directory.join("tools");

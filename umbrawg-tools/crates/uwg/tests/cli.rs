@@ -442,5 +442,89 @@ fn show_rejects_unknown_parameters() {
 
     let output = run(&directory, &["show", "uwg0", "bogus-parameter"]);
     assert_eq!(output.status.code(), Some(1));
-    assert!(stderr(&output).contains("Invalid parameter: `bogus-parameter'"));
+    let stderr = stderr(&output);
+    assert!(stderr.contains("Invalid parameter: `bogus-parameter'"));
+    assert!(stderr.contains("Usage: uwg show"));
+}
+
+fn run_without_runtime(arguments: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_uwg"))
+        .env_remove("WG_COLOR_MODE")
+        .args(arguments)
+        .output()
+        .expect("run uwg")
+}
+
+#[test]
+fn usage_errors_exit_one_and_print_usage() {
+    let cases: &[&[&str]] = &[
+        &["bogus"],
+        &["--unknown-flag"],
+        &["-V"],
+        &["--version", "extra"],
+        &["-v", "extra"],
+        &["--help", "extra"],
+        &["-h", "extra"],
+        &["show", "interfaces", "extra"],
+        &["showconf"],
+        &["setconf"],
+        &["setconf", "uwg0"],
+        &["addconf"],
+        &["addconf", "uwg0"],
+        &["syncconf"],
+        &["syncconf", "uwg0"],
+        &["set"],
+        &["set", "uwg0"],
+        &["genkey", "extra"],
+        &["pubkey", "extra"],
+        &["version", "extra"],
+        &["help", "extra"],
+    ];
+    for arguments in cases {
+        let output = run_without_runtime(arguments);
+        let stderr = stderr(&output);
+        assert_eq!(
+            output.status.code(),
+            Some(1),
+            "{arguments:?} exited with {:?}: {stderr}",
+            output.status.code()
+        );
+        assert!(
+            stderr.contains("Usage:"),
+            "{arguments:?} printed no usage: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn help_forms_exit_zero_and_print_usage_to_stdout() {
+    for arguments in [&["--help"][..], &["-h"][..], &["help"][..]] {
+        let output = run_without_runtime(arguments);
+        assert!(
+            output.status.success(),
+            "{arguments:?} failed: {}",
+            stderr(&output)
+        );
+        let stdout = String::from_utf8(output.stdout).expect("utf-8 stdout");
+        assert!(stdout.contains("Usage: uwg"), "{arguments:?}: {stdout}");
+        assert!(stdout.contains("addconf"), "{arguments:?}: {stdout}");
+    }
+}
+
+#[test]
+fn version_forms_exit_zero() {
+    let expected = format!("uwg v{}\n", env!("CARGO_PKG_VERSION"));
+    for arguments in [&["--version"][..], &["-v"][..], &["version"][..]] {
+        let output = run_without_runtime(arguments);
+        assert!(
+            output.status.success(),
+            "{arguments:?} failed: {}",
+            stderr(&output)
+        );
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("utf-8 stdout"),
+            expected,
+            "{arguments:?}"
+        );
+    }
 }

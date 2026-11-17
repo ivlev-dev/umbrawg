@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 pub const PROGRAM: &str = "uwg";
 
@@ -75,6 +75,16 @@ pub struct SetconfArgs {
     pub interface: String,
     #[arg(value_name = "configuration filename")]
     pub filename: PathBuf,
+}
+
+pub fn command() -> clap::Command {
+    Cli::command().disable_version_flag(true).arg(
+        clap::Arg::new("version_flag")
+            .short('v')
+            .long("version")
+            .action(clap::ArgAction::Version)
+            .help("Print version"),
+    )
 }
 
 pub fn show_usage() -> String {
@@ -249,5 +259,14 @@ mod tests {
         let error = Cli::try_parse_from(["uwg", "--version"]).expect_err("version exits");
         assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
         assert!(error.to_string().contains(env!("CARGO_PKG_VERSION")));
+    }
+
+    #[test]
+    fn version_flag_uses_legacy_short_form() {
+        let error = command()
+            .try_get_matches_from(["uwg", "-v"])
+            .expect_err("version exits");
+        assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+        assert!(command().try_get_matches_from(["uwg", "-V"]).is_err());
     }
 }
