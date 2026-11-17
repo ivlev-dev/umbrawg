@@ -6,7 +6,7 @@ _upstream_name=umbrawg-tools
 _netlink_pkg=netlink-packet-umbrawg
 pkgdesc="UmbraWG command line tools: uwg and uwg-quick (git master)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/ivlev-dev/umbrawg-tools"
+url="https://github.com/ivlev-dev/umbrawg"
 license=('GPL-2.0-only')
 depends=('glibc' 'gcc-libs' 'iproute2')
 makedepends=('cargo' 'rust')
@@ -22,13 +22,12 @@ optdepends=(
 provides=("${pkgname%-git}")
 conflicts=("${pkgname%-git}")
 source=(
-  "${_upstream_name}::git+https://github.com/ivlev-dev/${_upstream_name}.git#branch=master"
-  "${_netlink_pkg}::git+https://github.com/ivlev-dev/${_netlink_pkg}.git#branch=main"
+  "umbrawg::git+https://github.com/ivlev-dev/umbrawg.git#branch=master"
 )
-sha256sums=('SKIP' 'SKIP')
+sha256sums=('SKIP')
 
 pkgver() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-tools"
   local version
   version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)
   if [[ -z ${version} ]]; then
@@ -39,23 +38,23 @@ pkgver() {
 }
 
 prepare() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-tools"
   cargo fetch --locked
 }
 
 build() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-tools"
   export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${srcdir}/=/build/"
   cargo build --release --frozen --package uwg --package uwg-quick
 }
 
 check() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-tools"
   cargo test --release --frozen --workspace
 }
 
 package() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-tools"
 
   install -Dpm0755 target/release/uwg "${pkgdir}/usr/bin/uwg"
   install -Dpm0755 target/release/uwg-quick "${pkgdir}/usr/bin/uwg-quick"

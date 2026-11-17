@@ -7,16 +7,16 @@ _upstream_version=3.1.20261113-02
 _upstream_name=umbrawg-linux-kernel-module
 pkgdesc="UmbraWG VPN tunnel kernel module (DKMS sources)"
 arch=('any')
-url="https://github.com/ivlev-dev/${_upstream_name}"
+url="https://github.com/ivlev-dev/umbrawg"
 license=('GPL-2.0-only')
 depends=('dkms')
 conflicts=("${pkgname}-git")
 install="${pkgname}.install"
-source=("${pkgname}-${pkgver}.tar.gz::https://github.com/ivlev-dev/${_upstream_name}/archive/v${_upstream_version}.tar.gz")
+source=("${pkgname}-${pkgver}.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/kernel-v${_upstream_version}.tar.gz")
 sha256sums=('TODO_UPDPKGSUMS_AFTER_FIRST_TAG')
 
 package() {
-  cd "${srcdir}/${_upstream_name}-${_upstream_version}/src"
+  cd "${srcdir}/umbrawg-kernel-v${_upstream_version}/umbrawg-linux-kernel-module/src"
 
   make dkms-install \
     DESTDIR="${pkgdir}" \

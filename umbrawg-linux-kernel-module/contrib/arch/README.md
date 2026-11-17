@@ -8,7 +8,7 @@
 | Пакет | Каталог | Тип |
 |---|---|---|
 | `umbrawg-dkms` | `umbrawg-dkms/` | стабильный, source — архив тега `v3.1.20261113-02` |
-| `umbrawg-dkms-git` | `umbrawg-dkms-git/` | VCS, `git+https://github.com/ivlev-dev/umbrawg-linux-kernel-module.git#branch=master` |
+| `umbrawg-dkms-git` | `umbrawg-dkms-git/` | VCS, `git+https://github.com/ivlev-dev/umbrawg.git#branch=master` |
 
 Оба пакета ставят только исходники в `/usr/src/umbrawg-<pkgver>`, сборку
 выполняет DKMS при установке и при обновлении ядра. Оба конфликтуют друг с

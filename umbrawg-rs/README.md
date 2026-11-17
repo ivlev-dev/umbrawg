@@ -1,6 +1,6 @@
 # UmbraWG userspace (Rust)
 
-![CI](https://github.com/ivlev-dev/umbrawg-rs/actions/workflows/ci.yml/badge.svg) ![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
 
 Userspace daemon for the UmbraWG protocol (WireGuard-compatible Noise IK with
 UmbraWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
@@ -75,7 +75,7 @@ qemu-arm-static -L /usr/arm-linux-gnueabihf target/armv7-unknown-linux-gnueabihf
 
 ## CI
 
-`.github/workflows/ci.yml`:
+`../.github/workflows/rs-ci.yml`:
 
 | Job | Contents |
 |---|---|
@@ -84,7 +84,7 @@ qemu-arm-static -L /usr/arm-linux-gnueabihf target/armv7-unknown-linux-gnueabihf
 | `msrv 1.88` | `cargo build --workspace` and `cargo test --no-run` on the declared minimum toolchain |
 | `build <target>` | release build of `umbrawg` for all three targets, tests compiled for the target, `file`/`readelf` architecture check, qemu smoke run of the binary and unit tests under qemu, packaged `tar.gz` artifact |
 | `data-plane e2e` | two daemons in two network namespaces over a veth pair: handshake, ping, iperf3, 32 MiB integrity check in the obfuscation × parallel-RX matrix; `SKIP` when TUN, `unshare -Urn` or `uwg` is unavailable |
-| `GitHub Release` | on a `v*` tag: `SHA256SUMS` and the archives are published |
+| `GitHub Release` | on a `rs-v*` tag: `SHA256SUMS` and the archives are published |
 
 The build job runs on Ubuntu 22.04 to keep the produced binaries usable on older
 userlands. Each archive is a relocatable tree:
@@ -99,10 +99,10 @@ umbrawg-<version>-<target>/
 The `umbrawg@.service` unit currently ships with the `umbrawg-tools` package
 (`systemd/umbrawg@.service`), so the daemon archive contains only the binary.
 
-### Packaging (`packaging.yml`)
+### Packaging (`rs-packaging.yml`)
 
-`.github/workflows/packaging.yml` builds distribution packages and does not
-duplicate the `tar.gz` archives from `ci.yml`:
+`../.github/workflows/rs-packaging.yml` builds distribution packages and does not
+duplicate the `tar.gz` archives from `rs-ci.yml`:
 
 | Job | Image | Contents |
 |---|---|---|
@@ -115,11 +115,11 @@ Release mechanics:
   `workflow_dispatch` takes an optional `version` input for a manual check;
 - no secrets are needed — the AUR upload stays manual;
 - the release job uses `concurrency: release-<ref>` with `cancel-in-progress:
-  false`. The `GitHub Release` job in `ci.yml` still has no concurrency group,
+  false`. The `GitHub Release` job in `rs-ci.yml` still has no concurrency group,
   so a single tag can start both release steps at once; adding the same group
   there is tracked in `TODO.md`;
-- checksum files are kept apart: `ci.yml` publishes `SHA256SUMS` for the
-  `tar.gz` archives, `packaging.yml` publishes `SHA256SUMS.pkg` for the Arch
+- checksum files are kept apart: `rs-ci.yml` publishes `SHA256SUMS` for the
+  `tar.gz` archives, `rs-packaging.yml` publishes `SHA256SUMS.pkg` for the Arch
   package, so neither step overwrites the other's asset;
 - the stable Arch package `contrib/arch/umbrawg-daemon` is not built in CI: its
   `sha256sums` is a placeholder and needs `updpkgsums` after the first tag.
@@ -552,7 +552,7 @@ Netlink). Юнит выдаёт только эту capability (`AmbientCapabili
 Состояние проекта и план работ — в [TODO.md](TODO.md).
 Архитектура — в [DESIGN.md](DESIGN.md).
 Порядок выпуска всех четырёх репозиториев — в
-[RELEASE.md](https://github.com/ivlev-dev/umbrawg-tools/blob/master/RELEASE.md).
+[RELEASE.md](https://github.com/ivlev-dev/umbrawg/blob/master/umbrawg-tools/RELEASE.md).
 
 ## Status
 

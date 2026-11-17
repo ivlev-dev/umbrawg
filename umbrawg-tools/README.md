@@ -1,6 +1,6 @@
 # umbrawg-tools
 
-![CI](https://github.com/ivlev-dev/umbrawg-tools/actions/workflows/rust-ci.yml/badge.svg) ![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)
+![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)
 
 Rust-утилиты для настройки UmbraWG: `uwg` и `uwg-quick`.
 
@@ -39,23 +39,21 @@ cargo clippy --workspace --all-targets -- -D warnings
 
 GitHub Actions:
 
-- `.github/workflows/rust-ci.yml` — `cargo fmt --all -- --check`,
+- `../.github/workflows/tools-ci.yml` — `cargo fmt --all -- --check`,
   `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace`;
-- `.github/workflows/rust-build.yml` — release-сборка `uwg` и `uwg-quick` под
+  `cargo test --workspace`, release-сборка `uwg` и `uwg-quick` под
   `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu` и
-  `armv7-unknown-linux-gnueabihf`, релиз по тегу `v*`;
-- `.github/workflows/packaging.yml` — пакеты `.deb`, `.rpm` и Arch в контейнерах
-  на тег `v*`, публикация в GitHub Release (см. «Релизный CI пакетов»);
-- `.github/workflows/legacy-linux-build.yml` — прежняя C-сборка, только
-  `workflow_dispatch`, без публикации релизов.
+  `armv7-unknown-linux-gnueabihf`, а также прежняя C-сборка
+  (`workflow_dispatch`);
+- `../.github/workflows/tools-packaging.yml` — пакеты `.deb`, `.rpm` и Arch
+  в контейнерах на тег `tools-v*`, публикация в GitHub Release
+  (см. «Релизный CI пакетов»).
 
-Workflow с Rust-сборкой клонируют `ivlev-dev/netlink-packet-umbrawg` вторым
-checkout в `netlink-packet-umbrawg/`, а сам репозиторий — в `tools/`. Поэтому
-path-зависимость `../netlink-packet-umbrawg` разрешается без правки
-`Cargo.toml`, локальная сборка не меняется.
+Монорепозиторий даёт `umbrawg-tools/` и `netlink-packet-umbrawg/` одним
+checkout, поэтому path-зависимость `../netlink-packet-umbrawg` разрешается без
+второго checkout и без правки `Cargo.toml`.
 
-Кроме fmt/clippy/test в `rust-ci.yml` есть:
+Кроме fmt/clippy/test в `tools-ci.yml` есть:
 
 - `deny` — `cargo deny check --all-features` (политика зависимостей, `deny.toml`);
 - `bench` — `bash -n` стенда, тесты хелперов (62) и тесты отчёта (17 из 47);
@@ -65,7 +63,7 @@ path-зависимость `../netlink-packet-umbrawg` разрешается �
   `debian/changelog` / spec, `bash`/`sh`/`fish` синтаксис, YAML workflow,
   `groff -man -z`, `systemd-analyze verify` и проверка, что каждый
   поставляемый артефакт (man, completions, unit-файлы) реально ставится
-  `debian/rules`, spec и `rust-build.yml`;
+  `debian/rules`, spec и `tools-ci.yml`;
 - `docs` — сборка документации (`cargo doc`) с `-D warnings`.
 
 ## Упаковка
@@ -138,7 +136,7 @@ lintian dist/umbrawg-tools_*.deb
 
 ### Релизный CI пакетов
 
-`.github/workflows/packaging.yml` повторяет проверенные рецепты выше на
+`../.github/workflows/tools-packaging.yml` повторяет проверенные рецепты выше на
 раннерах GitHub Actions:
 
 | Job | Образ | Шаги |
@@ -165,7 +163,7 @@ lintian dist/umbrawg-tools_*.deb
 попадают SRPM и `-debuginfo`/`-debugsource`, в arch — `-debug`: это обычный
 вывод `rpmbuild` и `makepkg`, они же уходят в релиз. Job `release` скачивает
 все три артефакта, считает `SHA256SUMS` и прикладывает их к релизу того же
-тега, куда `rust-build.yml` кладёт тарболы бинарников; оба релизных job'а
+тега, куда `tools-ci.yml` кладёт тарболы бинарников; оба релизных job'а
 используют общую concurrency-группу `release-${{ github.ref }}`, поэтому не
 перезаписывают релиз одновременно.
 
@@ -191,8 +189,8 @@ lintian dist/umbrawg-tools_*.deb
   пакета — архивы тегов из его `PKGBUILD` (`pkgver`, `_netlink_ver`), поэтому
   перед тегом версии и суммы обновляют вручную; при рассинхроне `makepkg`
   упадёт на проверке контрольных сумм.
-- `scripts/check-packaging.sh` (job `packaging` в `rust-ci.yml`) разбирает все
-  YAML workflow, поэтому синтаксические ошибки в `packaging.yml` видны до тега;
+- `scripts/check-packaging.sh` (job `packaging` в `tools-ci.yml`) разбирает все
+  YAML workflow, поэтому синтаксические ошибки в `tools-packaging.yml` видны до тега;
   локальные рецепты — раздел «Сборка в Docker».
 
 Секреты и права:
@@ -200,8 +198,8 @@ lintian dist/umbrawg-tools_*.deb
 - отдельных секретов не нужно, достаточно автоматического `GITHUB_TOKEN`;
 - на уровне workflow `permissions: contents: read`, у job `release` —
   `contents: write` (создание релиза и загрузка файлов);
-- оба репозитория должны оставаться публичными: `actions/checkout` второго
-  дерева и `makepkg` клонируют `ivlev-dev/netlink-packet-umbrawg` без токена;
+- репозиторий `ivlev-dev/umbrawg` должен оставаться публичным: `makepkg`
+  клонирует его (и `netlink-packet-umbrawg` внутри него) без токена;
 - публикация в AUR — отдельный шаг: `scripts/aur-publish.sh` по умолчанию
   работает в dry-run; нужен AUR-аккаунт и SSH-ключ (см. «Публикация в AUR»).
 

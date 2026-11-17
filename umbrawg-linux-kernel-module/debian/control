@@ -6,9 +6,9 @@ Build-Depends:
  debhelper-compat (= 13),
  dkms
 Standards-Version: 4.5.1
-Homepage: https://github.com/ivlev-dev/umbrawg-linux-kernel-module
-Vcs-Git: https://github.com/ivlev-dev/umbrawg-linux-kernel-module.git
-Vcs-Browser: https://github.com/ivlev-dev/umbrawg-linux-kernel-module
+Homepage: https://github.com/ivlev-dev/umbrawg
+Vcs-Git: https://github.com/ivlev-dev/umbrawg.git
+Vcs-Browser: https://github.com/ivlev-dev/umbrawg/tree/master/umbrawg-linux-kernel-module
 Rules-Requires-Root: no
 
 Package: umbrawg-dkms

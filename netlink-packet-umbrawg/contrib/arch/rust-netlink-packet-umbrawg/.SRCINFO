@@ -2,10 +2,10 @@ pkgbase = rust-netlink-packet-umbrawg
 	pkgdesc = UmbraWG generic netlink packet definitions (Rust crate sources)
 	pkgver = 0.3.0
 	pkgrel = 1
-	url = https://github.com/ivlev-dev/netlink-packet-umbrawg
+	url = https://github.com/ivlev-dev/umbrawg
 	arch = any
 	license = MIT
-	source = netlink-packet-umbrawg-0.3.0.tar.gz::https://github.com/ivlev-dev/netlink-packet-umbrawg/archive/v0.3.0.tar.gz
+	source = netlink-packet-umbrawg-0.3.0.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/netlink-v0.3.0.tar.gz
 	sha256sums = TODO_UPDPKGSUMS_AFTER_FIRST_TAG
 
 pkgname = rust-netlink-packet-umbrawg

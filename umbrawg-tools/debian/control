@@ -7,9 +7,9 @@ Build-Depends:
  debhelper-compat (= 13),
  rustc (>= 1.85)
 Standards-Version: 4.6.2
-Homepage: https://github.com/ivlev-dev/umbrawg-tools
-Vcs-Git: https://github.com/ivlev-dev/umbrawg-tools
-Vcs-Browser: https://github.com/ivlev-dev/umbrawg-tools
+Homepage: https://github.com/ivlev-dev/umbrawg
+Vcs-Git: https://github.com/ivlev-dev/umbrawg.git
+Vcs-Browser: https://github.com/ivlev-dev/umbrawg/tree/master/umbrawg-tools
 Rules-Requires-Root: no
 
 Package: umbrawg-tools

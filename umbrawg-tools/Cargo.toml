@@ -12,7 +12,7 @@ version = "0.2.0"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-2.0-only"
-repository = "https://github.com/ivlev-dev/umbrawg-tools"
+repository = "https://github.com/ivlev-dev/umbrawg/tree/master/umbrawg-tools"
 
 [workspace.dependencies]
 umbrawg-config = { version = "0.2.0", path = "crates/umbrawg-config" }

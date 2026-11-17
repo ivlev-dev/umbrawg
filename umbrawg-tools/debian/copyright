@@ -1,6 +1,6 @@
 Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: umbrawg-tools
-Source: https://github.com/ivlev-dev/umbrawg-tools
+Source: https://github.com/ivlev-dev/umbrawg
 
 Files: *
 Copyright: 2026 UmbraWG contributors

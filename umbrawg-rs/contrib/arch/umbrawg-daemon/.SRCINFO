@@ -2,7 +2,7 @@ pkgbase = umbrawg-daemon
 	pkgdesc = UmbraWG userspace daemon
 	pkgver = 0.1.0
 	pkgrel = 1
-	url = https://github.com/ivlev-dev/umbrawg-rs
+	url = https://github.com/ivlev-dev/umbrawg
 	arch = x86_64
 	arch = aarch64
 	license = MIT
@@ -12,7 +12,7 @@ pkgbase = umbrawg-daemon
 	depends = gcc-libs
 	optdepends = umbrawg-tools: управление интерфейсами через uwg и uwg-quick
 	conflicts = umbrawg-daemon-git
-	source = umbrawg-daemon-0.1.0.tar.gz::https://github.com/ivlev-dev/umbrawg-rs/archive/v0.1.0.tar.gz
+	source = umbrawg-daemon-0.1.0.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/rs-v0.1.0.tar.gz
 	sha256sums = TODO_UPDPKGSUMS_AFTER_FIRST_TAG
 
 pkgname = umbrawg-daemon

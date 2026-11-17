@@ -5,18 +5,18 @@ pkgrel=1
 _upstream_name=umbrawg-rs
 pkgdesc="UmbraWG userspace daemon (git master)"
 arch=('x86_64' 'aarch64')
-url="https://github.com/ivlev-dev/${_upstream_name}"
+url="https://github.com/ivlev-dev/umbrawg"
 license=('MIT')
 depends=('glibc' 'gcc-libs')
 makedepends=('cargo' 'rust')
 optdepends=('umbrawg-tools: управление интерфейсами через uwg и uwg-quick')
 provides=("${pkgname%-git}")
 conflicts=("${pkgname%-git}")
-source=("${_upstream_name}::git+https://github.com/ivlev-dev/${_upstream_name}.git#branch=master")
+source=("umbrawg::git+https://github.com/ivlev-dev/umbrawg.git#branch=master")
 sha256sums=('SKIP')
 
 pkgver() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-rs"
   local version
   version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)
   if [[ -z ${version} ]]; then
@@ -27,23 +27,23 @@ pkgver() {
 }
 
 prepare() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-rs"
   cargo fetch --locked
 }
 
 build() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-rs"
   cargo build --release --frozen --package umbrawg
 }
 
 check() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-rs"
   cargo test --release --frozen --workspace --exclude umbrawg-bench --exclude umbrawg-uapi
   cargo test --release --frozen --package umbrawg-uapi --lib
 }
 
 package() {
-  cd "${srcdir}/${_upstream_name}"
+  cd "${srcdir}/umbrawg/umbrawg-rs"
 
   install -Dpm0755 target/release/umbrawg "${pkgdir}/usr/bin/umbrawg"
 

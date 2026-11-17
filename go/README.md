@@ -46,8 +46,8 @@ This runs on Windows, you should use it from [umbrawg-windows](https://github.co
 This requires an installation of the latest version of [Go](https://go.dev/).
 
 ```
-$ git clone https://github.com/ivlev-dev/umbrawg-rs
-$ cd umbrawg-rs
+$ git clone https://github.com/ivlev-dev/umbrawg.git
+$ cd umbrawg/go
 $ make
 ```
 

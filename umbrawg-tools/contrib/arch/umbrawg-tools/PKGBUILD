@@ -6,7 +6,7 @@ _netlink_pkg=netlink-packet-umbrawg
 _netlink_ver=0.3.0
 pkgdesc="UmbraWG command line tools: uwg and uwg-quick"
 arch=('x86_64' 'aarch64')
-url="https://github.com/ivlev-dev/umbrawg-tools"
+url="https://github.com/ivlev-dev/umbrawg"
 license=('GPL-2.0-only')
 depends=('glibc' 'gcc-libs' 'iproute2')
 makedepends=('cargo' 'rust')
@@ -21,8 +21,8 @@ optdepends=(
 )
 conflicts=("${pkgname}-git")
 source=(
-  "${pkgname}-${pkgver}.tar.gz::https://github.com/ivlev-dev/umbrawg-tools/archive/v${pkgver}.tar.gz"
-  "${_netlink_pkg}-${_netlink_ver}.tar.gz::https://github.com/ivlev-dev/${_netlink_pkg}/archive/v${_netlink_ver}.tar.gz"
+  "${pkgname}-${pkgver}.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/tools-v${pkgver}.tar.gz"
+  "${_netlink_pkg}-${_netlink_ver}.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/netlink-v${_netlink_ver}.tar.gz"
 )
 sha256sums=(
   'TODO_UPDPKGSUMS_AFTER_FIRST_TAG'
@@ -30,24 +30,24 @@ sha256sums=(
 )
 
 prepare() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
-  ln -sfn "${srcdir}/${_netlink_pkg}-${_netlink_ver}" "${srcdir}/${_netlink_pkg}"
+  cd "${srcdir}/umbrawg-tools-v${pkgver}/umbrawg-tools"
+  ln -sfn "${srcdir}/umbrawg-netlink-v${_netlink_ver}/netlink-packet-umbrawg" "${srcdir}/${_netlink_pkg}"
   cargo fetch --locked
 }
 
 build() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
+  cd "${srcdir}/umbrawg-tools-v${pkgver}/umbrawg-tools"
   export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${srcdir}/=/build/"
   cargo build --release --frozen --package uwg --package uwg-quick
 }
 
 check() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
+  cd "${srcdir}/umbrawg-tools-v${pkgver}/umbrawg-tools"
   cargo test --release --frozen --workspace
 }
 
 package() {
-  cd "${srcdir}/${pkgname}-${pkgver}"
+  cd "${srcdir}/umbrawg-tools-v${pkgver}/umbrawg-tools"
 
   install -Dpm0755 target/release/uwg "${pkgdir}/usr/bin/uwg"
   install -Dpm0755 target/release/uwg-quick "${pkgdir}/usr/bin/uwg-quick"

@@ -5,15 +5,15 @@ pkgrel=1
 _crate=netlink-packet-umbrawg
 pkgdesc="UmbraWG generic netlink packet definitions (Rust crate sources, git main)"
 arch=('any')
-url="https://github.com/ivlev-dev/${_crate}"
+url="https://github.com/ivlev-dev/umbrawg"
 license=('MIT')
 provides=("${pkgname%-git}")
 conflicts=("${pkgname%-git}")
-source=("${_crate}::git+https://github.com/ivlev-dev/${_crate}.git#branch=main")
+source=("umbrawg::git+https://github.com/ivlev-dev/umbrawg.git#branch=master")
 sha256sums=('SKIP')
 
 pkgver() {
-  cd "${srcdir}/${_crate}"
+  cd "${srcdir}/umbrawg/netlink-packet-umbrawg"
   local version
   version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)
   if [[ -z ${version} ]]; then
@@ -24,7 +24,7 @@ pkgver() {
 }
 
 package() {
-  cd "${srcdir}/${_crate}"
+  cd "${srcdir}/umbrawg/netlink-packet-umbrawg"
 
   local crate_version
   crate_version=$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n1)

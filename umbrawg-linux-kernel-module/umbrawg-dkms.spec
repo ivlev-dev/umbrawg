@@ -5,13 +5,13 @@ Name:           umbrawg-dkms
 Version:        3.1.20261113_02
 Release:        1%{?dist}
 Epoch:          1
-URL:            https://github.com/ivlev-dev/umbrawg-linux-kernel-module
+URL:            https://github.com/ivlev-dev/umbrawg
 Summary:        UmbraWG - WireGuard-compatible VPN tunnel with obfuscation
 License:        GPL-2.0-only
 Group:          System Environment/Kernel
 BuildArch:      noarch
 
-Source0:        https://github.com/ivlev-dev/umbrawg-linux-kernel-module/archive/refs/tags/v%{version}.tar.gz
+Source0:        https://github.com/ivlev-dev/umbrawg/archive/refs/tags/kernel-v%{version}.tar.gz
 
 BuildRequires:  kernel-devel
 BuildRequires:  sed

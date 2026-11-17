@@ -3,8 +3,8 @@ Version:        0.2.0
 Release:        1%{?dist}
 Summary:        Rust command-line tools for the UmbraWG VPN
 License:        GPL-2.0-only
-URL:            https://github.com/ivlev-dev/umbrawg-tools
-Source0:        %{name}-%{version}.tar.gz
+URL:            https://github.com/ivlev-dev/umbrawg
+Source0:        https://github.com/ivlev-dev/umbrawg/archive/refs/tags/tools-v%{version}.tar.gz
 BuildRequires:  cargo
 BuildRequires:  gcc
 BuildRequires:  make

@@ -5,13 +5,13 @@ pkgrel=1
 _crate=netlink-packet-umbrawg
 pkgdesc="UmbraWG generic netlink packet definitions (Rust crate sources)"
 arch=('any')
-url="https://github.com/ivlev-dev/${_crate}"
+url="https://github.com/ivlev-dev/umbrawg"
 license=('MIT')
-source=("${_crate}-${pkgver}.tar.gz::https://github.com/ivlev-dev/${_crate}/archive/v${pkgver}.tar.gz")
+source=("${_crate}-${pkgver}.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/netlink-v${pkgver}.tar.gz")
 sha256sums=('TODO_UPDPKGSUMS_AFTER_FIRST_TAG')
 
 package() {
-  cd "${srcdir}/${_crate}-${pkgver}"
+  cd "${srcdir}/umbrawg-netlink-v${pkgver}/netlink-packet-umbrawg"
 
   local registry="${pkgdir}/usr/share/cargo/registry/${_crate}-${pkgver}"
 

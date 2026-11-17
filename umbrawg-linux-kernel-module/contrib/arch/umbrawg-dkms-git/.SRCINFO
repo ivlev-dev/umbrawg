@@ -2,14 +2,14 @@ pkgbase = umbrawg-dkms-git
 	pkgdesc = UmbraWG VPN tunnel kernel module (DKMS sources, git master)
 	pkgver = 3.1.20261113_02.r0.g0000000
 	pkgrel = 1
-	url = https://github.com/ivlev-dev/umbrawg-linux-kernel-module
+	url = https://github.com/ivlev-dev/umbrawg
 	install = umbrawg-dkms-git.install
 	arch = any
 	license = GPL-2.0-only
 	depends = dkms
 	provides = umbrawg-dkms
 	conflicts = umbrawg-dkms
-	source = umbrawg-linux-kernel-module::git+https://github.com/ivlev-dev/umbrawg-linux-kernel-module.git#branch=master
+	source = umbrawg::git+https://github.com/ivlev-dev/umbrawg.git#branch=master
 	sha256sums = SKIP
 
 pkgname = umbrawg-dkms-git

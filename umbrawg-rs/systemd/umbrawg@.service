@@ -1,6 +1,6 @@
 [Unit]
 Description=UmbraWG userspace daemon for %i
-Documentation=https://github.com/ivlev-dev/umbrawg-rs
+Documentation=https://github.com/ivlev-dev/umbrawg/tree/master/umbrawg-rs
 After=network-pre.target
 Before=network.target
 Wants=network-pre.target

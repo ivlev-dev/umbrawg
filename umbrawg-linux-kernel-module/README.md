@@ -53,8 +53,8 @@ You may need to install kernel headers and/or build essentials packages before r
 
 1. In Terminal:
     ```shell
-    git clone https://github.com/ivlev-dev/umbrawg-linux-kernel-module.git
-    cd umbrawg-linux-kernel-module/src
+    git clone https://github.com/ivlev-dev/umbrawg.git
+    cd umbrawg/umbrawg-linux-kernel-module/src
     ```
 
 2. Now perform build and installation (use `LLVM=1` if the kernel was built with clang, e.g. Arch/CachyOS):
@@ -83,17 +83,17 @@ You may need to install kernel headers and/or build essentials packages before r
 
 ## Continuous integration
 
-`.github/workflows/build.yml` catches build regressions on every push to
-`master` and `feature/**`, on every pull request, and on manual
-`workflow_dispatch`. The workflow runs only when the module sources or the
-workflow itself change (`src/**`, `Makefile`, `Kbuild`, `Kconfig`,
-`.github/workflows/build.yml`).
+`.github/workflows/kernel-build.yml` (в корне монорепозитория) catches build
+regressions on every push to `master` and `feature/**`, on every pull request,
+and on manual `workflow_dispatch`. The workflow runs only when the module
+sources or the workflow itself change (`umbrawg-linux-kernel-module/**`,
+`.github/workflows/kernel-*.yml`).
 
 | Job | Image | What it does |
 |---|---|---|
 | `release` | `archlinux:latest` | installs `base-devel git clang llvm lld bc linux-headers kmod`, builds `src/umbrawg.ko`, checks `modinfo` (name and vermagic) and uploads the module with its `modinfo` output |
 | `debug` | `archlinux:latest` | builds `make -C src module-debug` with `V=1`, fails on any `warning:`, uploads the full build log |
-| `netlink parity` | `archlinux:latest` | checks out `ivlev-dev/umbrawg-tools` and `ivlev-dev/netlink-packet-umbrawg` next to the module, builds `uwg`, and runs `src/tests/netlink-parity.sh` if the module can be loaded |
+| `netlink parity` | `archlinux:latest` | builds `uwg` from `umbrawg-tools/` (в том же монорепо, без второго checkout) and runs `src/tests/netlink-parity.sh` if the module can be loaded |
 
 Requirements and behaviour:
 
@@ -264,7 +264,7 @@ dmesg -wT
 [docs/PEER-SHARDING.md](docs/PEER-SHARDING.md). История версий — в
 [CHANGELOG.md](CHANGELOG.md).
 Порядок выпуска всех четырёх репозиториев — в
-[RELEASE.md](https://github.com/ivlev-dev/umbrawg-tools/blob/master/RELEASE.md).
+[RELEASE.md](https://github.com/ivlev-dev/umbrawg/blob/master/umbrawg-tools/RELEASE.md).
 
 ## License
 

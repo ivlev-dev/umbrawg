@@ -4,7 +4,7 @@
 
 Не публикуйте уязвимости в публичных issue. Используйте приватный канал:
 
-- GitHub: Security → Report a vulnerability (Private Vulnerability Reporting) для репозитория `ivlev-dev/umbrawg-tools`.
+- GitHub: Security → Report a vulnerability (Private Vulnerability Reporting) для репозитория `ivlev-dev/umbrawg`.
 
 ## Область
 

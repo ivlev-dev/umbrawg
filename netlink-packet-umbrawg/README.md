@@ -1,6 +1,5 @@
 # netlink-packet-umbrawg
 
-[![CI](https://github.com/ivlev-dev/netlink-packet-umbrawg/actions/workflows/main.yml/badge.svg)](https://github.com/ivlev-dev/netlink-packet-umbrawg/actions/workflows/main.yml)
 [![Crates.io](https://img.shields.io/crates/v/netlink-packet-umbrawg)](https://crates.io/crates/netlink-packet-umbrawg)
 [![Docs.rs](https://docs.rs/netlink-packet-umbrawg/badge.svg)](https://docs.rs/netlink-packet-umbrawg)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,7 +11,7 @@ For plain WireGuard, use the original [`netlink-packet-wireguard`](https://crate
 
 ## What is UmbraWG?
 
-[UmbraWG](https://github.com/ivlev-dev/umbrawg-linux-kernel-module) is a fork of WireGuard that adds junk-packet padding and magic headers to mask WireGuard traffic from Deep Packet Inspection (DPI). This crate allows you to configure UmbraWG interfaces via the kernel netlink API the same way `wg` / `uwg` tools do.
+[UmbraWG](https://github.com/ivlev-dev/umbrawg/tree/master/umbrawg-linux-kernel-module) is a fork of WireGuard that adds junk-packet padding and magic headers to mask WireGuard traffic from Deep Packet Inspection (DPI). This crate allows you to configure UmbraWG interfaces via the kernel netlink API the same way `wg` / `uwg` tools do.
 
 ## Installation
 
@@ -162,8 +161,8 @@ GitHub Actions runs:
 - integration tests against a loaded `umbrawg` kernel module (7), with a
   preflight probe that skips the job (with a warning) when the module is
   unavailable;
-- `.github/workflows/packaging.yml` — Arch package, `.crate`, `cargo publish
-  --dry-run` and a GitHub Release on a `v*` tag.
+- `../.github/workflows/netlink-packaging.yml` — Arch package, `.crate`,
+  `cargo publish --dry-run` and a GitHub Release on a `netlink-v*` tag.
 
 Integration tests need root, `iproute2`, and the module. A dedicated preflight
 job probes `ip link add ... type umbrawg`; if the family is unavailable the
@@ -173,7 +172,7 @@ so use the preflight when you need a trustworthy result.
 
 ## Packages and releases
 
-`.github/workflows/packaging.yml` builds the distribution artifacts:
+`../.github/workflows/netlink-packaging.yml` builds the distribution artifacts:
 
 | Job | Image | Contents |
 |---|---|---|
@@ -202,7 +201,7 @@ Release mechanics:
 
 Состояние проекта и план работ — в [TODO.md](TODO.md).
 Порядок выпуска всех четырёх репозиториев (теги, crates.io, AUR, пакеты) —
-в [RELEASE.md](https://github.com/ivlev-dev/umbrawg-tools/blob/master/RELEASE.md).
+в [RELEASE.md](https://github.com/ivlev-dev/umbrawg/blob/master/umbrawg-tools/RELEASE.md).
 
 ## License
 
