@@ -10,6 +10,12 @@
 //! внутри пира сохраняется, а разные пиры распределяются по воркерам. Режим
 //! `queue` раскладывает задания по наименее загруженной очереди и служит только
 //! для замеров: он переставляет пакеты одного потока между воркерами.
+//!
+//! Режим `pipeline` (`UMBRAWG_RX_SCHED=pipeline`) снимает привязку к пиру:
+//! поток приёма выдаёт каждому сегменту монотонный номер пира, крипто-воркеры
+//! расшифровывают сегменты параллельно в порядке готовности, а буфер
+//! переупорядочивания возвращает их в порядок провода. Разгружает буфер в TUN
+//! воркер-владелец пира, поэтому все пакеты пира уходят в одну очередь TUN.
 
 use std::cell::UnsafeCell;
 use std::collections::VecDeque;
@@ -32,6 +38,9 @@ use umbrawg_proto::obf::{DetectedPacket, MessageKind};
 use umbrawg_transport::{RecvQueue, Socket, MAX_BATCH_SIZE};
 use umbrawg_tun::Tun;
 
+use crate::reorder::{
+    peer_worker, FillOutcome, ReorderRing, RingSet, DEFAULT_DEPTH, MAX_DEPTH, MIN_DEPTH,
+};
 use crate::ring::SpscRing;
 use crate::rx::RxBatch;
 use crate::tx::TxBatch;
@@ -75,12 +84,15 @@ pub(crate) struct ParallelConfig {
     pub sched: RxSchedule,
     /// Глубина очереди заданий и пула буферов каждого воркера.
     pub queue_depth: usize,
+    /// Глубина буфера переупорядочивания на пира.
+    pub reorder_depth: usize,
 }
 
 impl ParallelConfig {
     /// Читает конфигурацию из окружения. `None` означает обычный режим.
     ///
-    /// Некорректная глубина очереди (`UMBRAWG_RX_QUEUE`) возвращается ошибкой.
+    /// Некорректная глубина очереди (`UMBRAWG_RX_QUEUE`) или буфера
+    /// переупорядочивания (`UMBRAWG_RX_REORDER`) возвращается ошибкой.
     pub fn from_env(available: usize) -> Result<Option<Self>, String> {
         let enabled = parallel_rx_enabled(std::env::var("UMBRAWG_PARALLEL_RX").ok().as_deref());
         if !enabled {
@@ -89,10 +101,13 @@ impl ParallelConfig {
         let requested = std::env::var("UMBRAWG_RX_WORKERS").ok();
         let sched = RxSchedule::from_env(std::env::var("UMBRAWG_RX_SCHED").ok().as_deref());
         let queue_depth = queue_depth_from_env(std::env::var("UMBRAWG_RX_QUEUE").ok().as_deref())?;
+        let reorder_depth =
+            reorder_depth_from_env(std::env::var("UMBRAWG_RX_REORDER").ok().as_deref())?;
         Ok(Some(Self {
             workers: crypto_worker_count(requested.as_deref(), available),
             sched,
             queue_depth,
+            reorder_depth,
         }))
     }
 }
@@ -105,6 +120,8 @@ pub(crate) enum RxSchedule {
     Peer,
     /// Наименее загруженная очередь: переставляет пакеты одного потока.
     Queue,
+    /// Конвейер: расшифровка любым воркером, порядок держит буфер пира.
+    Pipeline,
 }
 
 impl RxSchedule {
@@ -112,6 +129,7 @@ impl RxSchedule {
     pub(crate) fn from_env(value: Option<&str>) -> Self {
         match value.map(str::trim) {
             Some(value) if value.eq_ignore_ascii_case("queue") => Self::Queue,
+            Some(value) if value.eq_ignore_ascii_case("pipeline") => Self::Pipeline,
             _ => Self::Peer,
         }
     }
@@ -120,6 +138,7 @@ impl RxSchedule {
         match self {
             Self::Peer => "peer",
             Self::Queue => "queue",
+            Self::Pipeline => "pipeline",
         }
     }
 }
@@ -188,6 +207,41 @@ pub(crate) const fn queue_bytes(depth: usize) -> usize {
     depth * crate::MAX_PACKET
 }
 
+/// Проверяет, что глубина буфера переупорядочивания — степень двойки из диапазона.
+pub(crate) fn valid_reorder_depth(depth: usize) -> bool {
+    (MIN_DEPTH..=MAX_DEPTH).contains(&depth) && depth.is_power_of_two()
+}
+
+/// Разбирает `UMBRAWG_RX_REORDER` — глубину буфера переупорядочивания.
+pub(crate) fn reorder_depth_from_env(value: Option<&str>) -> Result<usize, String> {
+    let Some(text) = value.map(str::trim) else {
+        return Ok(DEFAULT_DEPTH);
+    };
+    if text.is_empty() {
+        return Ok(DEFAULT_DEPTH);
+    }
+    let depth = text
+        .parse::<usize>()
+        .map_err(|_| format!("UMBRAWG_RX_REORDER: ожидается целое число, получено {text:?}"))?;
+    if !(MIN_DEPTH..=MAX_DEPTH).contains(&depth) {
+        return Err(format!(
+            "UMBRAWG_RX_REORDER: глубина {depth} вне диапазона {MIN_DEPTH}..={MAX_DEPTH}"
+        ));
+    }
+    if !depth.is_power_of_two() {
+        return Err(format!(
+            "UMBRAWG_RX_REORDER: глубина {depth} должна быть степенью двойки: \
+             64, 128, 256, 512, 1024, 2048, 4096"
+        ));
+    }
+    Ok(depth)
+}
+
+/// Буферы, которые занимает буфер переупорядочивания при глубине `depth`.
+pub(crate) const fn reorder_bytes(depth: usize, slot_len: usize) -> usize {
+    depth * slot_len
+}
+
 /// Счётчики потока приёма. Все поля — обычные атомики без блокировок.
 #[derive(Default)]
 pub(crate) struct RxStats {
@@ -218,6 +272,18 @@ pub(crate) struct RxStats {
     pub max_datagram_segments: AtomicU64,
     /// Дейтаграмм, в которых встретились сегменты разных пиров.
     pub mixed_peer_datagrams: AtomicU64,
+    /// Заданий, отброшенных из-за переполнения буфера переупорядочивания.
+    pub drops_reorder: AtomicU64,
+    /// Сегментов, для которых слот буфера оказался занят.
+    pub reorder_overflow: AtomicU64,
+    /// Сегментов, отброшенных после расшифровки (повтор, allowed-ips, ключ).
+    pub reorder_skipped: AtomicU64,
+    /// Устаревших сегментов, пришедших после доставки своего номера.
+    pub reorder_stale: AtomicU64,
+    /// Пакетов, доставленных из буферов переупорядочивания.
+    pub reorder_delivered: AtomicU64,
+    /// Пробуждений воркера-владельца буфера.
+    pub reorder_wakes: AtomicU64,
 }
 
 /// Задание воркеру: одна дейтаграмма с подготовленными сегментами.
@@ -232,6 +298,12 @@ pub(crate) struct Job {
     pub gro_size: Option<u32>,
     /// Подготовленные сегменты по порядковым номерам внутри дейтаграммы.
     pub prepared: [Option<PreparedTransport>; MAX_SEGMENTS],
+    /// Буфер пира в режиме `pipeline`.
+    pub ring: Option<Arc<ReorderRing>>,
+    /// Первый номер, зарезервированный за транспортом задания.
+    pub seq_base: u64,
+    /// Число зарезервированных номеров.
+    pub seq_count: u32,
 }
 
 struct BufferSlots {
@@ -499,13 +571,7 @@ impl WorkerChannel {
     /// не может быть полной. Слот возвращает исключительно воркер.
     fn publish(&self, job: Job) -> (bool, bool) {
         match self.jobs.push(job) {
-            Ok(()) => {
-                let woke = self.sleeping.swap(false, Ordering::AcqRel);
-                if woke {
-                    self.event.notify();
-                }
-                (true, woke)
-            }
+            Ok(()) => (true, self.wake()),
             Err(job) => {
                 debug_assert!(
                     false,
@@ -515,6 +581,15 @@ impl WorkerChannel {
                 (false, false)
             }
         }
+    }
+
+    /// Будит спящего воркера.
+    fn wake(&self) -> bool {
+        let sleeping = self.sleeping.swap(false, Ordering::AcqRel);
+        if sleeping {
+            self.event.notify();
+        }
+        sleeping
     }
 
     fn pop(&self) -> Option<Job> {
@@ -529,9 +604,9 @@ impl WorkerChannel {
         self.jobs.len()
     }
 
-    fn wait(&self, tun_fd: RawFd) {
+    fn wait<F: Fn() -> bool>(&self, tun_fd: RawFd, ready: F) {
         self.sleeping.store(true, Ordering::SeqCst);
-        if !self.jobs.is_empty() {
+        if !self.jobs.is_empty() || ready() {
             self.sleeping.store(false, Ordering::SeqCst);
             return;
         }
@@ -562,6 +637,7 @@ pub(crate) struct SharedRx {
     socket: RwLock<Option<Arc<Socket>>>,
     channels: Vec<WorkerChannel>,
     controls: ControlQueue,
+    rings: Option<RingSet>,
     sched: RxSchedule,
     stats: RxStats,
     failure: Mutex<Option<String>>,
@@ -577,10 +653,35 @@ impl SharedRx {
             socket: RwLock::new(None),
             channels,
             controls: ControlQueue::new(CONTROL_QUEUE_CAPACITY)?,
+            rings: None,
             sched,
             stats: RxStats::default(),
             failure: Mutex::new(None),
         })
+    }
+
+    /// Добавляет буферы переупорядочивания для режима `pipeline`.
+    pub fn with_reorder(mut self, depth: usize, slot_len: usize) -> io::Result<Self> {
+        if !valid_reorder_depth(depth) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "rx reorder depth {depth} must be a power of two in {MIN_DEPTH}..={MAX_DEPTH}"
+                ),
+            ));
+        }
+        self.rings = Some(RingSet::new(depth, slot_len, self.channels.len()));
+        Ok(self)
+    }
+
+    fn ring(&self, key: &[u8; 32]) -> Option<Arc<ReorderRing>> {
+        self.rings.as_ref().map(|rings| rings.ring(key))
+    }
+
+    fn owned_ready(&self, worker: usize) -> bool {
+        self.rings
+            .as_ref()
+            .is_some_and(|rings| rings.has_ready(worker))
     }
 
     pub fn register_failure(&self, message: String) {
@@ -738,7 +839,7 @@ pub(crate) fn rx_loop(
             stats_at = Instant::now();
             let counters = device.incoming_drop_counters();
             log::info!(
-                "rx stats: sched={} datagrams={} enqueued={} controls={} control_drops={} under_load={} segments={} gro_splits={} max_datagram_segments={} mixed_peers={} housekeeping={} drops(detect={} prepared={} endpoint={} queue={} size={} open={} replay={} allowed={} tun={} tx={} pool={}) wakes={}",
+                "rx stats: sched={} datagrams={} enqueued={} controls={} control_drops={} under_load={} segments={} gro_splits={} max_datagram_segments={} mixed_peers={} housekeeping={} drops(detect={} prepared={} endpoint={} queue={} size={} reorder={} reorder_skip={} reorder_stale={} reorder_over={} open={} replay={} allowed={} tun={} tx={} pool={}) wakes={}",
                 shared.sched.as_str(),
                 shared.stats.datagrams.load(Ordering::Relaxed),
                 shared.stats.enqueued.load(Ordering::Relaxed),
@@ -755,6 +856,10 @@ pub(crate) fn rx_loop(
                 shared.stats.drops_endpoint.load(Ordering::Relaxed),
                 shared.stats.drops_queue.load(Ordering::Relaxed),
                 shared.stats.drops_size.load(Ordering::Relaxed),
+                shared.stats.drops_reorder.load(Ordering::Relaxed),
+                shared.stats.reorder_skipped.load(Ordering::Relaxed),
+                shared.stats.reorder_stale.load(Ordering::Relaxed),
+                shared.stats.reorder_overflow.load(Ordering::Relaxed),
                 counters.open_failed(),
                 counters.replay(),
                 counters.allowed_ips(),
@@ -851,22 +956,6 @@ pub(crate) fn select_worker(pending: &[usize], start: usize) -> usize {
     best
 }
 
-/// Хеш FNV-1a: стабильный между запусками и независимый от порядка пиров.
-fn peer_hash(bytes: &[u8; 32]) -> u64 {
-    let mut hash = 0xcbf2_9ce4_8422_2325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-/// Привязывает пира к воркеру: `hash(public_key) % workers`.
-pub(crate) fn peer_worker(public_key: &[u8; 32], workers: usize) -> usize {
-    debug_assert!(workers > 0, "there is at least one worker");
-    (peer_hash(public_key) % workers as u64) as usize
-}
-
 struct GroChunks {
     offset: usize,
     len: usize,
@@ -900,58 +989,58 @@ impl Iterator for GroChunks {
     }
 }
 
-fn publish_job(
-    shared: &SharedRx,
-    cursor: &mut usize,
-    data: &[u8],
+/// Описание задания, которое раскладывается в очередь воркера.
+struct JobSpec {
     source: SocketAddr,
     gro_size: Option<usize>,
     prepared: [Option<PreparedTransport>; MAX_SEGMENTS],
     pinned: Option<usize>,
-) {
+    ring: Option<Arc<ReorderRing>>,
+    seq_base: u64,
+    seq_count: u32,
+}
+
+/// Выделяет слот в очереди подходящего воркера.
+fn choose_channel(
+    shared: &SharedRx,
+    cursor: &mut usize,
+    pinned: Option<usize>,
+) -> Option<(usize, u32)> {
     let channels = shared.channels.len();
-    let (target, slot) = match shared.sched {
-        RxSchedule::Peer => {
-            let worker = match pinned {
-                Some(worker) => worker % channels,
-                None => {
-                    let worker = *cursor % channels;
-                    *cursor = cursor.wrapping_add(1);
-                    worker
-                }
-            };
-            match shared.channels[worker].allocate() {
-                Some(slot) => (worker, slot),
-                None => {
-                    shared.stats.drops_queue.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
+    if shared.rings.is_none() && shared.sched == RxSchedule::Peer {
+        let worker = match pinned {
+            Some(worker) => worker % channels,
+            None => {
+                let worker = *cursor % channels;
+                *cursor = cursor.wrapping_add(1);
+                worker
             }
+        };
+        return shared.channels[worker].allocate().map(|slot| (worker, slot));
+    }
+    let start = *cursor % channels;
+    *cursor = cursor.wrapping_add(1);
+    let mut pending = [0usize; MAX_WORKERS];
+    for (slot, channel) in pending.iter_mut().zip(&shared.channels) {
+        *slot = channel.pending();
+    }
+    let first = select_worker(&pending[..channels], start);
+    for attempt in 0..channels {
+        let candidate = (first + attempt) % channels;
+        if let Some(free) = shared.channels[candidate].allocate() {
+            return Some((candidate, free));
         }
-        RxSchedule::Queue => {
-            let start = *cursor % channels;
-            *cursor = cursor.wrapping_add(1);
-            let mut pending = [0usize; MAX_WORKERS];
-            for (slot, channel) in pending.iter_mut().zip(&shared.channels) {
-                *slot = channel.pending();
-            }
-            let first = select_worker(&pending[..channels], start);
-            let mut chosen = None;
-            for attempt in 0..channels {
-                let candidate = (first + attempt) % channels;
-                if let Some(free) = shared.channels[candidate].allocate() {
-                    chosen = Some((candidate, free));
-                    break;
-                }
-            }
-            match chosen {
-                Some(pair) => pair,
-                None => {
-                    shared.stats.drops_queue.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-            }
+    }
+    None
+}
+
+fn publish_job(shared: &SharedRx, cursor: &mut usize, data: &[u8], spec: JobSpec) {
+    let Some((target, slot)) = choose_channel(shared, cursor, spec.pinned) else {
+        shared.stats.drops_queue.fetch_add(1, Ordering::Relaxed);
+        if let Some(ring) = &spec.ring {
+            ring.skip_range(spec.seq_base, spec.seq_count as usize);
         }
+        return;
     };
     let channel = &shared.channels[target];
     debug_assert!(
@@ -962,14 +1051,20 @@ fn publish_job(
         shared.stats.pool_violations.fetch_add(1, Ordering::Relaxed);
         shared.stats.drops_size.fetch_add(1, Ordering::Relaxed);
         let _ = channel.reject(slot);
+        if let Some(ring) = &spec.ring {
+            ring.skip_range(spec.seq_base, spec.seq_count as usize);
+        }
         return;
     }
     let job = Job {
         slot,
         len: data.len() as u32,
-        source,
-        gro_size: gro_size.map(|size| size as u32),
-        prepared,
+        source: spec.source,
+        gro_size: spec.gro_size.map(|size| size as u32),
+        prepared: spec.prepared,
+        ring: spec.ring,
+        seq_base: spec.seq_base,
+        seq_count: spec.seq_count,
     };
     let (published, woke) = channel.publish(job);
     if woke {
@@ -981,6 +1076,81 @@ fn publish_job(
         return;
     }
     shared.stats.enqueued.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Сегменты одной дейтаграммы, принадлежащие одному пиру.
+struct PreparedRun {
+    start: usize,
+    ordinal: usize,
+    transports: usize,
+    prepared: [Option<PreparedTransport>; MAX_SEGMENTS],
+    key: Option<[u8; 32]>,
+    pinned: Option<usize>,
+    ring: Option<Arc<ReorderRing>>,
+}
+
+impl PreparedRun {
+    fn new(start: usize) -> Self {
+        Self {
+            start,
+            ordinal: 0,
+            transports: 0,
+            prepared: [const { None }; MAX_SEGMENTS],
+            key: None,
+            pinned: None,
+            ring: None,
+        }
+    }
+
+    fn attach(&mut self, shared: &SharedRx, key: [u8; 32]) {
+        self.key = Some(key);
+        if shared.rings.is_some() {
+            self.ring = shared.ring(&key);
+        } else if shared.sched == RxSchedule::Peer {
+            self.pinned = Some(peer_worker(&key, shared.channels.len()));
+        }
+    }
+}
+
+/// Резервирует номера и публикует накопленные сегменты одного пира.
+fn publish_run(
+    shared: &SharedRx,
+    cursor: &mut usize,
+    data: &[u8],
+    source: SocketAddr,
+    gro_size: Option<usize>,
+    run: PreparedRun,
+) {
+    if run.ordinal == 0 {
+        return;
+    }
+    let (seq_base, seq_count) = match &run.ring {
+        None => (0, 0),
+        Some(ring) => match ring.claim(run.transports) {
+            Some(base) => (base, run.transports as u32),
+            None => {
+                shared
+                    .stats
+                    .drops_reorder
+                    .fetch_add(run.transports as u64, Ordering::Relaxed);
+                return;
+            }
+        },
+    };
+    publish_job(
+        shared,
+        cursor,
+        data,
+        JobSpec {
+            source,
+            gro_size,
+            prepared: run.prepared,
+            pinned: run.pinned,
+            ring: run.ring,
+            seq_base,
+            seq_count,
+        },
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1005,15 +1175,12 @@ fn enqueue_segments(
     }
     let mut total_segments = 0u64;
     let mut chunk_count = 0u64;
-    let mut pinned: Option<usize> = None;
-    let mut first_peer: Option<[u8; 32]> = None;
     let mut mixed = false;
     for (start, end) in GroChunks::new(len, gro_size) {
-        let mut prepared: [Option<PreparedTransport>; MAX_SEGMENTS] =
-            [const { None }; MAX_SEGMENTS];
-        let mut ordinal = 0usize;
+        let mut run = PreparedRun::new(start);
+        let mut chunk_segments = 0u64;
         let mut offset = start;
-        while offset < end && ordinal < MAX_SEGMENTS {
+        while offset < end && run.ordinal < MAX_SEGMENTS {
             let segment_end = gro_size.map_or(end, |size| (offset + size).min(end));
             if segment_end <= offset {
                 break;
@@ -1021,23 +1188,33 @@ fn enqueue_segments(
             match device.prepare_incoming(&mut data[offset..segment_end], snapshot, now) {
                 PreparedIncoming::Transport(entry) => {
                     let key = entry.peer_public_key().to_bytes();
-                    match first_peer {
-                        None => {
-                            first_peer = Some(key);
-                            if shared.sched == RxSchedule::Peer {
-                                pinned = Some(peer_worker(&key, shared.channels.len()));
+                    match run.key {
+                        Some(current) if current != key => {
+                            if !mixed {
+                                mixed = true;
+                                shared
+                                    .stats
+                                    .mixed_peer_datagrams
+                                    .fetch_add(1, Ordering::Relaxed);
                             }
-                        }
-                        Some(expected) if expected != key && !mixed => {
-                            mixed = true;
-                            shared
-                                .stats
-                                .mixed_peer_datagrams
-                                .fetch_add(1, Ordering::Relaxed);
+                            let split = offset;
+                            let finished = std::mem::replace(&mut run, PreparedRun::new(split));
+                            publish_run(
+                                shared,
+                                cursor,
+                                &data[finished.start..split],
+                                source,
+                                gro_size,
+                                finished,
+                            );
+                            run.attach(shared, key);
                         }
                         Some(_) => {}
+                        None => run.attach(shared, key),
                     }
-                    prepared[ordinal] = Some(entry);
+                    run.prepared[run.ordinal] = Some(entry);
+                    run.transports += 1;
+                    run.ordinal += 1;
                 }
                 PreparedIncoming::Control(detected) => {
                     shared.stats.controls.fetch_add(1, Ordering::Relaxed);
@@ -1058,28 +1235,31 @@ fn enqueue_segments(
                             device.note_initiation(now);
                         }
                     }
+                    run.ordinal += 1;
                 }
                 PreparedIncoming::Dropped => {
                     shared.stats.drops_prepared.fetch_add(1, Ordering::Relaxed);
+                    run.ordinal += 1;
                 }
             }
-            ordinal += 1;
+            chunk_segments += 1;
             offset = segment_end;
         }
-        if ordinal == 0 {
-            continue;
+        if chunk_segments > 0 {
+            total_segments += chunk_segments;
+            chunk_count += 1;
         }
-        total_segments += ordinal as u64;
-        chunk_count += 1;
-        publish_job(
-            shared,
-            cursor,
-            &data[start..end],
-            source,
-            gro_size,
-            prepared,
-            pinned,
-        );
+        if run.ordinal > 0 {
+            let run_end = offset;
+            publish_run(
+                shared,
+                cursor,
+                &data[run.start..run_end],
+                source,
+                gro_size,
+                run,
+            );
+        }
     }
     if total_segments > 0 {
         shared
@@ -1136,6 +1316,51 @@ pub(crate) fn supervise(rx_finished: bool, worker_finished: bool) -> Option<&'st
     }
 }
 
+/// Получатель расшифрованных пакетов в режиме `pipeline`.
+struct ReorderIo<'a> {
+    socket: &'a Socket,
+    ring: &'a ReorderRing,
+    seq: u64,
+    stats: &'a RxStats,
+    delivered: bool,
+}
+
+impl DatagramSink for ReorderIo<'_> {
+    fn send_datagram(
+        &mut self,
+        endpoint: SocketAddr,
+        _peer: Option<&Peer>,
+        payload: &[u8],
+        gso_size: Option<usize>,
+    ) {
+        let gso = gso_size.and_then(|size| umbrawg_transport::GsoSize::from_usize(size).ok());
+        if let Err(error) =
+            self.socket
+                .send_to(umbrawg_transport::Endpoint::new(endpoint), payload, gso)
+        {
+            log::debug!("send to {endpoint} failed: {error}");
+        }
+    }
+}
+
+impl PacketIo for ReorderIo<'_> {
+    fn deliver(&mut self, _peer: &Peer, packet: &[u8]) {
+        match self.ring.fill(self.seq, packet) {
+            FillOutcome::Filled => self.delivered = true,
+            FillOutcome::Stale => {
+                self.stats
+                    .reorder_stale
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+            FillOutcome::Overflow => {
+                self.stats
+                    .reorder_overflow
+                    .fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn execute_job<R: RngCore>(
     device: &Device,
@@ -1148,41 +1373,115 @@ fn execute_job<R: RngCore>(
     socket: &Socket,
     tun: &Tun,
     rx: &mut RxBatch,
-    stats: &RxStats,
+    shared: &SharedRx,
 ) {
     let len = job.len as usize;
     let gro_size = job.gro_size.map(|size| size as usize);
     let data = channel.buffers().get(job.slot);
     let mut offset = 0usize;
     let mut ordinal = 0usize;
+    let mut seq = job.seq_base;
     while offset < len && ordinal < MAX_SEGMENTS {
         let end = gro_size.map_or(len, |size| (offset + size).min(len));
         if end <= offset {
             break;
         }
         if let Some(prepared) = job.prepared[ordinal].take() {
-            let mut io = crate::WorkerIo {
-                socket,
-                tun,
-                rx,
-                stats: Some(stats),
-            };
-            let mut context = IoContext::new(rng, now, scratch, &mut io);
-            match device.handle_prepared(
-                &mut data[offset..end],
-                PreparedIncoming::Transport(prepared),
-                job.source,
-                snapshot,
-                &mut context,
-            ) {
-                Ok(IncomingOutcome::Delivered(_)) => {}
-                Ok(_) => {}
-                Err(error) => log::debug!("prepared packet failed: {error}"),
+            match &job.ring {
+                Some(ring) => {
+                    let current = seq;
+                    seq += 1;
+                    let mut io = ReorderIo {
+                        socket,
+                        ring,
+                        seq: current,
+                        stats: &shared.stats,
+                        delivered: false,
+                    };
+                    let mut context = IoContext::new(rng, now, scratch, &mut io);
+                    let outcome = device.handle_prepared(
+                        &mut data[offset..end],
+                        PreparedIncoming::Transport(prepared),
+                        job.source,
+                        snapshot,
+                        &mut context,
+                    );
+                    drop(context);
+                    let delivered = matches!(outcome, Ok(IncomingOutcome::Delivered(_)))
+                        && io.delivered;
+                    if !delivered {
+                        ring.skip(current);
+                    }
+                }
+                None => {
+                    let mut io = crate::WorkerIo {
+                        socket,
+                        tun,
+                        rx,
+                        stats: Some(&shared.stats),
+                    };
+                    let mut context = IoContext::new(rng, now, scratch, &mut io);
+                    match device.handle_prepared(
+                        &mut data[offset..end],
+                        PreparedIncoming::Transport(prepared),
+                        job.source,
+                        snapshot,
+                        &mut context,
+                    ) {
+                        Ok(IncomingOutcome::Delivered(_)) => {}
+                        Ok(_) => {}
+                        Err(error) => log::debug!("prepared packet failed: {error}"),
+                    }
+                }
             }
         }
         offset = end;
         ordinal += 1;
     }
+    debug_assert!(
+        job.ring.is_none() || seq == job.seq_base + u64::from(job.seq_count),
+        "reserved sequence window does not match the job segments"
+    );
+    if let Some(ring) = &job.ring {
+        if ring.has_ready() {
+            let owner = ring.owner();
+            if shared.channels[owner].wake() {
+                shared.stats.reorder_wakes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+/// Отдаёт в TUN готовые пакеты буферов, владельцем которых является воркер.
+fn drain_owned(shared: &SharedRx, worker: usize, tun: &Tun, rx: &mut RxBatch) -> bool {
+    let Some(rings) = shared.rings.as_ref() else {
+        return false;
+    };
+    let mut busy = false;
+    rings.for_each_owned(worker, |ring| {
+        if !ring.has_ready() {
+            return;
+        }
+        busy = true;
+        loop {
+            let stats = ring.drain(|packet| rx.push(packet));
+            shared
+                .stats
+                .reorder_delivered
+                .fetch_add(stats.delivered as u64, Ordering::Relaxed);
+            if stats.skipped > 0 {
+                shared
+                    .stats
+                    .reorder_skipped
+                    .fetch_add(stats.skipped as u64, Ordering::Relaxed);
+            }
+            if !stats.blocked || stats.delivered == 0 {
+                break;
+            }
+            rx.flush(tun);
+        }
+    });
+    busy
 }
 
 /// Крипто-воркер: расшифровка заданий, запись в TUN и передача из TUN.
@@ -1274,10 +1573,11 @@ pub(crate) fn worker_loop(
                     active,
                     &tun,
                     &mut rx,
-                    &shared.stats,
+                    &shared,
                 );
                 channel.release(job.slot);
             }
+            busy |= drain_owned(&shared, index, &tun, &mut rx);
             rx.flush(&tun);
             let errors = rx.take_errors();
             if errors > 0 {
@@ -1297,7 +1597,7 @@ pub(crate) fn worker_loop(
         }
 
         if !busy && released == 0 {
-            channel.wait(tun.fd());
+            channel.wait(tun.fd(), || shared.owned_ready(index));
         }
     }
 
@@ -1465,6 +1765,7 @@ mod tests {
             "UMBRAWG_RX_WORKERS",
             "UMBRAWG_RX_SCHED",
             "UMBRAWG_RX_QUEUE",
+            "UMBRAWG_RX_REORDER",
         ];
         let saved: Vec<(&str, Option<String>)> = names
             .iter()
@@ -1474,15 +1775,26 @@ mod tests {
         std::env::set_var("UMBRAWG_RX_WORKERS", "2");
         std::env::set_var("UMBRAWG_RX_SCHED", "peer");
         std::env::set_var("UMBRAWG_RX_QUEUE", "64");
+        std::env::set_var("UMBRAWG_RX_REORDER", "256");
         let config = ParallelConfig::from_env(8)
             .expect("valid env")
             .expect("parallel rx is enabled");
         assert_eq!(config.workers, 2);
         assert_eq!(config.sched, RxSchedule::Peer);
         assert_eq!(config.queue_depth, 64);
+        assert_eq!(config.reorder_depth, 256);
+        std::env::set_var("UMBRAWG_RX_SCHED", "pipeline");
+        let config = ParallelConfig::from_env(8)
+            .expect("valid env")
+            .expect("parallel rx is enabled");
+        assert_eq!(config.sched, RxSchedule::Pipeline);
         std::env::set_var("UMBRAWG_RX_QUEUE", "100");
         let error = ParallelConfig::from_env(8).expect_err("invalid depth");
         assert!(error.contains("UMBRAWG_RX_QUEUE"));
+        std::env::set_var("UMBRAWG_RX_QUEUE", "64");
+        std::env::set_var("UMBRAWG_RX_REORDER", "100");
+        let error = ParallelConfig::from_env(8).expect_err("invalid reorder depth");
+        assert!(error.contains("UMBRAWG_RX_REORDER"));
         for (name, value) in saved {
             match value {
                 Some(value) => std::env::set_var(name, value),
@@ -1498,6 +1810,9 @@ mod tests {
             source: "10.0.0.1:1000".parse().unwrap(),
             gro_size: None,
             prepared: [const { None }; MAX_SEGMENTS],
+            ring: None,
+            seq_base: 0,
+            seq_count: 0,
         }
     }
 
@@ -1642,9 +1957,164 @@ mod tests {
         assert_eq!(RxSchedule::from_env(Some("unknown")), RxSchedule::Peer);
         assert_eq!(RxSchedule::from_env(Some("queue")), RxSchedule::Queue);
         assert_eq!(RxSchedule::from_env(Some(" Queue ")), RxSchedule::Queue);
+        assert_eq!(RxSchedule::from_env(Some("pipeline")), RxSchedule::Pipeline);
+        assert_eq!(
+            RxSchedule::from_env(Some(" Pipeline ")),
+            RxSchedule::Pipeline
+        );
         assert_eq!(RxSchedule::Peer.as_str(), "peer");
         assert_eq!(RxSchedule::Queue.as_str(), "queue");
+        assert_eq!(RxSchedule::Pipeline.as_str(), "pipeline");
         assert_eq!(RxSchedule::default(), RxSchedule::Peer);
+    }
+
+    #[test]
+    fn reorder_depth_defaults_and_validates() {
+        assert_eq!(DEFAULT_DEPTH, 1024);
+        assert_eq!(reorder_depth_from_env(None), Ok(DEFAULT_DEPTH));
+        assert_eq!(reorder_depth_from_env(Some("")), Ok(DEFAULT_DEPTH));
+        assert_eq!(reorder_depth_from_env(Some(" 256 ")), Ok(256));
+        assert_eq!(reorder_depth_from_env(Some("64")), Ok(MIN_DEPTH));
+        assert_eq!(reorder_depth_from_env(Some("4096")), Ok(MAX_DEPTH));
+        for value in ["0", "32", "100", "8192", "abc", "-64", "1 KiB"] {
+            let error = reorder_depth_from_env(Some(value)).expect_err("invalid depth");
+            assert!(error.contains("UMBRAWG_RX_REORDER"), "{value}: {error}");
+        }
+        assert!(valid_reorder_depth(64));
+        assert!(valid_reorder_depth(4096));
+        assert!(!valid_reorder_depth(32));
+        assert!(!valid_reorder_depth(8192));
+        assert!(!valid_reorder_depth(100));
+    }
+
+    #[test]
+    fn reorder_memory_scales_with_depth() {
+        assert_eq!(reorder_bytes(1024, 1664), 1024 * 1664);
+        assert_eq!(reorder_bytes(DEFAULT_DEPTH, 1664).div_ceil(1024), 1664);
+        assert_eq!(reorder_bytes(64, 1664).div_ceil(1024), 104);
+    }
+
+    #[test]
+    fn with_reorder_creates_buffers_per_worker() {
+        let shared = SharedRx::new(2, RxSchedule::Pipeline, DEFAULT_QUEUE_DEPTH)
+            .unwrap()
+            .with_reorder(MIN_DEPTH, 128)
+            .unwrap();
+        assert!(shared.rings.is_some());
+        let rings = shared.rings.as_ref().expect("rings are configured");
+        assert_eq!(rings.capacity(), MIN_DEPTH);
+        assert_eq!(rings.created(), 0);
+        let ring = shared.ring(&peer_key(1)).expect("pipeline rings");
+        assert_eq!(ring.capacity(), MIN_DEPTH);
+        assert_eq!(ring.slot_len(), 128);
+        assert_eq!(rings.created(), 1);
+        assert_eq!(rings.bytes(), MIN_DEPTH * 128);
+        assert!(shared.ring(&peer_key(1)).is_some());
+        assert_eq!(rings.created(), 1);
+        assert!(SharedRx::new(1, RxSchedule::Pipeline, DEFAULT_QUEUE_DEPTH)
+            .unwrap()
+            .with_reorder(100, 128)
+            .is_err());
+    }
+
+    #[test]
+    fn pipeline_mode_spreads_one_peer_over_workers() {
+        let workers = 4;
+        let depth = MIN_QUEUE_DEPTH;
+        let shared = SharedRx::new(workers, RxSchedule::Pipeline, depth)
+            .unwrap()
+            .with_reorder(depth, 16)
+            .unwrap();
+        let key = peer_key(9);
+        let ring = shared.ring(&key).expect("pipeline rings");
+        let mut cursor = 0usize;
+        for marker in 0..workers as u64 * 8 {
+            let data = marker.to_le_bytes();
+            let base = ring.claim(1).expect("ring has room");
+            assert_eq!(base, marker);
+            publish_job(
+                &shared,
+                &mut cursor,
+                &data,
+                JobSpec {
+                    source: "10.0.0.1:1000".parse().unwrap(),
+                    gro_size: None,
+                    prepared: [const { None }; MAX_SEGMENTS],
+                    pinned: None,
+                    ring: Some(Arc::clone(&ring)),
+                    seq_base: base,
+                    seq_count: 1,
+                },
+            );
+        }
+        let used = shared
+            .channels
+            .iter()
+            .filter(|channel| channel.pending() > 0)
+            .count();
+        assert_eq!(used, workers, "every worker takes part");
+        assert_eq!(
+            shared.stats.enqueued.load(Ordering::Relaxed),
+            workers as u64 * 8
+        );
+        for marker in 0..workers as u64 * 8 {
+            assert_eq!(ring.fill(marker, &marker.to_le_bytes()), FillOutcome::Filled);
+        }
+        let mut seen = Vec::new();
+        let stats = ring.drain(|packet| {
+            let mut bytes = [0u8; 8];
+            bytes.copy_from_slice(packet);
+            seen.push(u64::from_le_bytes(bytes));
+            true
+        });
+        assert_eq!(stats.delivered, seen.len());
+        assert_eq!(seen, (0..workers as u64 * 8).collect::<Vec<_>>());
+        assert_eq!(ring.owner(), peer_worker(&key, workers));
+    }
+
+    #[test]
+    fn pipeline_drops_run_when_ring_is_full() {
+        let depth = MIN_DEPTH;
+        let shared = SharedRx::new(2, RxSchedule::Pipeline, depth)
+            .unwrap()
+            .with_reorder(depth, 16)
+            .unwrap();
+        let key = peer_key(6);
+        let ring = shared.ring(&key).expect("pipeline rings");
+        for _ in 0..depth {
+            assert!(ring.claim(1).is_some());
+        }
+        let mut cursor = 0usize;
+        let mut run = PreparedRun::new(0);
+        run.attach(&shared, key);
+        run.transports = 1;
+        run.ordinal = 1;
+        let data = [0u8; 8];
+        publish_run(
+            &shared,
+            &mut cursor,
+            &data,
+            "10.0.0.1:1000".parse().unwrap(),
+            None,
+            run,
+        );
+        assert_eq!(shared.stats.drops_reorder.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.stats.enqueued.load(Ordering::Relaxed), 0);
+        ring.skip_range(0, depth);
+        ring.drain(|_| true);
+        assert_eq!(ring.outstanding(), 0);
+    }
+
+    #[test]
+    fn peer_mode_ignores_reorder_buffers() {
+        let shared = SharedRx::new(2, RxSchedule::Peer, DEFAULT_QUEUE_DEPTH).unwrap();
+        assert!(shared.rings.is_none());
+        assert!(shared.ring(&peer_key(1)).is_none());
+        assert!(!shared.owned_ready(0));
+        let mut run = PreparedRun::new(0);
+        run.attach(&shared, peer_key(1));
+        assert!(run.ring.is_none());
+        assert_eq!(run.pinned, Some(peer_worker(&peer_key(1), 2)));
     }
 
     fn peer_key(seed: u32) -> [u8; 32] {
@@ -1681,10 +2151,15 @@ mod tests {
             shared,
             cursor,
             &data,
-            "10.0.0.1:1000".parse().unwrap(),
-            None,
-            [const { None }; MAX_SEGMENTS],
-            pinned,
+            JobSpec {
+                source: "10.0.0.1:1000".parse().unwrap(),
+                gro_size: None,
+                prepared: [const { None }; MAX_SEGMENTS],
+                pinned,
+                ring: None,
+                seq_base: 0,
+                seq_count: 0,
+            },
         );
     }
 
@@ -1885,7 +2360,7 @@ mod tests {
                         channel.release(job.slot);
                         received += 1;
                     } else {
-                        channel.wait(idle_fd);
+                        channel.wait(idle_fd, || false);
                     }
                 }
                 while let Some(job) = channel.pop() {

@@ -25,6 +25,7 @@ use umbrawg_uapi::{socket_dir, ServerHandle, UapiListener};
 mod control;
 mod mtu;
 mod parallel;
+mod reorder;
 mod ring;
 mod rx;
 mod tx;
@@ -801,6 +802,15 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
             parallel.queue_depth,
             parallel::queue_bytes(parallel.queue_depth).div_ceil(1024 * 1024)
         );
+        if parallel.sched == parallel::RxSchedule::Pipeline {
+            let slot = device.mtu() as usize + TUN_PACKET_MARGIN;
+            log::info!(
+                "pipeline rx: reorder depth {} slots (~{} KiB per peer), slot {} bytes",
+                parallel.reorder_depth,
+                parallel::reorder_bytes(parallel.reorder_depth, slot).div_ceil(1024),
+                slot
+            );
+        }
         return run_parallel(device, ifname, parallel, socket_buffer, underlay, guard);
     }
 
@@ -887,11 +897,13 @@ fn run_parallel(
         Arc::clone(&device),
         Arc::clone(&guard),
     )))?;
-    let shared = Arc::new(parallel::SharedRx::new(
-        workers,
-        parallel.sched,
-        parallel.queue_depth,
-    )?);
+    let mut shared =
+        parallel::SharedRx::new(workers, parallel.sched, parallel.queue_depth)?;
+    if parallel.sched == parallel::RxSchedule::Pipeline {
+        let slot = device.mtu() as usize + TUN_PACKET_MARGIN;
+        shared = shared.with_reorder(parallel.reorder_depth, slot)?;
+    }
+    let shared = Arc::new(shared);
 
     let rx_device = Arc::clone(&device);
     let rx_shared = Arc::clone(&shared);
