@@ -34,6 +34,7 @@ const RECV_BATCH: usize = 64;
 const TUN_BATCH: usize = 128;
 const TUN_PACKET_MARGIN: usize = 256;
 const IDLE_TIMEOUT_MS: i32 = 10;
+const SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -189,7 +190,9 @@ fn packet_destination(packet: &[u8]) -> Option<IpAddr> {
 fn open_socket(port: u16, fwmark: u32) -> io::Result<Socket> {
     let mut options = OpenOptions::new(AddressFamily::Ipv4)
         .reuse_port(true)
-        .nonblocking(true);
+        .nonblocking(true)
+        .receive_buffer(SOCKET_BUFFER_BYTES)
+        .send_buffer(SOCKET_BUFFER_BYTES);
     if port != 0 {
         options = options.port(port);
     }
@@ -836,5 +839,42 @@ mod tests {
             Some(IpAddr::V4(Ipv4Addr::new(10, 9, 0, 2)))
         );
         assert_eq!(packet_destination(&[0u8; 4]), None);
+    }
+
+    fn socket_buffer(fd: libc::c_int, name: libc::c_int) -> usize {
+        let mut value: libc::c_int = 0;
+        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                name,
+                (&mut value as *mut libc::c_int).cast(),
+                &mut len,
+            )
+        };
+        assert_eq!(rc, 0);
+        usize::try_from(value).expect("positive buffer size")
+    }
+
+    fn kernel_limit(name: &str) -> usize {
+        std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
+            .ok()
+            .and_then(|value| value.trim().parse::<usize>().ok())
+            .unwrap_or(212_992)
+    }
+
+    #[test]
+    fn open_socket_requests_large_buffers() {
+        let socket = open_socket(0, 0).expect("socket is bound");
+        let fd = socket.fd();
+        let receive_limit = kernel_limit("rmem_max");
+        let send_limit = kernel_limit("wmem_max");
+        let receive = socket_buffer(fd, libc::SO_RCVBUF);
+        let send = socket_buffer(fd, libc::SO_SNDBUF);
+        assert!(receive >= SOCKET_BUFFER_BYTES.min(receive_limit));
+        assert!(send >= SOCKET_BUFFER_BYTES.min(send_limit));
+        assert!(receive > 0);
+        assert!(send > 0);
     }
 }
