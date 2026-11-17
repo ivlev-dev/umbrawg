@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="${SCRIPT_DIR%/*}"
 
 IFACE_A="${IFACE_A:-uwgA}"
 IFACE_B="${IFACE_B:-uwgB}"
