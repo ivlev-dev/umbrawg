@@ -442,11 +442,9 @@ impl RxBatch {
                 .copy_from_slice(&(transport_len as u16).to_be_bytes());
         }
         let checksum_at = transport + usize::from(segment.csum_offset);
-        self.gso_buffer[checksum_at..checksum_at + 2].fill(0);
         let initial = pseudo_sum(segment.version, &self.gso_buffer, transport_len);
-        let transport_checksum = checksum(&self.gso_buffer[transport..total], initial);
-        self.gso_buffer[checksum_at..checksum_at + 2]
-            .copy_from_slice(&transport_checksum.to_be_bytes());
+        let partial = !fold(initial);
+        self.gso_buffer[checksum_at..checksum_at + 2].copy_from_slice(&partial.to_be_bytes());
         let header = VirtioNetHdr {
             flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
             gso_type: segment.gso_type,
@@ -643,7 +641,8 @@ mod tests {
         );
         assert_eq!(checksum(&write.packet[..20], 0), 0);
         let initial = pseudo_sum(4, &write.packet, 8 + 300);
-        assert_eq!(checksum(&write.packet[20..], initial), 0);
+        let field = u16::from_be_bytes([write.packet[26], write.packet[27]]);
+        assert_eq!(field, !fold(initial));
     }
 
     #[test]
@@ -662,14 +661,13 @@ mod tests {
         assert_eq!(usize::from(header.gso_size), 64);
         assert_eq!(usize::from(header.csum_start), 40);
         assert_eq!(writes[0].packet.len(), 48 + 128);
-        assert_eq!(
-            checksum(&writes[0].packet[40..], {
-                let mut sum = 0u64;
-                add_bytes(&mut sum, &writes[0].packet[8..40]);
-                sum + 17 + 8 + 128
-            }),
-            0
-        );
+        let initial = {
+            let mut sum = 0u64;
+            add_bytes(&mut sum, &writes[0].packet[8..40]);
+            sum + 17 + 8 + 128
+        };
+        let field = u16::from_be_bytes([writes[0].packet[46], writes[0].packet[47]]);
+        assert_eq!(field, !fold(initial));
     }
 
     #[test]
