@@ -74,6 +74,7 @@ qemu-arm-static -L /usr/arm-linux-gnueabihf target/armv7-unknown-linux-gnueabihf
 
 | Job | Contents |
 |---|---|
+| `deny` | `cargo deny check` (политика зависимостей, `deny.toml`) |
 | `test stable` | `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test --workspace`, `cargo doc -D warnings` |
 | `msrv 1.88` | `cargo build --workspace` and `cargo test --no-run` on the declared minimum toolchain |
 | `build <target>` | release build of `umbrawg` for all three targets, tests compiled for the target, `file`/`readelf` architecture check, qemu smoke run of the binary and unit tests under qemu, packaged `tar.gz` artifact |
@@ -137,7 +138,8 @@ same CLI and configuration format).
 | `UMBRAWG_RX_SCHED` | `peer` | Выбор крипто-воркера: `peer` — привязка по публичному ключу пира (порядок внутри пира сохраняется), `queue` — наименее загруженная очередь (для замеров, переставляет пакеты одного потока). |
 | `UMBRAWG_RX_STATS` | выключено (`0`/не задано) | `1` включает вывод счётчиков приёма каждые 5 секунд (пакеты, батчи, сегменты, GRO/GSO, дропы, пробуждения). |
 | `UMBRAWG_LOG_LEVEL` | `info` | Уровень логирования (`trace`, `debug`, `info`, `warn`, `error`). |
-| `UMBRAWG_RUNTIME_DIR` | `/var/run/umbrawg` | Каталог unix-сокетов UAPI (`<iface>.sock`). |
+| `UMBRAWG_RUNTIME_DIR` | `/var/run/umbrawg` | Каталог unix-сокетов UAPI (`<iface>.sock`). При задании копируется в `UWG_RUNTIME_DIR` для совместимости с `umbrawg-tools`. |
+| `UWG_RUNTIME_DIR` | `/var/run/umbrawg` | То же, что `UMBRAWG_RUNTIME_DIR`, читается сервером UAPI напрямую (совместимость с `uwg`/`uwg-quick`). |
 
 ## Параллельный приём
 
@@ -315,6 +317,13 @@ Netlink). Юнит выдаёт только эту capability (`AmbientCapabili
 Ограничения: `ProtectSystem=strict`, `ProtectHome=yes`, `PrivateTmp=yes`,
 только Unix/IPv4/IPv6/Netlink сокеты, запись разрешена в `/run/umbrawg` и
 `/etc/umbrawg`. Бинарник ожидается в `/usr/bin/umbrawg`.
+
+## Документация для разработчика
+
+Состояние проекта и план работ — в [TODO.md](TODO.md).
+Архитектура — в [DESIGN.md](DESIGN.md).
+Порядок выпуска всех четырёх репозиториев — в
+[RELEASE.md](https://github.com/ivlev-dev/umbrawg-tools/blob/master/RELEASE.md).
 
 ## Status
 

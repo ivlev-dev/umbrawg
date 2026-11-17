@@ -50,7 +50,7 @@ Userspace-демон UmbraWG на Rust: протокол WireGuard-совмес�
 - Параллельный приём: RX-поток с `recvmmsg`, SPSC-очереди заданий и
   крипто-воркеры с `AtomicReplayFilter`.
 - `umbrawg-bench`: criterion-микробенчмарки горячего пути.
-- 406 тестов workspace, включая паритетные тест-векторы и UAPI end-to-end.
+- 423 теста workspace, включая паритетные тест-векторы и UAPI end-to-end.
 
 ### CI и сборка
 
