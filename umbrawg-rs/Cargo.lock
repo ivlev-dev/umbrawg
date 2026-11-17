@@ -972,6 +972,7 @@ dependencies = [
  "criterion",
  "rand_core",
  "umbrawg-crypto",
+ "umbrawg-device",
  "umbrawg-proto",
  "umbrawg-transport",
  "umbrawg-tun",
