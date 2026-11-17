@@ -494,6 +494,35 @@ fn obfuscated_params() -> ObfParams {
 }
 
 #[test]
+fn detect_matches_decode_type_for_all_kinds() {
+    let mut params = obfuscated_params();
+    params.set_param("s1", "12").unwrap();
+    params.set_param("s2", "13").unwrap();
+    params.set_param("s3", "14").unwrap();
+    params.set_param("s4", "12").unwrap();
+    params.set_param("header_protection_key", HP_KEY).unwrap();
+    params.set_param("random_trailers", "true").unwrap();
+    let obfuscator = Obfuscator::new(&params);
+    let mut rng = TestRng::new(9);
+    for kind in MessageKind::ALL {
+        let mut packet = vec![0u8; DEFAULT_UDP_WINDOW as usize + 64];
+        let (header, layout) = obfuscator
+            .begin_fixed(kind, &mut rng, DEFAULT_UDP_WINDOW as usize, &mut packet)
+            .unwrap();
+        obfuscator.finish_fixed(kind, &mut packet, &layout).unwrap();
+        let detected = obfuscator
+            .detect(&packet[..layout.total])
+            .expect("packet is detected");
+        assert_eq!(detected.kind, kind);
+        assert_eq!(detected.padding, layout.padding);
+        assert_eq!(
+            obfuscator.decode_type(&packet, layout.padding),
+            Some(header)
+        );
+    }
+}
+
+#[test]
 fn transport_obfuscation_draws_from_the_buffered_rng() {
     let params = obfuscated_params();
     let obfuscator = Obfuscator::new(&params);

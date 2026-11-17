@@ -346,16 +346,31 @@ impl<'a> Obfuscator<'a> {
     /// Decodes the obfuscated message type at `offset` in `packet`.
     #[must_use]
     pub fn decode_type(&self, packet: &[u8], offset: usize) -> Option<u32> {
+        let mask = self.type_mask(packet);
+        self.decode_masked_type(packet, offset, mask.as_ref())
+    }
+
+    fn type_mask(&self, packet: &[u8]) -> Option<[u8; 4]> {
+        let key = self.header_key()?;
+        let nonce = header_protection::nonce_from_packet(packet)?;
+        Some(header_protection::mask4(key, &nonce))
+    }
+
+    fn decode_masked_type(
+        &self,
+        packet: &[u8],
+        offset: usize,
+        mask: Option<&[u8; 4]>,
+    ) -> Option<u32> {
         let field: [u8; 4] = packet
             .get(offset..offset.checked_add(4)?)?
             .try_into()
             .ok()?;
         let raw = u32::from_le_bytes(field);
         match self.header_key() {
-            Some(key) => {
-                let nonce = header_protection::nonce_from_packet(packet)?;
-                let mask = header_protection::mask4(key, &nonce);
-                Some(raw ^ u32::from_le_bytes(mask))
+            Some(_) => {
+                let mask = mask?;
+                Some(raw ^ u32::from_le_bytes(*mask))
             }
             None => Some(raw),
         }
@@ -364,6 +379,7 @@ impl<'a> Obfuscator<'a> {
     /// Classifies an incoming packet and returns its layout.
     #[must_use]
     pub fn detect(&self, packet: &[u8]) -> Option<DetectedPacket> {
+        let mask = self.type_mask(packet);
         for kind in MessageKind::ALL {
             let padding = usize::from(self.params.padding(kind));
             let expected = if kind == MessageKind::Transport {
@@ -379,7 +395,7 @@ impl<'a> Obfuscator<'a> {
             if !length_ok {
                 continue;
             }
-            let Some(header) = self.decode_type(packet, padding) else {
+            let Some(header) = self.decode_masked_type(packet, padding, mask.as_ref()) else {
                 continue;
             };
             if self.params.header_range(kind).contains(&header) {

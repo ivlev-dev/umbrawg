@@ -33,6 +33,11 @@ enforced by the `msrv` CI job). The daemon depends on Linux only: `libc`,
 `rustix` (`fs`) and `/dev/net/tun`; there is no dependency on the netlink crate
 or the kernel module.
 
+`.cargo/config.toml` sets `--cfg poly1305_force_soft` for x86/x86_64. On
+MTU-sized packets the scalar Poly1305 backend is faster: the AVX2 backend pays a
+large per-message setup cost that only amortises above ~8 KiB. The flag changes
+no bytes on the wire.
+
 ### Cross build (ARM)
 
 Supported release targets: `x86_64-unknown-linux-gnu`,
