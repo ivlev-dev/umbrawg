@@ -151,6 +151,12 @@ same CLI and configuration format).
 
 ## Параллельный приём
 
+> **Экспериментальный режим.** `UMBRAWG_PARALLEL_RX=1` медленнее обычного
+> однопоточного rust на 1–16.6% на одном пире во всех 8 ячейках матрицы final3
+> (см. раздел «Производительность» и [tools/docs/RESULTS.md](tools/docs/RESULTS.md)).
+> Цели +30%/+60% не достигнуты. **Не рекомендуется включать по умолчанию**
+> (`default-on`); режим остаётся opt-in для multi-peer сценариев и замеров.
+
 Включается переменной `UMBRAWG_PARALLEL_RX=1` (по умолчанию выключен). Опционально:
 `UMBRAWG_RX_WORKERS=N`, `UMBRAWG_RX_SCHED=peer|queue`, `UMBRAWG_RX_QUEUE=N`,
 `UMBRAWG_RX_STATS=1`.
@@ -267,7 +273,42 @@ cargo build --release --example initiation_flood -p umbrawg-device
 от `1`/`true`/`yes`/`on` (по умолчанию однопоточный режим, который не деградирует
 на одном соединении).
 
-## Data-plane E2E
+## Производительность
+
+Финальные замеры (final3, сервер 6 vCPU, MTU 9000, 3 повтора) — полная матрица
+и методика в [tools/docs/RESULTS.md](tools/docs/RESULTS.md). Fast-path (TUN offload,
+GSO/GRO, `sendmmsg`/`recvmmsg`) дал прирост +12.6…+103% относительно исходной
+userspace-реализации.
+
+Ключевые цифры (TCP, Мбит/с, медиана 3 повторов):
+
+| Сценарий | kernel | rust | go |
+|---|---|---|---|
+| 1c, c=1, obf=0 | 2373 | 1529 | 2069 |
+| 1c, c=1, obf=1 | 2267 | 663 | 2026 |
+| 3c, c=1, obf=0 | 2461 | 2044 | 3725 |
+| 3c, c=1, obf=1 | 2212 | 877 | 3148 |
+| 3c, c=10, obf=0 | 1914 | 2328 | 5263 |
+| 3c, c=10, obf=1 | 1770 | 828 | — |
+| 1c, c=10, obf=0 | — | 1358 | 1155 |
+| 4 пира, 3c, c=10 | 4951 | 3997 | 4971 |
+
+Где обгоняем: на 3c c=10 obf=0 rust (2328) обгоняет kernel (1914) и amneziawg
+(1707) на +21.6%/+36.3%; на 1c c=10 obf=0 rust (1358) на +17.6% к go (1155).
+Где отстаём: obf=1 (663–877 Мбит/с против 2026–3148 у go и 2212–2267 у ядра)
+и 1c (1529 против 2373 у ядра и 2069 у go).
+
+Параллельный приём (`UMBRAWG_PARALLEL_RX=1`) — экспериментальный: на одном пире
+он медленнее обычного rust на 1–16.6% во всех 8 ячейках матрицы, цели
++30%/+60% не достигнуты. Рекомендуется оставлять выключенным по умолчанию;
+включать только для multi-peer сценариев и замеров. Подробнее — раздел
+«Параллельный приём» и [tools/docs/RESULTS.md](tools/docs/RESULTS.md).
+
+Ядро (`kernel-umbrawg`) достигло цели +30% на c=1 относительно
+`kernel-amneziawg`.
+
+## Data-plane E2E" oldString="
+## Data-plane E2E" path="/home/ivlev98/Проекты/PC/UmbraWG/.work/rust-docs3/README.md
 
 `scripts/test-dataplane-e2e.sh` проверяет не UAPI, а сам путь данных: два
 демона в двух network namespace, соединённых veth-парой, поднимают TUN

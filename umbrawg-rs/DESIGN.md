@@ -170,8 +170,20 @@ TCP через туннель. Проверяются `under_load=1`, отсут
 - порядок пакетов внутри пира сохраняется и в параллельном приёме (`sched=peer`);
 - UAPI `advanced_security` и прочие ключи обрабатываются идентично
   однопоточному режиму; userspace-демон не реализует advanced security.
+- Peer-affinity (`sched=peer`) сохраняет порядок пакетов внутри пира, но общий
+  выигрыш по throughput не подтверждён (final3: rust-par медленнее rust на 1–16.6%
+  на одном пире); см. [tools/docs/RESULTS.md](tools/docs/RESULTS.md).
+
 ## Производительность
 
 - Baseline: Go-реализация и оригинальный Go-демон.
 - Цель: +30% на 1 ядре, +60% на 4 ядрах (TCP и UDP), без регресса обфускации.
 - Профилирование: `perf record` + flamegraph, `strace -c`, счётчики softirq; правки только по профилю.
+- Fast-path (TUN offload, GSO/GRO, `sendmmsg`/`recvmmsg`) дал +12.6…+103% относительно
+  исходной userspace-реализации; финальные замеры (final3) — в
+  [tools/docs/RESULTS.md](tools/docs/RESULTS.md) и разделе «Производительность» README.
+- Параллельный приём с привязкой по пиру (`UMBRAWG_RX_SCHED=peer`) сохраняет порядок
+  пакетов внутри пира, но общий выигрыш по throughput не подтверждён: rust-par медленнее
+  обычного rust на 1–16.6% на одном пире во всех 8 ячейках final3; цели +30%/+60% не
+  достигнуты. Режим остаётся opt-in/экспериментальным; default-on не рекомендуется.
+  Ядро (`kernel-umbrawg`) достигло цели +30% на c=1 относительно `kernel-amneziawg`.
