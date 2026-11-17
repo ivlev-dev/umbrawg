@@ -264,7 +264,8 @@ dmesg -wT
 Состояние проекта, измерения и отклонённые эксперименты — в
 [TODO.md](TODO.md) и [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Устройство
 приёма по пирам и следующий шаг — в
-[docs/PEER-SHARDING.md](docs/PEER-SHARDING.md).
+[docs/PEER-SHARDING.md](docs/PEER-SHARDING.md). История версий — в
+[CHANGELOG.md](CHANGELOG.md).
 Порядок выпуска всех четырёх репозиториев — в
 [RELEASE.md](https://github.com/ivlev-dev/umbrawg-tools/blob/master/RELEASE.md).
 
