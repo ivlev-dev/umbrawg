@@ -241,6 +241,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends iperf3 iproute2 netcat-openbsd
 
+      - name: Diagnose e2e env
+        run: |
+          id
+          pwd
+          ls -ld . .. scripts ../umbrawg-tools || true
+          sudo sh -c 'id; pwd; ls -ld . .. scripts ../umbrawg-tools || true'
+
       - name: Run data-plane e2e
         run: |
           sudo -E env \
