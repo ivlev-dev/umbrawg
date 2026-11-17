@@ -33,9 +33,10 @@ pub fn xor(key: &Key, nonce: &[u8; NONCE_LEN], data: &mut [u8]) {
 
 /// ChaCha20 keystream positioned at block counter zero.
 ///
-/// The first block is generated on construction so that a single block serves
-/// both the type mask and the start of the header.
-pub struct HeaderStream {
+/// Одноразовый: поток создаётся заново на каждый заголовок, потому что после
+/// [`HeaderStream::apply`] позиция счётчика блоков уже сдвинута и повторное
+/// применение к новому заголовку дало бы другой keystream.
+pub(crate) struct HeaderStream {
     block: [u8; BLOCK_LEN],
     stream: chacha20::Keystream,
 }
@@ -43,7 +44,7 @@ pub struct HeaderStream {
 impl HeaderStream {
     /// Creates a stream for `key` and `nonce` with the first block ready.
     #[must_use]
-    pub fn new(key: &Key, nonce: &[u8; NONCE_LEN]) -> Self {
+    pub(crate) fn new(key: &Key, nonce: &[u8; NONCE_LEN]) -> Self {
         let mut stream = chacha20::Keystream::new(key, nonce);
         let mut block = [0u8; BLOCK_LEN];
         stream.apply_keystream(&mut block);
@@ -52,12 +53,12 @@ impl HeaderStream {
 
     /// Returns the first four keystream bytes.
     #[must_use]
-    pub fn mask4(&self) -> [u8; 4] {
+    pub(crate) fn mask4(&self) -> [u8; 4] {
         [self.block[0], self.block[1], self.block[2], self.block[3]]
     }
 
     /// XORs `data` with the keystream, starting at block counter zero.
-    pub fn apply(&mut self, data: &mut [u8]) {
+    pub(crate) fn apply(&mut self, data: &mut [u8]) {
         let cached = data.len().min(BLOCK_LEN);
         for (byte, mask) in data[..cached].iter_mut().zip(&self.block[..cached]) {
             *byte ^= mask;
