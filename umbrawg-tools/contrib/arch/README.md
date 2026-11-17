@@ -96,12 +96,16 @@ ldd /tmp/pkg/usr/bin/uwg
    makepkg --printsrcinfo > .SRCINFO
    ```
 
-3. Скопировать в корень AUR-репозитория `umbrawg-tools`:
+3. Проверить dry-run и опубликовать:
 
    ```sh
-   cp contrib/arch/umbrawg-tools/{PKGBUILD,.SRCINFO} .
-   git add -A && git commit -m "upgpkg: umbrawg-tools 0.2.0-1" && git push
+   scripts/aur-publish.sh umbrawg-tools --source-root .
+   scripts/aur-publish.sh umbrawg-tools --source-root . --push
    ```
+
+   Скрипт клонирует AUR-репозиторий, копирует `PKGBUILD`, `*.install` и
+   `.SRCINFO`, коммитит `Update to <pkgver>-<pkgrel>` и пушит. Подробности —
+   раздел «Публикация в AUR» в [README.md](../../README.md).
 
 4. Для `umbrawg-tools-git` — отдельный AUR-репозиторий, копируются `PKGBUILD`
    и `.SRCINFO` (суммы `SKIP`, `updpkgsums` не нужен).

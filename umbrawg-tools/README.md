@@ -202,8 +202,99 @@ lintian dist/umbrawg-tools_*.deb
   `contents: write` (создание релиза и загрузка файлов);
 - оба репозитория должны оставаться публичными: `actions/checkout` второго
   дерева и `makepkg` клонируют `ivlev-dev/netlink-packet-umbrawg` без токена;
-- публикация в AUR не автоматизирована — нужен отдельный AUR-репозиторий и
-  SSH-ключ (см. `contrib/arch/README.md`).
+- публикация в AUR — отдельный шаг: `scripts/aur-publish.sh` по умолчанию
+  работает в dry-run; нужен AUR-аккаунт и SSH-ключ (см. «Публикация в AUR»).
+
+## Публикация в AUR
+
+`scripts/aur-publish.sh` переносит `PKGBUILD`, `*.install` и `.SRCINFO` из
+`contrib/arch/<пакет>/` в AUR-репозиторий и коммитит изменение. По умолчанию
+скрипт работает в режиме dry-run: печатает команды clone/copy/add/commit/push
+и ничего не меняет.
+
+| Пакет | Корень репозитория |
+|---|---|
+| `umbrawg-tools`, `umbrawg-tools-git` | этот репозиторий |
+| `umbrawg-dkms`, `umbrawg-dkms-git` | `umbrawg-linux-kernel-module` |
+| `umbrawg-daemon`, `umbrawg-daemon-git` | `umbrawg-rs` |
+| `rust-netlink-packet-umbrawg`, `rust-netlink-packet-umbrawg-git` | `netlink-packet-umbrawg` |
+
+Корни ищутся в `/root/umbrawg/<repo>` и рядом с этим репозиторием. Явно они
+задаются переменными `UMBRAWG_TOOLS_DIR`, `UMBRAWG_MODULE_DIR`,
+`UMBRAWG_RUST_DIR`, `UMBRAWG_NETLINK_DIR` или флагом `--source-root`
+(можно повторять; пакет ищется в первом корне, где есть
+`contrib/arch/<пакет>`).
+
+### Подготовка
+
+1. Поставить теги `v*`: стабильный `umbrawg-tools` требует тега в tools и в
+   netlink. `-git`-пакеты собираются с веток `master`/`main`.
+2. Для стабильного пакета обновить `pkgver`, `pkgrel` и версии источников,
+   затем пересчитать суммы: `updpkgsums` (`pacman-contrib`). Заглушка
+   `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` остаётся только до первого тега.
+3. Пересобрать метаданные: `makepkg --printsrcinfo > .SRCINFO`.
+4. Прогнать dry-run и проверить список команд.
+
+Скрипт отказывается публиковать стабильный пакет, пока в `PKGBUILD` или
+`.SRCINFO` есть `TODO_UPDPKGSUMS_AFTER_FIRST_TAG`, и сверяет `.SRCINFO` с
+выводом `makepkg --printsrcinfo` (если `makepkg` установлен и скрипт запущен
+не от root). Дополнительно проверяются наличие `PKGBUILD`/`.SRCINFO`,
+совпадение `pkgbase` с именем пакета и извлечение `pkgver`/`pkgrel`.
+
+### Dry-run
+
+```sh
+scripts/aur-publish.sh umbrawg-tools-git --source-root .
+
+scripts/aur-publish.sh --all \
+  --source-root . \
+  --source-root ../umbrawg-linux-kernel-module \
+  --source-root ../umbrawg-rs \
+  --source-root ../netlink-packet-umbrawg
+```
+
+Эквивалент через окружение:
+
+```sh
+UMBRAWG_TOOLS_DIR="$PWD" \
+UMBRAWG_MODULE_DIR=../umbrawg-linux-kernel-module \
+UMBRAWG_RUST_DIR=../umbrawg-rs \
+UMBRAWG_NETLINK_DIR=../netlink-packet-umbrawg \
+  scripts/aur-publish.sh --all
+```
+
+Для каждого пакета печатаются `git clone`, `install` файлов, `git add`,
+`git commit -m 'Update to <pkgver>-<pkgrel>'` и `git push origin HEAD:master`.
+Временные каталоги не создаются.
+
+### Публикация
+
+```sh
+scripts/aur-publish.sh umbrawg-tools-git --source-root . --push
+scripts/aur-publish.sh --all --push
+```
+
+`--push` клонирует `AUR_BASE/<пакет>.git` во временный каталог (`--workdir`
+или `$TMPDIR`), копирует `PKGBUILD`, `*.install`, `.SRCINFO`, делает
+`git add -A` и коммит `Update to <pkgver>-<pkgrel>`, затем push в `master`.
+Если изменений нет, скрипт завершается с кодом 0 без коммита. Временный
+каталог удаляется.
+
+`AUR_BASE` по умолчанию `ssh://aur@aur.archlinux.org`; для тестов и локальных
+прогонов переопределяется, например `AUR_BASE=file:///tmp/aur`.
+
+Требования: аккаунт AUR, SSH-ключ, добавленный в профиль AUR, настроенные
+`user.name`/`user.email` в git, `makepkg` (`base-devel`) для сверки
+`.SRCINFO`, `updpkgsums` (`pacman-contrib`) для подготовки сумм.
+
+Коды возврата: 0 — успех, 1 — ошибка валидации, 2 — ошибка git или сети.
+`--all` продолжает обработку после ошибки и завершается худшим из кодов.
+
+Ограничения: скрипт не создаёт теги, не запускает `updpkgsums` и не собирает
+пакеты; не публикует из CI (для этого нужен отдельный SSH-ключ); копирует
+только `PKGBUILD`, `*.install` и `.SRCINFO`; стабильные пакеты до первого
+тега блокируются намеренно; force-push не выполняется. Автотест —
+`tests/test-aur-publish.sh` (локальный bare-репозиторий и `AUR_BASE=file://`).
 
 ## Использование
 
