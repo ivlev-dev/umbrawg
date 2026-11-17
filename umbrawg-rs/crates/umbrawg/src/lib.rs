@@ -329,6 +329,10 @@ fn is_socket_would_block(error: &TransportError) -> bool {
     matches!(error, TransportError::WouldBlock)
 }
 
+fn batch_flush_needed(used: usize, packets: usize, record: usize, capacity: usize) -> bool {
+    used.saturating_add(packets.saturating_mul(record)) > capacity
+}
+
 #[allow(clippy::too_many_arguments)]
 fn send_run<R: rand_core::RngCore>(
     device: &Device,
@@ -348,22 +352,46 @@ fn send_run<R: rand_core::RngCore>(
     if plaintexts.is_empty() {
         return;
     }
-    if batch.used() + plaintexts.len() > batch_buffer.len() {
+    let record = tun.mtu() as usize + TUN_PACKET_MARGIN;
+    if batch_flush_needed(batch.used(), plaintexts.len(), record, batch_buffer.len()) {
         batch.flush(socket, batch_buffer);
     }
-    let offset = batch.used();
-    let mut io = WorkerIo {
-        socket,
-        tun,
-        rx,
-        stats: None,
+    let mut offset = batch.used();
+    let mut retried = false;
+    let result = loop {
+        let mut io = WorkerIo {
+            socket,
+            tun,
+            rx,
+            stats: None,
+        };
+        let mut context = IoContext::new(rng, now, scratch, &mut io);
+        match device.send_batch(peer, plaintexts, &mut batch_buffer[offset..], &mut context) {
+            Ok(sent) => break Ok(sent),
+            Err(error) => {
+                let retry =
+                    matches!(error, DeviceError::BufferTooSmall { .. }) && !retried && offset > 0;
+                if !retry {
+                    break Err(error);
+                }
+                retried = true;
+                batch.flush(socket, batch_buffer);
+                offset = batch.used();
+            }
+        }
     };
-    let mut context = IoContext::new(rng, now, scratch, &mut io);
-    match device.send_batch(peer, plaintexts, &mut batch_buffer[offset..], &mut context) {
+    match result {
         Ok(sent) => {
             if sent.staged > 0 {
                 batch.flush(socket, batch_buffer);
                 if sent.needs_handshake {
+                    let mut io = WorkerIo {
+                        socket,
+                        tun,
+                        rx,
+                        stats: None,
+                    };
+                    let mut context = IoContext::new(rng, now, scratch, &mut io);
                     if let Err(error) = device.initiate_handshake(peer, &mut context) {
                         log::debug!("handshake failed: {error}");
                     }
@@ -388,6 +416,13 @@ fn send_run<R: rand_core::RngCore>(
         }
         Err(DeviceError::BufferTooSmall { .. }) => {
             batch.flush(socket, batch_buffer);
+            let mut io = WorkerIo {
+                socket,
+                tun,
+                rx,
+                stats: None,
+            };
+            let mut context = IoContext::new(rng, now, scratch, &mut io);
             for plaintext in plaintexts {
                 if let Err(error) = device.send_packet(peer, plaintext, fallback, &mut context) {
                     log::debug!("send failed: {error}");
@@ -991,6 +1026,19 @@ mod tests {
     fn shutdown_flag() {
         request_shutdown();
         assert!(shutdown_requested());
+    }
+
+    #[test]
+    fn batch_flush_reserves_room_for_every_packet() {
+        let record = 1676;
+        let capacity = record * 128;
+        assert!(!batch_flush_needed(0, 128, record, capacity));
+        assert!(batch_flush_needed(0, 129, record, capacity));
+        assert!(!batch_flush_needed(record * 127, 1, record, capacity));
+        assert!(batch_flush_needed(record * 127 + 1, 1, record, capacity));
+        assert!(batch_flush_needed(capacity, 1, record, capacity));
+        assert!(batch_flush_needed(0, usize::MAX, record, capacity));
+        assert!(batch_flush_needed(usize::MAX, 1, record, capacity));
     }
 
     #[test]
