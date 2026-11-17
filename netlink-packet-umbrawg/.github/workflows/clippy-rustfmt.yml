@@ -1,0 +1,35 @@
+name: Rustfmt and clippy check
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  push:
+    branches:
+      - main
+      - "feature/**"
+
+permissions:
+  contents: read
+
+jobs:
+  rustfmt_clippy:
+    strategy:
+      fail-fast: true
+
+    name: Rustfmt and clippy check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: rustfmt
+        run: cargo +nightly fmt --all -- --check
+
+      - name: clippy
+        run: cargo +nightly clippy --all-targets -- -D warnings

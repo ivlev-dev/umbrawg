@@ -1,0 +1,27 @@
+# Конфигурация cargo-deny (формат cargo-deny 0.21).
+
+[advisories]
+# Только unmaintained-записи с известными причинами; уязвимости и yanked не игнорируются.
+ignore = [
+    { id = "RUSTSEC-2024-0436", reason = "paste 1.0.15 приходит транзитивно через netlink-packet-core; проект архивирован, безопасной замены без мажорного обновления нет" },
+    { id = "RUSTSEC-2021-0139", reason = "ansi_term 0.12.1 используется только в dev-зависимости pretty_assertions 0.7; замена требует обновления pretty_assertions" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Дубликаты (syn, thiserror, getrandom) не схлопываются без мажорных обновлений, поэтому только warn.
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
