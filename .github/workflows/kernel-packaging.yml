@@ -206,6 +206,7 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: umbrawg-linux-kernel-module
 
     steps:
       - name: Checkout репозитория
@@ -291,6 +292,7 @@ jobs:
     defaults:
       run:
         shell: bash
+        working-directory: umbrawg-linux-kernel-module
 
     steps:
       - name: Checkout репозитория
