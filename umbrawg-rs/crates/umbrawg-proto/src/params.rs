@@ -263,7 +263,7 @@ impl ObfParams {
         packet_len: usize,
         udp_window: usize,
     ) -> usize {
-        if !self.content_padding_addition_enabled() || udp_window < packet_len {
+        if !self.content_padding_addition_enabled() || udp_window <= packet_len {
             return 0;
         }
         let addition = usize::from(random::u16_inclusive_with(
