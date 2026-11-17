@@ -199,3 +199,4 @@ jobs:
             dist/*.pkg.tar.zst
             dist/SHA256SUMS.pkg
           fail_on_unmatched_files: true
+
