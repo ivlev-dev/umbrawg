@@ -203,6 +203,19 @@ limited by softirq and the application.
 
 Details, tables and rejected experiments: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 
+### Per-peer receive sharding
+
+Receive is built around per-peer NAPI: every peer owns a `napi_struct`, an
+in-order `rx_queue`, and its own threaded `napi/<dev>-<id>` thread. Capacity
+therefore scales with peers, not with connections to one peer: four peers on
+one device reach +146…178% TCP. The device has no single shared NAPI;
+`netif_threaded_enable()` only switches every NAPI of the device to threaded
+mode.
+
+The as-built design, the options (one NAPI per peer, several NAPI per peer, an
+NAPI pool, RPS, a hybrid), risks, the next-step sketch and the test plan are in
+[docs/PEER-SHARDING.md](docs/PEER-SHARDING.md).
+
 ## Limitations
 
 - One peer is limited by its own threaded NAPI (~2.2–2.4 Gbit/s TCP); several
@@ -248,7 +261,9 @@ dmesg -wT
 ## Документация для разработчика
 
 Состояние проекта, измерения и отклонённые эксперименты — в
-[TODO.md](TODO.md) и [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
+[TODO.md](TODO.md) и [docs/PERFORMANCE.md](docs/PERFORMANCE.md). Устройство
+приёма по пирам и следующий шаг — в
+[docs/PEER-SHARDING.md](docs/PEER-SHARDING.md).
 Порядок выпуска всех четырёх репозиториев — в
 [RELEASE.md](https://github.com/ivlev-dev/umbrawg-tools/blob/master/RELEASE.md).
 
