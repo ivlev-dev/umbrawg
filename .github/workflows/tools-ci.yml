@@ -1,0 +1,366 @@
+name: tools CI
+
+on:
+  push:
+    branches:
+      - master
+      - "feature/**"
+    tags:
+      - "tools-v*"
+    paths:
+      - "umbrawg-tools/**"
+      - "netlink-packet-umbrawg/**"
+      - ".github/workflows/tools-*.yml"
+  pull_request:
+    paths:
+      - "umbrawg-tools/**"
+      - "netlink-packet-umbrawg/**"
+      - ".github/workflows/tools-*.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tools-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: umbrawg-tools/Cargo.toml
+          command: check
+          arguments: --all-features
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: umbrawg-tools -> umbrawg-tools/target
+
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: umbrawg-tools -> umbrawg-tools/target
+
+      - name: Run tests
+        run: cargo test --workspace
+
+  bench:
+    name: bench tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - name: Check bench scripts
+        run: |
+          set -euo pipefail
+          bash -n bench/bench.sh bench/bench-lib.sh bench/tests/test-bench-lib.sh
+          bash bench/tests/test-bench-lib.sh
+          python3 -m unittest discover -s bench/tests -p 'test_*.py'
+
+  e2e-daemon:
+    name: e2e daemon (UAPI)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: umbrawg-tools -> umbrawg-tools/target
+
+      - name: Build uwg
+        run: cargo build --release -p uwg
+
+      - name: Build umbrawg daemon
+        working-directory: umbrawg-rs
+        continue-on-error: true
+        run: cargo build --release -p umbrawg
+
+      - name: Check script syntax
+        run: bash -n scripts/test-daemon-e2e.sh
+
+      - name: Run e2e against the userspace daemon
+        run: |
+          set -euo pipefail
+          if [ ! -x ../umbrawg-rs/target/release/umbrawg ]; then
+            echo "SKIP: umbrawg daemon is not built"
+            exit 0
+          fi
+          if ! grep -rq "advanced_security" ../umbrawg-rs/crates/umbrawg-uapi/src/ 2>/dev/null; then
+            echo "SKIP: daemon UAPI does not support AdvancedSecurity yet"
+            exit 0
+          fi
+          sudo -E env \
+            DAEMON="$PWD/../umbrawg-rs/target/release/umbrawg" \
+            UWG="$PWD/target/release/uwg" \
+            scripts/test-daemon-e2e.sh
+
+  packaging:
+    name: packaging
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - name: Install check tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y groff-base fish python3-yaml python3-debian
+
+      - name: Check packaging
+        run: scripts/check-packaging.sh
+
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: umbrawg-tools -> umbrawg-tools/target
+
+      - name: Build uwg
+        run: cargo build --release -p uwg
+
+      - name: Check docs
+        run: scripts/check-docs.sh
+
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            packages: ""
+          - target: aarch64-unknown-linux-gnu
+            packages: gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+          - target: armv7-unknown-linux-gnueabihf
+            packages: gcc-arm-linux-gnueabihf libc6-dev-armhf-cross
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: umbrawg-tools -> umbrawg-tools/target
+          key: ${{ matrix.target }}
+
+      - name: Install cross toolchain
+        if: matrix.packages != ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Build release binaries
+        run: |
+          set -euo pipefail
+          case "${{ matrix.target }}" in
+            aarch64-unknown-linux-gnu)
+              export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+              ;;
+            armv7-unknown-linux-gnueabihf)
+              export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_GNUEABIHF_LINKER=arm-linux-gnueabihf-gcc
+              ;;
+          esac
+          cargo build --release --target "${{ matrix.target }}" -p uwg -p uwg-quick
+
+      - name: Stage release tree
+        run: |
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "uwg") | .version')"
+          name="umbrawg-tools-${version}-${{ matrix.target }}"
+          root="dist/${name}"
+          install -Dm755 "target/${{ matrix.target }}/release/uwg" "${root}/usr/bin/uwg"
+          install -Dm755 "target/${{ matrix.target }}/release/uwg-quick" "${root}/usr/bin/uwg-quick"
+          install -Dm644 man/uwg.8 "${root}/usr/share/man/man8/uwg.8"
+          install -Dm644 man/uwg-quick.8 "${root}/usr/share/man/man8/uwg-quick.8"
+          install -Dm644 completions/uwg.bash "${root}/usr/share/bash-completion/completions/uwg"
+          install -Dm644 completions/uwg-quick.bash "${root}/usr/share/bash-completion/completions/uwg-quick"
+          install -Dm644 completions/_uwg "${root}/usr/share/zsh/vendor-completions/_uwg"
+          install -Dm644 completions/_uwg-quick "${root}/usr/share/zsh/vendor-completions/_uwg-quick"
+          install -Dm644 completions/uwg.fish "${root}/usr/share/fish/vendor_completions.d/uwg.fish"
+          install -Dm644 completions/uwg-quick.fish "${root}/usr/share/fish/vendor_completions.d/uwg-quick.fish"
+          install -Dm644 systemd/uwg-quick@.service "${root}/usr/lib/systemd/system/uwg-quick@.service"
+          install -Dm644 systemd/uwg-quick.target "${root}/usr/lib/systemd/system/uwg-quick.target"
+          install -Dm644 systemd/umbrawg@.service "${root}/usr/lib/systemd/system/umbrawg@.service"
+          install -Dm644 README.md "${root}/usr/share/doc/umbrawg-tools/README.md"
+          install -Dm644 CHANGELOG.md "${root}/usr/share/doc/umbrawg-tools/CHANGELOG.md"
+          install -Dm644 COPYING "${root}/usr/share/doc/umbrawg-tools/COPYING"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-tools-${{ matrix.target }}
+          path: umbrawg-tools/dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/tools-v')
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: umbrawg-tools-*
+          path: dist
+          merge-multiple: true
+
+      - name: Calculate checksums
+        run: |
+          cd dist
+          sha256sum ./*.tar.gz > SHA256SUMS
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true
+
+  legacy-build-ubuntu:
+    name: Legacy C (Ubuntu 22.04)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container:
+      image: ubuntu:22.04
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - name: Build UmbraWG legacy C tools
+        run: |
+          apt -y update &&
+          apt -y install build-essential &&
+          cd legacy-c &&
+          make &&
+          mkdir build &&
+          cp wg ./build/uwg &&
+          cp wg-quick/linux.bash ./build/uwg-quick
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-22.04-legacy-c
+          path: umbrawg-tools/legacy-c/build
+
+  legacy-build-alpine:
+    name: Legacy C (Alpine 3.19)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    container:
+      image: alpine:3.19
+    defaults:
+      run:
+        working-directory: umbrawg-tools
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - name: Build UmbraWG legacy C tools
+        run: |
+          apk add linux-headers build-base &&
+          cd legacy-c &&
+          make &&
+          mkdir build &&
+          cp wg ./build/uwg &&
+          cp wg-quick/linux.bash ./build/uwg-quick
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpine-3.19-legacy-c
+          path: umbrawg-tools/legacy-c/build

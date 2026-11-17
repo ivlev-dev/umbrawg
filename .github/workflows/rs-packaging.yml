@@ -1,0 +1,201 @@
+name: rs packaging
+
+on:
+  push:
+    tags:
+      - "rs-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Ожидаемая версия без префикса rs-v (пусто — взять из Cargo.toml)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rs-packaging-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+env:
+  TAG_PREFIX: rs-v
+
+jobs:
+  meta:
+    name: версия
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - name: Определить версию
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^version = "\(.*\)"/\1/p' umbrawg-rs/Cargo.toml | head -n1)"
+          if [ -z "$version" ]; then
+            echo "error: не удалось определить версию workspace из umbrawg-rs/Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "push" ]; then
+            expected="${TAG_PREFIX}${version}"
+            if [ "$REF_NAME" != "$expected" ]; then
+              echo "error: тег $REF_NAME не совпадает с версией $version (ожидался $expected)" >&2
+              exit 1
+            fi
+          elif [ -n "${REQUESTED:-}" ] && [ "$REQUESTED" != "$version" ]; then
+            echo "error: запрошена версия $REQUESTED, в Cargo.toml $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+  arch:
+    name: arch
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed base-devel cargo git rust
+          useradd -m builder
+
+      - name: Checkout monorepo
+        uses: actions/checkout@v4
+
+      - name: Передать каталог упаковки пользователю сборки
+        working-directory: umbrawg-rs/contrib/arch
+        run: |
+          set -euo pipefail
+          chown -R builder:builder .
+
+      - name: Собрать umbrawg-daemon-git
+        working-directory: umbrawg-rs/contrib/arch/umbrawg-daemon-git
+        run: |
+          set -euo pipefail
+          pkgdir="$PWD"
+          su builder -c "cd '$pkgdir' && makepkg -f --noconfirm --nodeps"
+
+      - name: Проверить версию собранного -git пакета
+        working-directory: umbrawg-rs/contrib/arch/umbrawg-daemon-git
+        env:
+          EXPECTED: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pkg=""
+          for candidate in ./*.pkg.tar.zst; do
+            name="$(basename "$candidate")"
+            case "$name" in
+              "umbrawg-daemon-git-${EXPECTED}.r"*) pkg="$name"; break ;;
+            esac
+          done
+          if [ -z "$pkg" ]; then
+            echo "error: нет пакета umbrawg-daemon-git-${EXPECTED}.r* среди *.pkg.tar.zst" >&2
+            echo "error: ветка, которую клонирует PKGBUILD, не совпадает с версией сборки" >&2
+            exit 1
+          fi
+
+      - name: Проверить содержимое пакета
+        working-directory: umbrawg-rs/contrib/arch/umbrawg-daemon-git
+        env:
+          EXPECTED: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pkg=""
+          for candidate in ./*.pkg.tar.zst; do
+            case "$candidate" in
+              *-debug-*) continue ;;
+            esac
+            pkg="$candidate"
+            break
+          done
+          if [ -z "$pkg" ]; then
+            echo "error: не найден собранный пакет umbrawg-daemon-git" >&2
+            exit 1
+          fi
+          rm -rf /tmp/pkg && mkdir -p /tmp/pkg
+          bsdtar -xpf "$pkg" -C /tmp/pkg
+
+          test -x /tmp/pkg/usr/bin/umbrawg
+          test -f /tmp/pkg/usr/lib/systemd/system/umbrawg@.service
+          test -f /tmp/pkg/usr/lib/tmpfiles.d/umbrawg.conf
+          grep -qx 'd /run/umbrawg 0700 root root -' /tmp/pkg/usr/lib/tmpfiles.d/umbrawg.conf
+          test -f /tmp/pkg/usr/share/licenses/umbrawg-daemon-git/LICENSE
+
+          mode="$(stat -c '%a' /tmp/pkg/etc/umbrawg)"
+          if [ "$mode" != "700" ]; then
+            echo "error: /etc/umbrawg имеет права $mode вместо 700" >&2
+            exit 1
+          fi
+
+          version_output="$(/tmp/pkg/usr/bin/umbrawg --version)"
+          echo "$version_output"
+          if [ "$version_output" != "umbrawg ${EXPECTED}" ]; then
+            echo "error: umbrawg --version вернул '$version_output', ожидалось 'umbrawg ${EXPECTED}'" >&2
+            exit 1
+          fi
+
+          bsdtar -tvf "$pkg" | sed -n '1,40p'
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-daemon-arch
+          path: umbrawg-rs/contrib/arch/umbrawg-daemon-git/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: релиз
+    needs:
+      - meta
+      - arch
+    if: startsWith(github.ref, 'refs/tags/rs-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Скачать артефакты
+        uses: actions/download-artifact@v4
+        with:
+          pattern: umbrawg-daemon-*
+          path: dist
+          merge-multiple: true
+
+      - name: Посчитать SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(./*.pkg.tar.zst)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "error: нечего публиковать" >&2
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS.pkg
+          cat SHA256SUMS.pkg
+
+      - name: Опубликовать релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.pkg.tar.zst
+            dist/SHA256SUMS.pkg
+          fail_on_unmatched_files: true

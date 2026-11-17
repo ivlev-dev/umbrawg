@@ -1,0 +1,398 @@
+name: Kernel module packaging
+
+on:
+  push:
+    tags:
+      - "kernel-v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Ожидаемая версия модуля без префикса kernel-v (пусто — взять из src/version.h)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kernel-packaging-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'workflow_dispatch' }}
+
+defaults:
+  run:
+    working-directory: umbrawg-linux-kernel-module
+
+jobs:
+  meta:
+    name: версия
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      rpm_version: ${{ steps.version.outputs.rpm_version }}
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v4
+
+      - name: Определить версию
+        id: version
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REQUESTED: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          version="$(sed -n 's/^#define UMBRAWG_VERSION "\([^"]*\)".*/\1/p' src/version.h | head -n1)"
+          if [ -z "$version" ]; then
+            echo "error: не удалось определить версию модуля из src/version.h" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "push" ]; then
+            tag_version="${REF_NAME#kernel-v}"
+            if [ "$tag_version" != "$version" ]; then
+              echo "error: тег $REF_NAME не совпадает с версией $version (ожидался kernel-v$version)" >&2
+              exit 1
+            fi
+          elif [ -n "${REQUESTED:-}" ] && [ "$REQUESTED" != "$version" ]; then
+            echo "error: запрошена версия $REQUESTED, в src/version.h $version" >&2
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "rpm_version=${version//-/_}" >> "$GITHUB_OUTPUT"
+
+  arch:
+    name: arch
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v4
+
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed base-devel git rust cargo linux-headers
+          useradd -m builder
+
+      - name: Передать каталог упаковки пользователю сборки
+        working-directory: umbrawg-linux-kernel-module/contrib/arch
+        run: |
+          set -euo pipefail
+          chown -R builder:builder .
+
+      - name: Собрать umbrawg-dkms-git
+        working-directory: umbrawg-linux-kernel-module/contrib/arch/umbrawg-dkms-git
+        run: |
+          set -euo pipefail
+          pkgdir="$PWD"
+          su builder -c "cd '$pkgdir' && makepkg -f --noconfirm --nodeps"
+
+      - name: Проверить версию собранного -git пакета
+        working-directory: umbrawg-linux-kernel-module/contrib/arch/umbrawg-dkms-git
+        env:
+          EXPECTED: ${{ needs.meta.outputs.rpm_version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pkg=""
+          for candidate in ./*.pkg.tar.zst; do
+            name="$(basename "$candidate")"
+            case "$name" in
+              "umbrawg-dkms-git-${EXPECTED}.r"*) pkg="$name"; break ;;
+            esac
+          done
+          if [ -z "$pkg" ]; then
+            echo "error: нет пакета umbrawg-dkms-git-${EXPECTED}.r* среди *.pkg.tar.zst" >&2
+            echo "error: ветка, которую клонирует PKGBUILD, не совпадает с версией сборки" >&2
+            exit 1
+          fi
+
+      - name: Проверить содержимое пакета
+        working-directory: umbrawg-linux-kernel-module/contrib/arch/umbrawg-dkms-git
+        env:
+          MODULE_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pkgs=(./*.pkg.tar.zst)
+          if [ "${#pkgs[@]}" -eq 0 ]; then
+            echo "error: не найден собранный пакет" >&2
+            exit 1
+          fi
+          pkg="${pkgs[0]}"
+          rm -rf /tmp/pkg && mkdir -p /tmp/pkg
+          bsdtar -xpf "$pkg" -C /tmp/pkg
+
+          shopt -s nullglob
+          srcs=(/tmp/pkg/usr/src/umbrawg-*)
+          if [ "${#srcs[@]}" -ne 1 ]; then
+            echo "error: ожидался один каталог /usr/src/umbrawg-*, найдено ${#srcs[@]}" >&2
+            exit 1
+          fi
+          src="${srcs[0]}"
+          pkgver="$(basename "$src")"
+          echo "каталог исходников: $src"
+
+          test -f "$src/dkms.conf"
+          test -f "$src/version.h"
+          test -f "$src/Makefile"
+          test -f "$src/Kbuild"
+          test -f "$src/main.c"
+          test -f "$src/device.c"
+          test -f "$src/uapi/umbrawg.h"
+
+          grep -qx "PACKAGE_VERSION=\"${pkgver#umbrawg-}\"" "$src/dkms.conf"
+          grep -Eq "^MAKE=\"make LLVM=1 UMBRAWG_VERSION=${MODULE_VERSION}\"" "$src/dkms.conf"
+          grep -q "define UMBRAWG_VERSION \"${MODULE_VERSION}\"" "$src/version.h"
+
+          bsdtar -tvf "$pkg" | sed -n '1,20p'
+
+      - name: Собрать модуль из упакованных исходников
+        env:
+          MODULE_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          srcs=(/tmp/pkg/usr/src/umbrawg-*)
+          src="${srcs[0]}"
+
+          kdirs=(/usr/lib/modules/*/build)
+          if [ "${#kdirs[@]}" -eq 0 ]; then
+            echo "error: не найдены заголовки ядра в /usr/lib/modules" >&2
+            exit 1
+          fi
+          kdir="${kdirs[0]}"
+          echo "заголовки ядра: $kdir"
+
+          rm -rf /tmp/modbuild && cp -a "$src" /tmp/modbuild
+          cd /tmp/modbuild
+
+          if grep -qx 'CONFIG_CC_IS_CLANG=y' "$kdir/include/config/auto.conf"; then
+            if ! command -v clang >/dev/null; then
+              pacman -S --noconfirm --needed clang lld llvm
+            fi
+            make LLVM=1 "UMBRAWG_VERSION=${MODULE_VERSION}" "KERNELDIR=${kdir}"
+          else
+            echo "::notice::заголовки ядра собраны GCC, LLVM=1 к ним неприменим; сборка идёт тем же компилятором, что и ядро"
+            make "UMBRAWG_VERSION=${MODULE_VERSION}" "KERNELDIR=${kdir}"
+          fi
+
+          test -f umbrawg.ko
+          built_version="$(modinfo -F version umbrawg.ko)"
+          echo "версия собранного модуля: $built_version"
+          if [ "$built_version" != "$MODULE_VERSION" ]; then
+            echo "error: модуль собран с версией $built_version, ожидалось $MODULE_VERSION" >&2
+            exit 1
+          fi
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-dkms-arch
+          path: umbrawg-linux-kernel-module/contrib/arch/umbrawg-dkms-git/*.pkg.tar.zst
+          if-no-files-found: error
+          retention-days: 14
+
+  rpm:
+    name: rpm
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: fedora:latest
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v4
+
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          dnf install -y --setopt=install_weak_deps=False \
+            bc dkms gcc kernel-devel make rpm-build tar gzip
+
+      - name: Собрать .rpm
+        env:
+          RPM_VERSION: ${{ needs.meta.outputs.rpm_version }}
+        run: |
+          set -euo pipefail
+          srcroot="${GITHUB_WORKSPACE}/umbrawg-linux-kernel-module"
+          top="${srcroot}/build/rpm"
+          mkdir -p "$top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
+
+          srctree="/tmp/srctree/umbrawg-linux-kernel-module-${RPM_VERSION}"
+          rm -rf /tmp/srctree && mkdir -p "$srctree"
+          tar -C "$srcroot" --exclude=./.git --exclude=./build -cf - . \
+            | tar -C "$srctree" -xf -
+          tar -C /tmp/srctree -czf "$top/SOURCES/v${RPM_VERSION}.tar.gz" \
+            "umbrawg-linux-kernel-module-${RPM_VERSION}"
+
+          sed "s/^Version:.*/Version:        ${RPM_VERSION}/" umbrawg-dkms.spec \
+            > "$top/SPECS/umbrawg-dkms.spec"
+
+          rpmbuild --define "_topdir $top" -ba "$top/SPECS/umbrawg-dkms.spec"
+
+      - name: Проверить содержимое .rpm
+        env:
+          RPM_VERSION: ${{ needs.meta.outputs.rpm_version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          rpms=(build/rpm/RPMS/noarch/*.rpm)
+          if [ "${#rpms[@]}" -ne 1 ]; then
+            echo "error: ожидался один .rpm, найдено ${#rpms[@]}" >&2
+            exit 1
+          fi
+          rpm="${rpms[0]}"
+          echo "пакет: $rpm"
+
+          got_version="$(rpm -qp --qf '%{VERSION}' "$rpm")"
+          if [ "$got_version" != "$RPM_VERSION" ]; then
+            echo "error: версия .rpm $got_version, ожидалось $RPM_VERSION" >&2
+            exit 1
+          fi
+
+          files="$(rpm -qlp "$rpm")"
+          echo "$files"
+          for required in \
+            "/usr/src/umbrawg-${RPM_VERSION}/dkms.conf" \
+            "/usr/src/umbrawg-${RPM_VERSION}/version.h" \
+            "/usr/src/umbrawg-${RPM_VERSION}/Makefile" \
+            "/usr/src/umbrawg-${RPM_VERSION}/Kbuild" \
+            "/usr/src/umbrawg-${RPM_VERSION}/uapi/umbrawg.h"; do
+            if ! grep -qx "$required" <<<"$files"; then
+              echo "error: в .rpm нет $required" >&2
+              exit 1
+            fi
+          done
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-dkms-rpm
+          path: umbrawg-linux-kernel-module/build/rpm/RPMS/noarch/*.rpm
+          if-no-files-found: error
+          retention-days: 14
+
+  deb:
+    name: deb
+    needs: meta
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    container:
+      image: debian:trixie
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v4
+
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            build-essential debhelper dh-dkms dkms dpkg-dev
+
+      - name: Собрать .deb
+        run: |
+          set -euo pipefail
+          dpkg-buildpackage -b -us -uc
+          mkdir -p deb-out
+          cp ../umbrawg-dkms_*.deb deb-out/
+          ls -la deb-out
+
+      - name: Проверить содержимое .deb
+        env:
+          MODULE_VERSION: ${{ needs.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          debs=(deb-out/*.deb)
+          if [ "${#debs[@]}" -ne 1 ]; then
+            echo "error: ожидался один .deb, найдено ${#debs[@]}" >&2
+            exit 1
+          fi
+          deb="${debs[0]}"
+          echo "пакет: $deb"
+
+          deb_version="$(dpkg-deb -f "$deb" Version)"
+          if [ "$deb_version" != "$MODULE_VERSION" ]; then
+            echo "::warning::версия .deb $deb_version не совпадает с версией модуля $MODULE_VERSION: debian/changelog ещё содержит legacy-версию, обновите её перед релизом"
+          fi
+
+          rm -rf /tmp/deb && mkdir -p /tmp/deb
+          dpkg-deb -x "$deb" /tmp/deb
+          srcs=(/tmp/deb/usr/src/umbrawg-*)
+          if [ "${#srcs[@]}" -ne 1 ]; then
+            echo "error: ожидался один каталог /usr/src/umbrawg-*, найдено ${#srcs[@]}" >&2
+            exit 1
+          fi
+          src="${srcs[0]}"
+          echo "каталог исходников: $src"
+
+          test -f "$src/dkms.conf"
+          test -f "$src/version.h"
+          test -f "$src/Makefile"
+          test -f "$src/Kbuild"
+          test -f "$src/main.c"
+          test -f "$src/uapi/umbrawg.h"
+          grep -qx "PACKAGE_VERSION=\"$(basename "$src" | sed 's/^umbrawg-//')\"" "$src/dkms.conf"
+          grep -q "define UMBRAWG_VERSION \"${MODULE_VERSION}\"" "$src/version.h"
+
+          dpkg-deb -c "$deb" | sed -n '1,20p'
+
+      - name: Загрузить артефакт
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-dkms-deb
+          path: umbrawg-linux-kernel-module/deb-out/*.deb
+          if-no-files-found: error
+          retention-days: 14
+
+  release:
+    name: релиз
+    needs:
+      - meta
+      - arch
+      - rpm
+      - deb
+    if: startsWith(github.ref, 'refs/tags/kernel-v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    concurrency:
+      group: kernel-release-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - name: Скачать артефакты
+        uses: actions/download-artifact@v4
+        with:
+          pattern: umbrawg-dkms-*
+          path: dist
+          merge-multiple: true
+
+      - name: Посчитать SHA256SUMS
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(./*.pkg.tar.zst ./*.rpm ./*.deb)
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "error: нечего публиковать" >&2
+            exit 1
+          fi
+          sha256sum "${files[@]}" > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Опубликовать релиз
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.pkg.tar.zst
+            dist/*.rpm
+            dist/*.deb
+            dist/SHA256SUMS
+          fail_on_unmatched_files: true

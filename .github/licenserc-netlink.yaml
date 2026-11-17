@@ -1,0 +1,17 @@
+header:
+  license:
+    content: |
+      SPDX-License-Identifier: MIT
+  paths:
+    - netlink-packet-umbrawg
+  paths-ignore:
+    - 'netlink-packet-umbrawg/target'
+    - '**/*.toml'
+    - '**/*.lock'
+    - '**/*.yml'
+    - '**/*.md'
+    - 'netlink-packet-umbrawg/CHANGELOG'
+    - 'netlink-packet-umbrawg/LICENSE'
+    - 'netlink-packet-umbrawg/.gitignore'
+
+  comment: on-failure

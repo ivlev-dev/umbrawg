@@ -1,0 +1,180 @@
+name: netlink CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "netlink-packet-umbrawg/**"
+  push:
+    branches:
+      - master
+      - "feature/**"
+    paths:
+      - "netlink-packet-umbrawg/**"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: netlink-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: netlink-packet-umbrawg/Cargo.toml
+          command: check
+          arguments: --all-features
+
+  unit:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: netlink-packet-umbrawg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: netlink-packet-umbrawg -> netlink-packet-umbrawg/target
+
+      - name: Run unit tests
+        run: cargo test --lib
+
+  properties:
+    name: Property tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: netlink-packet-umbrawg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: netlink-packet-umbrawg -> netlink-packet-umbrawg/target
+
+      - name: Run property tests
+        env:
+          PROPTEST_CASES: 512
+        run: cargo test --test properties
+
+  fuzz-build:
+    name: Fuzz build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: netlink-packet-umbrawg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: netlink-packet-umbrawg -> netlink-packet-umbrawg/target
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Build fuzz targets
+        run: cargo +nightly fuzz build
+
+  rustfmt-clippy:
+    name: Rustfmt and clippy check
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+    defaults:
+      run:
+        working-directory: netlink-packet-umbrawg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: netlink-packet-umbrawg -> netlink-packet-umbrawg/target
+
+      - name: rustfmt
+        run: cargo +nightly fmt --all -- --check
+
+      - name: clippy
+        run: cargo +nightly clippy --all-targets -- -D warnings
+
+  check-license:
+    name: Check License
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Check License Header
+        uses: apache/skywalking-eyes@v0.3.0
+        with:
+          config: .github/licenserc-netlink.yaml
+
+  integration-preflight:
+    name: Integration preflight
+    runs-on: ubuntu-latest
+    outputs:
+      available: ${{ steps.detect.outputs.available }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Detect UmbraWG kernel module
+        id: detect
+        run: |
+          set -euo pipefail
+          if ! command -v ip >/dev/null; then
+            sudo apt-get update
+            sudo apt-get install -y iproute2
+          fi
+          if sudo modprobe umbrawg 2>/dev/null &&
+             sudo ip link add umbrawg-ci-probe type umbrawg 2>/dev/null; then
+            sudo ip link del umbrawg-ci-probe 2>/dev/null || true
+            echo "available=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::UmbraWG kernel module is available; integration tests will run."
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::UmbraWG kernel module is not available on this runner. The integration job will be skipped, not reported as passed. Run it on a host with the module loaded."
+          fi
+
+  integration:
+    name: Integration tests (requires umbrawg module)
+    needs: integration-preflight
+    if: needs.integration-preflight.outputs.available == 'true'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: netlink-packet-umbrawg
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: netlink-packet-umbrawg -> netlink-packet-umbrawg/target
+
+      - name: Build integration tests
+        run: cargo test --no-run --test integration
+
+      - name: Run integration tests
+        run: sudo -E env "PATH=$PATH" cargo test --test integration -- --test-threads=1
