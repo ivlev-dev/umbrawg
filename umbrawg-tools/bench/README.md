@@ -231,6 +231,123 @@ python3 bench/bench-compare.py baseline.csv candidate.csv --threshold 10 --md di
 2 — ошибка входных данных. После оптимизации прогоняйте новый результат
 против базового: `python3 bench/bench-compare.py ab-master.csv ab-wire.csv`.
 
+## A/B коалесинга пробуждений
+
+`wakeup-ab.sh` сравнивает две сборки модуля на одном стенде. Каждый раунд
+прогоняет `bench.sh` для обеих сборок, порядок вариантов чередуется —
+дрейф машины и нагрев не смещают разницу в одну сторону. Разбор результатов
+делает `wakeup-analysis.py`: медианы по ячейкам, парные Δ% по совпадающим
+повторам, знак пар, ретрансмиты/потери и `cpu_total`.
+
+Что меряется в каждой сборке: `DURATION=8`, `REPEATS=1`, TCP `conns=1/10`,
+UDP 1G, `obf=0/1`, `mode=1c/3c` — 16 ячеек, примерно 6–8 минут на вариант
+за раунд. Скрипт ждёт load average ниже `IDLE_LOAD_MAX`, поэтому рядом не
+должно быть сборок и функциональных тестов.
+
+```bash
+# нужен root; обе сборки уже собраны (в src лежит umbrawg.ko)
+MASTER=/root/umbrawg/module-master/src \
+WAKEUP=/root/umbrawg/module-wakeup/src \
+bash bench/wakeup-ab.sh --rounds 5
+python3 bench/wakeup-analysis.py bench/results/wakeup-ab
+```
+
+Варианты каталогов можно задать флагами `--master`/`--wakeup` или
+переменными `MASTER`/`WAKEUP`; если рядом с репозиторием есть
+`module-master/src` и `module-wakeup/src`, они находятся сами.
+
+| Переменная / флаг | По умолчанию | Смысл |
+|---|---|---|
+| `MASTER`, `--master` | `$WORKSPACE_ROOT/module-master/src`, затем `$WORKSPACE_ROOT/umbrawg-linux-kernel-module/src` | сборка-база |
+| `WAKEUP`, `--wakeup` | `$WORKSPACE_ROOT/module-wakeup/src`, затем `$WORKSPACE_ROOT/umbrawg-linux-kernel-module/src` | сборка с изменением |
+| `ROUNDS`, `--rounds` | 5 | число раундов (каждый раунд — оба варианта) |
+| `OUTDIR`, `--outdir` | `$BENCH_DIR/results` | каталог CSV |
+| `TAG`, `--tag` | `wakeup-ab` | префикс файлов |
+| `COOLDOWN`, `--cooldown` | 20 | пауза между раундами, секунд |
+| `IDLE_LOAD_MAX` | 0.9 | порог load average перед прогоном |
+| `DURATION`, `CONNS_LIST`, `OBF_LIST`, `MODE_LIST`, `PROTO_LIST`, `PEERS_LIST`, `LOSS_LIST`, `UDP_RATE_LIST`, `IMPL_LIST` | как у `bench.sh` (см. дефолты скрипта) | матрица ячеек |
+
+Полный прогон (5 раундов × 2 варианта) занимает около 1,5–2 часов. Каждый
+вариант оставляет `$OUTDIR/$TAG-master.csv` и `$OUTDIR/$TAG-wakeup.csv`
+плюс `.diag`, `.agg.csv`, `.md` от `bench.sh`; исходные CSV всех повторов
+сохраняются (в них пишется `RUN_ID=<вариант>-r<раунд>`), поэтому анализ
+можно перезапускать без повторных замеров. `wakeup-analysis.py` без
+аргументов берёт `bench/results/wakeup-ab`; короткое имя тоже ищется в
+`bench/results`.
+
+## Масштабирование по пирам
+
+`peer-scaling.py` меряет, как растёт суммарный goodput с числом пиров:
+1/2/4 пары «своё клиентское устройство ↔ свой серверный пир». Потоки iperf3
+(`--conns`, по умолчанию 10) делятся между пирами поровну. Режим
+`--single-server` кладёт все 4 пира на одно серверное устройство и один
+сокет — так видно, упирается ли масштабирование во внешний сокет или в
+per-peer NAPI.
+
+Требования: root (netns, insmod, workqueue cpumask), **4 пары
+устройств/пиров** (интерфейсы `uwgp0..3` и `uwgq0..3`), `iperf3`, собранный
+`umbrawg.ko` или userspace-демон. Стенд сам создаёт `bn0`/`bn1`, veth с
+`nproc` очередями, конфиги с обфускацией из `obf-params.conf` и снимает
+CPU-профиль по каждому прогону.
+
+```bash
+python3 bench/peer-scaling.py --print-defaults          # пути без запуска
+python3 bench/peer-scaling.py --variant master --rounds 3
+python3 bench/peer-scaling.py --variant master-single --single-server --rounds 3
+python3 bench/peer-scaling.py --variant rust --impl rust-par --mode 3c
+```
+
+Пути по умолчанию выводятся из расположения скрипта и `WORKSPACE_ROOT`
+(`UWG`, `DAEMON`, `KO`, `OBF`, `OUT`); их можно переопределить переменными
+`WORKSPACE_ROOT`, `UWG`, `DAEMON`, `GO_BASELINE`, `OBF`, `AWG` или флагами
+`--ko`, `--daemon`, `--go-bin`, `--obf-conf`, `--out`. Матрица:
+`--peers-list "1 2 4"`, `--obf-list "0 1"`, `--protos "tcp udp"`, `--conns 10`,
+`--duration 8`, `--rounds 3`, `--rate 1G` (UDP с лимитом; `0` — без лимита).
+`--client-cpus`/`--server-cpus` задают привязку iperf3.
+
+Один набор (2 значения obf × 3 набора пиров × 2 протокола × 3 повтора по
+8 с) — около 5 минут трафика, с созданием топологии и ожиданием туннеля
+10–15 минут; прогон с `--single-server` стоит столько же. Результат
+дописывается в `bench/results/peer-scaling.csv` (по строке на повтор):
+`variant,mode,obf,peers,conns,proto,rep,mbit,retrans,lost_percent,
+cpu_total,hot_cpus,top_threads,per_cpu`. `cpu_total` и `per_cpu` — busy% всей
+машины и по ядрам за прогон, `top_threads` — вклад потоков (включая
+`napi/uwgq*`), `hot_cpus` — число ядер с busy ≥ 80%. Итоговые таблицы и
+разбор — в [PEER-SCALING.md](PEER-SCALING.md).
+
+## Профилирование wakeup
+
+Два скрипта для разбора, куда уходит время на пробуждениях:
+
+- `wakeup-count.sh <master|wakeup> [повтор]` — `perf record` по
+  `sched:sched_wakeup` за один прогон `bench.sh`, печатает top-10 задач,
+  которые будят воркеров.
+- `wakeup-profile.sh <master|wakeup> <метка>` — `perf record -F 1500 -g` по
+  всему прогону, печатает строку `Mbit` и top-30 символов с долей сэмплов
+  (`queue_work_on`, `__queue_work`, `try_to_wake_up`, `ttwu_do_activate`).
+
+Оба требуют root, `perf` с символами ядра (`kernel.perf_event_paranoid`
+не выше 1, иначе `perf record -a` не даст данные) и свободный стенд: перед
+запуском скрипт выгружает `umbrawg`, ждёт load ниже `IDLE_LOAD_MAX`, ждёт
+исчезновения `bn0`/`bn1` и чужих `iperf3`.
+
+```bash
+bash bench/wakeup-count.sh master 1
+bash bench/wakeup-profile.sh wakeup p1
+```
+
+`MODDIR` по умолчанию — `$WORKSPACE_ROOT/module-<вариант>/src`, затем
+`$WORKSPACE_ROOT/umbrawg-linux-kernel-module/src`; матрица задаётся
+`DUR`/`PROTO`/`CONNS`/`MODE`/`OBF` (по умолчанию 6–8 с, TCP, 1 поток, `1c`,
+`obf=0`), частота профиля — `PERF_HZ`. Один запуск занимает 1–2 минуты
+(сам прогон 6–8 с плюс ожидание чистого стенда).
+
+Выходные файлы: `/tmp/wk-<вариант>-<повтор>.{data,log,csv}` и
+`/tmp/prof-<вариант>-<метка>.{data,log,csv}`, префикс меняется через `OUT`.
+В stdout — счётчики по задачам (count) или доля символов и строка `Mbit`
+(profile). `perf.data` можно разбирать дальше: `perf report -i ... --stdio`,
+`perf script -i ...`.
+
 ## Ограничения стенда
 
 - **veth не даёт очередей сам по себе.** `ip link add ... numtxqueues N
@@ -267,16 +384,24 @@ python3 bench/bench-compare.py baseline.csv candidate.csv --threshold 10 --md di
 Из корня репозитория (без root, кроме `bash -n` ничего не нужно):
 
 ```bash
-bash -n bench/bench.sh bench/bench-lib.sh bench/tests/test-bench-lib.sh
+bash -n bench/*.sh bench/tests/test-bench-lib.sh
 bash bench/tests/test-bench-lib.sh                          # 62 проверки
-python3 -m unittest discover -s bench/tests -p 'test_*.py'  # 17 тестов
+python3 -m py_compile bench/*.py bench/tests/*.py
+python3 -m unittest discover -s bench/tests -p 'test_*.py'  # 60 тестов
 PLAN_ONLY=1 FORCE=1 IMPL_LIST="" bash bench/bench.sh        # план без root
+bash bench/wakeup-ab.sh --help                              # справка без запуска
+bash bench/wakeup-count.sh --help
+bash bench/wakeup-profile.sh --help
+python3 bench/wakeup-analysis.py --help
+python3 bench/peer-scaling.py --print-defaults               # только пути
 ```
 
 Тесты хелперов проверяют `cpu_mask`, MTU-guard, разбор скоростей UDP,
 счётчики фрагментации, CPU-срезы, guard занятости, разрешение путей
 (`first_existing_dir`/`first_existing_file`) и запуск `bench.sh` в режиме
-`PLAN_ONLY` без root.
+`PLAN_ONLY` без root. `test_wakeup_analysis.py` проверяет разбор A/B CSV:
+пропуск `FAIL`, номер повтора из `run`, медианы, парные Δ только по общим
+повторам и формат строк отчёта.
 
 ## Совместимость
 
