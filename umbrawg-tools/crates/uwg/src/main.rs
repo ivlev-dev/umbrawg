@@ -4,7 +4,8 @@ mod output;
 
 use std::process::ExitCode;
 
-use clap::{CommandFactory, Parser};
+use clap::error::ErrorKind;
+use clap::FromArgMatches;
 use umbrawg_config::Config;
 use umbrawg_ctl::SetDevice;
 
@@ -15,7 +16,10 @@ type CommandResult = Result<(), String>;
 #[tokio::main]
 async fn main() -> ExitCode {
     let _ = env_logger::try_init();
-    let parsed = Cli::parse();
+    let parsed = match parse_cli() {
+        Ok(parsed) => parsed,
+        Err(error) => return report_parse_error(&error),
+    };
     let result = match parsed.command {
         None => {
             run_show(&ShowArgs {
@@ -53,6 +57,20 @@ async fn main() -> ExitCode {
     }
 }
 
+fn parse_cli() -> Result<Cli, clap::Error> {
+    let matches = cli::command().try_get_matches()?;
+    Cli::from_arg_matches(&matches)
+}
+
+fn report_parse_error(error: &clap::Error) -> ExitCode {
+    let code = match error.kind() {
+        ErrorKind::DisplayHelp | ErrorKind::DisplayVersion => 0,
+        _ => 1,
+    };
+    let _ = error.print();
+    ExitCode::from(code)
+}
+
 async fn run_show(args: &ShowArgs) -> CommandResult {
     if args.interface == "interfaces" {
         if args.parameter.is_some() {
@@ -88,6 +106,7 @@ async fn run_show(args: &ShowArgs) -> CommandResult {
                     Ok(text) => print!("{text}"),
                     Err(error) => {
                         eprintln!("{error}");
+                        eprintln!("{}", cli::show_usage());
                         ugly_failed = true;
                         break;
                     }
@@ -113,7 +132,8 @@ async fn run_show(args: &ShowArgs) -> CommandResult {
         .map_err(|error| format!("Unable to access interface: {error}"))?;
     match &args.parameter {
         Some(parameter) => {
-            let text = output::ugly(&device, parameter, false)?;
+            let text = output::ugly(&device, parameter, false)
+                .map_err(|error| format!("{error}\n{}", cli::show_usage()))?;
             print!("{text}");
         }
         None => print!("{}", output::pretty(&device, color)),
@@ -179,7 +199,7 @@ fn run_version() -> CommandResult {
 }
 
 fn run_help() -> CommandResult {
-    let mut command = Cli::command();
+    let mut command = cli::command();
     command
         .print_help()
         .map_err(|error| format!("Unable to print help: {error}"))?;
