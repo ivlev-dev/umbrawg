@@ -12,6 +12,7 @@
 //! для замеров: он переставляет пакеты одного потока между воркерами.
 
 use std::cell::UnsafeCell;
+use std::collections::VecDeque;
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
@@ -27,6 +28,7 @@ use umbrawg_device::{
     DatagramSink, Device, IncomingOutcome, IoContext, PacketIo, Peer, PreparedIncoming,
     PreparedTransport,
 };
+use umbrawg_proto::obf::{DetectedPacket, MessageKind};
 use umbrawg_transport::{RecvQueue, Socket, MAX_BATCH_SIZE};
 use umbrawg_tun::Tun;
 
@@ -51,6 +53,12 @@ const MAX_WORKERS: usize = 8;
 const STATS_INTERVAL: Duration = Duration::from_secs(5);
 
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Ёмкость очереди управляющих пакетов, обрабатываемых отдельным потоком.
+const CONTROL_QUEUE_CAPACITY: usize = 128;
+
+/// Сколько управляющих пакетов поток обработки забирает за один проход.
+const CONTROL_BATCH: usize = 32;
 
 /// Настройки параллельного приёма.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,8 +145,10 @@ pub(crate) struct RxStats {
     pub datagrams: AtomicU64,
     /// Сегментов, переданных воркерам.
     pub enqueued: AtomicU64,
-    /// Управляющих пакетов, обработанных потоком приёма.
+    /// Управляющих пакетов, классифицированных потоком приёма.
     pub controls: AtomicU64,
+    /// Управляющих пакетов, отброшенных из-за переполнения очереди.
+    pub controls_dropped: AtomicU64,
     /// Отброшено на классификации или поиске сессии.
     pub drops_detect: AtomicU64,
     /// Отброшено из-за переполнения очереди воркера.
@@ -253,6 +263,101 @@ impl EventFd {
 
     fn fd(&self) -> RawFd {
         self.fd.as_raw_fd()
+    }
+}
+
+struct ControlJob {
+    buffer: Box<[u8]>,
+    len: usize,
+    source: SocketAddr,
+    detected: DetectedPacket,
+}
+
+struct ControlState {
+    pending: VecDeque<ControlJob>,
+    free: Vec<Box<[u8]>>,
+}
+
+/// Ограниченная очередь управляющих пакетов для отдельного потока.
+///
+/// Поток приёма только копирует пакет и складывает его в очередь; он никогда
+/// не ждёт обработки рукопожатия. При переполнении пакет отбрасывается, а
+/// данные продолжают идти через очереди крипто-воркеров.
+pub(crate) struct ControlQueue {
+    state: Mutex<ControlState>,
+    event: EventFd,
+}
+
+impl ControlQueue {
+    fn new(capacity: usize) -> io::Result<Self> {
+        let free = (0..capacity)
+            .map(|_| vec![0u8; MAX_PACKET].into_boxed_slice())
+            .collect();
+        Ok(Self {
+            state: Mutex::new(ControlState {
+                pending: VecDeque::with_capacity(capacity),
+                free,
+            }),
+            event: EventFd::new()?,
+        })
+    }
+
+    fn push(&self, data: &[u8], source: SocketAddr, detected: DetectedPacket) -> bool {
+        if data.len() > MAX_PACKET {
+            return false;
+        }
+        let mut state = lock(&self.state);
+        let Some(mut buffer) = state.free.pop() else {
+            return false;
+        };
+        buffer[..data.len()].copy_from_slice(data);
+        state.pending.push_back(ControlJob {
+            buffer,
+            len: data.len(),
+            source,
+            detected,
+        });
+        drop(state);
+        self.event.notify();
+        true
+    }
+
+    fn pop(&self) -> Option<ControlJob> {
+        lock(&self.state).pending.pop_front()
+    }
+
+    fn recycle(&self, job: ControlJob) {
+        lock(&self.state).free.push(job.buffer);
+    }
+
+    fn is_empty(&self) -> bool {
+        lock(&self.state).pending.is_empty()
+    }
+
+    fn wait(&self, timeout_ms: i32) {
+        let mut fds = [libc::pollfd {
+            fd: self.event.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        }];
+        unsafe {
+            libc::poll(fds.as_mut_ptr(), 1, timeout_ms);
+        }
+        if fds[0].revents != 0 {
+            self.event.drain();
+        }
+    }
+
+    #[cfg(test)]
+    fn pending(&self) -> usize {
+        lock(&self.state).pending.len()
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    match mutex.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
@@ -391,6 +496,7 @@ impl WorkerChannel {
 pub(crate) struct SharedRx {
     socket: RwLock<Option<Arc<Socket>>>,
     channels: Vec<WorkerChannel>,
+    controls: ControlQueue,
     sched: RxSchedule,
     stats: RxStats,
     failure: Mutex<Option<String>>,
@@ -405,6 +511,7 @@ impl SharedRx {
         Ok(Self {
             socket: RwLock::new(None),
             channels,
+            controls: ControlQueue::new(CONTROL_QUEUE_CAPACITY)?,
             sched,
             stats: RxStats::default(),
             failure: Mutex::new(None),
@@ -537,9 +644,6 @@ pub(crate) fn rx_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Result<
                             &mut cursor,
                             &snapshot,
                             now,
-                            &mut rng,
-                            &mut scratch,
-                            active,
                             buffer,
                             meta.size,
                             meta.gro_size.map(|size| size.as_usize()),
@@ -559,11 +663,13 @@ pub(crate) fn rx_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Result<
             stats_at = Instant::now();
             let counters = device.incoming_drop_counters();
             log::info!(
-                "rx stats: sched={} datagrams={} enqueued={} controls={} segments={} gro_splits={} max_datagram_segments={} mixed_peers={} housekeeping={} drops(detect={} prepared={} endpoint={} queue={} size={} open={} replay={} allowed={} tun={} tx={} pool={}) wakes={}",
+                "rx stats: sched={} datagrams={} enqueued={} controls={} control_drops={} under_load={} segments={} gro_splits={} max_datagram_segments={} mixed_peers={} housekeeping={} drops(detect={} prepared={} endpoint={} queue={} size={} open={} replay={} allowed={} tun={} tx={} pool={}) wakes={}",
                 shared.sched.as_str(),
                 shared.stats.datagrams.load(Ordering::Relaxed),
                 shared.stats.enqueued.load(Ordering::Relaxed),
                 shared.stats.controls.load(Ordering::Relaxed),
+                shared.stats.controls_dropped.load(Ordering::Relaxed),
+                u8::from(device.under_load()),
                 shared.stats.segments.load(Ordering::Relaxed),
                 shared.stats.gro_splits.load(Ordering::Relaxed),
                 shared.stats.max_datagram_segments.load(Ordering::Relaxed),
@@ -606,6 +712,55 @@ pub(crate) fn rx_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Result<
     }
 
     shared.set_socket(None);
+    Ok(())
+}
+
+/// Поток обработки управляющих пакетов.
+///
+/// Рукопожатия, cookie и ответы обрабатываются здесь, а не в потоке приёма:
+/// флуд инициаций занимает только эту очередь, пока данные продолжают идти
+/// через крипто-воркеры.
+pub(crate) fn control_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Result<()> {
+    let mut rng = BufferedRng::new(OsRng);
+    let mut scratch = vec![0u8; MAX_PACKET + 512];
+    loop {
+        if shutdown_requested() && shared.controls.is_empty() {
+            break;
+        }
+        let mut processed = 0usize;
+        while let Some(mut job) = shared.controls.pop() {
+            let Some(socket) = shared.socket() else {
+                shared.controls.recycle(job);
+                break;
+            };
+            let now = Instant::now();
+            let snapshot = device.incoming_snapshot();
+            let mut control = ControlIo { socket: &socket };
+            let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut control);
+            let prepared = PreparedIncoming::Control(job.detected);
+            if let Err(error) = device.handle_prepared(
+                &mut job.buffer[..job.len],
+                prepared,
+                job.source,
+                &snapshot,
+                &mut context,
+            ) {
+                log::debug!("control packet failed: {error}");
+            }
+            shared.controls.recycle(job);
+            processed += 1;
+            if processed >= CONTROL_BATCH {
+                break;
+            }
+        }
+        device.refresh_under_load(Instant::now());
+        if shutdown_requested() && shared.controls.is_empty() {
+            break;
+        }
+        if processed == 0 {
+            shared.controls.wait(IDLE_TIMEOUT_MS);
+        }
+    }
     Ok(())
 }
 
@@ -760,9 +915,6 @@ fn enqueue_segments(
     cursor: &mut usize,
     snapshot: &umbrawg_device::IncomingSnapshot,
     now: Instant,
-    rng: &mut BufferedRng<OsRng>,
-    scratch: &mut [u8],
-    socket: &Socket,
     data: &mut [u8],
     len: usize,
     gro_size: Option<usize>,
@@ -814,16 +966,22 @@ fn enqueue_segments(
                 }
                 PreparedIncoming::Control(detected) => {
                     shared.stats.controls.fetch_add(1, Ordering::Relaxed);
-                    let mut control = ControlIo { socket };
-                    let mut context = IoContext::new(rng, now, scratch, &mut control);
-                    if let Err(error) = device.handle_prepared(
-                        &mut data[offset..segment_end],
-                        PreparedIncoming::Control(detected),
-                        source,
-                        snapshot,
-                        &mut context,
-                    ) {
-                        log::debug!("control packet failed: {error}");
+                    let length = detected
+                        .padding
+                        .saturating_add(detected.body_len)
+                        .min(segment_end - offset);
+                    let queued =
+                        shared
+                            .controls
+                            .push(&data[offset..offset + length], source, detected);
+                    if !queued {
+                        shared
+                            .stats
+                            .controls_dropped
+                            .fetch_add(1, Ordering::Relaxed);
+                        if detected.kind == MessageKind::Initiation {
+                            device.note_initiation(now);
+                        }
                     }
                 }
                 PreparedIncoming::Dropped => {
@@ -881,6 +1039,7 @@ fn housekeeping<R: RngCore>(
     if let Some(error) = staged_error {
         log::debug!("flush failed: {error}");
     }
+    device.refresh_under_load(now);
     if device
         .next_deadline()
         .is_some_and(|deadline| deadline <= now)
@@ -1090,6 +1249,49 @@ mod tests {
         assert!(!parallel_rx_enabled(Some("0")));
         assert!(!parallel_rx_enabled(Some("")));
         assert!(!parallel_rx_enabled(None));
+    }
+
+    fn control_packet() -> DetectedPacket {
+        DetectedPacket {
+            kind: MessageKind::Initiation,
+            padding: 0,
+            body_len: umbrawg_proto::messages::INITIATION_SIZE,
+        }
+    }
+
+    #[test]
+    fn control_queue_is_bounded_and_keeps_data_channels_free() {
+        let shared = SharedRx::new(1, RxSchedule::Peer).unwrap();
+        let source: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        let payload = vec![0x5a; 256];
+        for _ in 0..CONTROL_QUEUE_CAPACITY {
+            assert!(shared.controls.push(&payload, source, control_packet()));
+        }
+        assert_eq!(shared.controls.pending(), CONTROL_QUEUE_CAPACITY);
+        assert!(!shared.controls.push(&payload, source, control_packet()));
+        assert_eq!(shared.channels[0].available(), QUEUE_CAPACITY);
+
+        let mut cursor = 0;
+        publish(&shared, &mut cursor, None, 7u64);
+        assert_eq!(drain(&shared), vec![vec![7u64]]);
+
+        let job = shared.controls.pop().expect("queued control");
+        assert_eq!(job.len, payload.len());
+        assert_eq!(&job.buffer[..4], &payload[..4]);
+        assert_eq!(job.source, source);
+        assert_eq!(job.detected.kind, MessageKind::Initiation);
+        shared.controls.recycle(job);
+        assert_eq!(shared.controls.pending(), CONTROL_QUEUE_CAPACITY - 1);
+        assert!(shared.controls.push(&payload, source, control_packet()));
+    }
+
+    #[test]
+    fn oversized_control_packet_is_rejected() {
+        let shared = SharedRx::new(1, RxSchedule::Peer).unwrap();
+        let payload = vec![0u8; MAX_PACKET + 1];
+        let source: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        assert!(!shared.controls.push(&payload, source, control_packet()));
+        assert!(shared.controls.is_empty());
     }
 
     #[test]
