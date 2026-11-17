@@ -76,7 +76,11 @@ bash bench.sh
 | `UDP_RATE` | 1G | суммарная предложенная скорость UDP на всю ячейку |
 | `UDP_RATE_LIST` | пусто | список скоростей UDP, переопределяет `UDP_RATE`; `0` = без лимита |
 | `TUN_MTU` | 1420 | MTU туннельных интерфейсов |
-| `UNDERLAY_MTU` | 9000 | MTU veth (underlay) |
+| `UNDERLAY_MTU` | 9000 | MTU veth (underlay); передаётся демонам rust/rust-par как `UMBRAWG_UNDERLAY_MTU` |
+| `UMBRAWG_UNDERLAY_MTU` | =`UNDERLAY_MTU` | env демона (rust/rust-par): MTU underlay для GSO/фрагментации; задаётся автоматически из `UNDERLAY_MTU` |
+| `GSO_SEGMENTS` | пусто | если задан, передаётся демонам rust/rust-par как `UMBRAWG_GSO_SEGMENTS` |
+| `RUST_RX_SCHED` | peer | планировщик RX для `rust-par` (`peer` или `queue`); env `UMBRAWG_RX_SCHED` |
+| `RUST_PARALLEL` | 0 | 1 — добавить `rust-par` в список реализаций по умолчанию |
 | `OVERHEAD_BASE` | 80 | базовый оверхед туннеля (IPv4+UDP+WG) для MTU-guard |
 | `ALLOW_FRAGMENT` | 0 | 1 — разрешить заведомо фрагментированный путь |
 | `VETH_QUEUES` | `nproc` | число очередей veth (max для `numtxqueues`/`numrxqueues`) |
@@ -116,6 +120,8 @@ bash bench.sh
 4. **MTU-guard.** Перед запуском проверяется
    `TUN_MTU <= UNDERLAY_MTU - (OVERHEAD_BASE + S4 профиля)`; при underlay
    ≥ 9000 проверка не нужна. При 1500 и S4=28 безопасно `TUN_MTU=1380`.
+   **Предупреждение:** при underlay 1500 для `obf=1` (S4=28) нужен
+   `TUN_MTU ≤ 1392` (obf=0) / `≤ 1380` (obf=1); иначе путь фрагментируется.
    При нарушении скрипт падает с кодом 2 (обход — `ALLOW_FRAGMENT=1`).
    Дополнительно на каждой ячейке считается прирост `FragOKs`/`FragCreates`
    в обоих netns: при фрагментации пишется `FRAGMENTED` в diag и `frag>0` в CSV.

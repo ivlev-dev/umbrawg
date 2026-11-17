@@ -16,6 +16,9 @@ RESULT=${RESULT:-$BENCH_DIR/results.csv}
 REPORT_PY=${REPORT_PY:-$BENCH_DIR/bench-report.py}
 DIAG_USER=${DIAG:-}
 UNDERLAY_MTU=${UNDERLAY_MTU:-9000}
+GSO_SEGMENTS=${GSO_SEGMENTS:-}
+RUST_RX_SCHED=${RUST_RX_SCHED:-peer}
+RUST_PARALLEL=${RUST_PARALLEL:-0}
 TUN_MTU=${TUN_MTU:-1420}
 OVERHEAD_BASE=${OVERHEAD_BASE:-80}
 SMOKE=${SMOKE:-0}
@@ -71,6 +74,9 @@ PEERS_LIST=${PEERS_LIST-$DEF_PEERS_LIST}
 CONNS_LIST=${CONNS_LIST-$DEF_CONNS_LIST}
 LOSS_LIST=${LOSS_LIST-$DEF_LOSS_LIST}
 OBF_LIST=${OBF_LIST-$DEF_OBF_LIST}
+if [ "$RUST_PARALLEL" = "1" ]; then
+    DEF_IMPL_LIST="$DEF_IMPL_LIST rust-par"
+fi
 IMPL_LIST=${IMPL_LIST-$DEF_IMPL_LIST}
 MODE_LIST=${MODE_LIST-$DEF_MODE_LIST}
 PROTO_LIST=${PROTO_LIST-$DEF_PROTO_LIST}
@@ -269,7 +275,7 @@ require_tools() {
             kernel-umbrawg)
                 [ -f "$MODDIR/umbrawg.ko" ] || missing="$missing kernel-umbrawg=$MODDIR/umbrawg.ko"
                 ;;
-            rust)
+            rust|rust-par)
                 [ -x "$DAEMON" ] || missing="$missing rust=$DAEMON"
                 ;;
             go)
@@ -416,10 +422,15 @@ start_impl() {
             ip netns exec "$NS0" ip link add "$IF0" type amneziawg || return 1
             ip netns exec "$NS1" ip link add "$IF1" type amneziawg || return 1
             ;;
-        rust)
-            UMBRAWG_THREADS=$threads ip netns exec "$NS0" taskset -c "$cpus" "$DAEMON" --foreground "$IF0" >/tmp/bench-$IF0.log 2>&1 &
+        rust|rust-par)
+            if [ "$impl" = "rust-par" ]; then
+                rx_env="UMBRAWG_PARALLEL_RX=1 UMBRAWG_RX_SCHED=$RUST_RX_SCHED"
+            else
+                rx_env="UMBRAWG_PARALLEL_RX=0"
+            fi
+            env $rx_env UMBRAWG_THREADS=$threads UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU ${GSO_SEGMENTS:+UMBRAWG_GSO_SEGMENTS=$GSO_SEGMENTS} ip netns exec "$NS0" taskset -c "$cpus" "$DAEMON" --foreground "$IF0" >/tmp/bench-$IF0.log 2>&1 &
             DAEMON_PIDS+=($!)
-            UMBRAWG_THREADS=$threads ip netns exec "$NS1" taskset -c "$cpus" "$DAEMON" --foreground "$IF1" >/tmp/bench-$IF1.log 2>&1 &
+            env $rx_env UMBRAWG_THREADS=$threads UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU ${GSO_SEGMENTS:+UMBRAWG_GSO_SEGMENTS=$GSO_SEGMENTS} ip netns exec "$NS1" taskset -c "$cpus" "$DAEMON" --foreground "$IF1" >/tmp/bench-$IF1.log 2>&1 &
             DAEMON_PIDS+=($!)
             for _ in $(seq 1 50); do
                 [ -S "/var/run/umbrawg/$IF0.sock" ] && [ -S "/var/run/umbrawg/$IF1.sock" ] && break
@@ -574,6 +585,7 @@ echo "RESULT=$RESULT"
 echo "DIAG=$DIAG"
 echo "PATHS bench_dir=$BENCH_DIR uwg=$UWG moddir=$MODDIR rustdir=$RUSTDIR daemon=$DAEMON go_baseline=$GO_BASELINE obf=$OBF"
 echo "PLAN impls=[$IMPL_LIST] modes=[$MODE_LIST] protos=[$PROTO_LIST] conns=[$CONNS_LIST] obf=[$OBF_LIST] peers=[$PEERS_LIST] repeats=$REPEATS cpu_hot_pct=$CPU_HOT_PCT iperf_cpu=$IPERF_CPU tunnel_cpus_1=$TUNNEL_CPUS_1 tunnel_cpus_3=$TUNNEL_CPUS_3"
+echo "ENV UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU UMBRAWG_GSO_SEGMENTS=${GSO_SEGMENTS:-} RUST_PARALLEL=$RUST_PARALLEL RUST_RX_SCHED=$RUST_RX_SCHED"
 
 if [ "$PLAN_ONLY" = "1" ]; then
     echo "PLAN_ONLY: прогоны не запускаются"
