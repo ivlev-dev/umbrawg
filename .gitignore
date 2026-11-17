@@ -34,3 +34,4 @@ go/*.exe
 *.swp
 .idea/
 .vscode/
+bench/matrix/profile/*.data
