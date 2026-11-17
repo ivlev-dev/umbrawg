@@ -202,13 +202,16 @@ Full matrix (rust/rust-par, UDP, CPU, multi-peer, e2e):
 
 Receive is built around per-peer NAPI: every peer owns a `napi_struct`, an
 in-order `rx_queue`, and its own threaded `napi/<dev>-<id>` thread. Capacity
-therefore scales with peers, not with connections to one peer: four peers on
-one device reach +146…178% TCP. The device has no single shared NAPI;
-`netif_threaded_enable()` only switches every NAPI of the device to threaded
-mode.
+therefore scales with peers, not with connections to one peer; multi-peer
+numbers are in [docs/PERFORMANCE.md](docs/PERFORMANCE.md) (final4). The device
+has no single shared NAPI; `netif_threaded_enable()` only switches every NAPI
+of the device to threaded mode.
 
-The as-built design, the options (one NAPI per peer, several NAPI per peer, an
-NAPI pool, RPS, a hybrid), risks, the next-step sketch and the test plan are in
+The next step is **S2**: the existing per-peer NAPI keeps validation in
+arrival order, while a device-level pool of `K <= nCPU` shards does GRO and the
+stack work for each flow. Before any S2 code, two cheap checks are mandatory:
+a `perf` gate (`Y >= 0.5 * X`) and an RPS probe on `uwg0`. The as-built
+contract, per-flow limits, the pool lifecycle, risks and the test plan are in
 [docs/PEER-SHARDING.md](docs/PEER-SHARDING.md).
 
 ## Limitations
