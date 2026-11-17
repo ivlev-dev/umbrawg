@@ -12,7 +12,7 @@ top="$(mktemp -d)"
 trap 'rm -rf "$top"' EXIT
 
 mkdir -p "$top"/{BUILD,BUILDROOT,RPMS,SOURCES,SPECS,SRPMS}
-cp "$archive" "$top/SOURCES/"
+cp "$archive" "$top/SOURCES/tools-v${version}.tar.gz"
 sed "s/^Version:.*/Version:        $version/" \
     "$tools_dir/umbrawg-tools.spec" > "$top/SPECS/umbrawg-tools.spec"
 

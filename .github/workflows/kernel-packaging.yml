@@ -203,6 +203,10 @@ jobs:
     timeout-minutes: 60
     container:
       image: fedora:latest
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout репозитория
         uses: actions/checkout@v4
@@ -216,6 +220,7 @@ jobs:
       - name: Собрать .rpm
         env:
           RPM_VERSION: ${{ needs.meta.outputs.rpm_version }}
+          MODULE_VERSION: ${{ needs.meta.outputs.version }}
         run: |
           set -euo pipefail
           srcroot="${GITHUB_WORKSPACE}/umbrawg-linux-kernel-module"
@@ -226,7 +231,7 @@ jobs:
           rm -rf /tmp/srctree && mkdir -p "$srctree"
           tar -C "$srcroot" --exclude=./.git --exclude=./build -cf - . \
             | tar -C "$srctree" -xf -
-          tar -C /tmp/srctree -czf "$top/SOURCES/v${RPM_VERSION}.tar.gz" \
+          tar -C /tmp/srctree -czf "$top/SOURCES/kernel-v${MODULE_VERSION}.tar.gz" \
             "umbrawg-linux-kernel-module-${RPM_VERSION}"
 
           sed "s/^Version:.*/Version:        ${RPM_VERSION}/" umbrawg-dkms.spec \
@@ -283,6 +288,10 @@ jobs:
     timeout-minutes: 60
     container:
       image: debian:trixie
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - name: Checkout репозитория
         uses: actions/checkout@v4

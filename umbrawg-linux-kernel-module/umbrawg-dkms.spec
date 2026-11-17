@@ -11,7 +11,7 @@ License:        GPL-2.0-only
 Group:          System Environment/Kernel
 BuildArch:      noarch
 
-Source0:        https://github.com/ivlev-dev/umbrawg/archive/refs/tags/kernel-v%{version}.tar.gz
+Source0:        https://github.com/ivlev-dev/umbrawg/archive/refs/tags/kernel-v%{upstream_version}.tar.gz
 
 BuildRequires:  kernel-devel
 BuildRequires:  sed
