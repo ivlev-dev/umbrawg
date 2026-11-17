@@ -16,8 +16,8 @@ use umbrawg_device::{
     DEFAULT_UNDER_LOAD_PPS,
 };
 use umbrawg_transport::{
-    AddressFamily, Endpoint, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
-    MAX_BATCH_SIZE,
+    AddressFamily, Endpoint, GsoLimits, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
+    MAX_BATCH_SIZE, MAX_SEGMENTS, MAX_UDP_PAYLOAD_V4,
 };
 use umbrawg_tun::{Tun, TunConfig, TunError, TunSet, VirtioNetHdr};
 use umbrawg_uapi::{socket_dir, ServerHandle, UapiListener};
@@ -210,12 +210,19 @@ fn packet_destination(packet: &[u8]) -> Option<IpAddr> {
     }
 }
 
+const GSO_SEGMENT_LIMIT: usize = MAX_UDP_PAYLOAD_V4;
+
+fn gso_limits() -> GsoLimits {
+    GsoLimits::new(GSO_SEGMENT_LIMIT, MAX_SEGMENTS).expect("GSO limits are valid")
+}
+
 fn open_socket(port: u16, fwmark: u32) -> io::Result<Socket> {
     let mut options = OpenOptions::new(AddressFamily::Ipv4)
         .reuse_port(true)
         .nonblocking(true)
         .receive_buffer(SOCKET_BUFFER_BYTES)
-        .send_buffer(SOCKET_BUFFER_BYTES);
+        .send_buffer(SOCKET_BUFFER_BYTES)
+        .gso_limits(gso_limits());
     if port != 0 {
         options = options.port(port);
     }
@@ -926,6 +933,22 @@ mod tests {
             .ok()
             .and_then(|value| value.trim().parse::<usize>().ok())
             .unwrap_or(212_992)
+    }
+
+    #[test]
+    fn gso_limits_cover_obfuscated_segments() {
+        let limits = gso_limits();
+        assert_eq!(limits.max_segments(), MAX_SEGMENTS);
+        assert!(limits.max_gso_size() >= 1480);
+        assert!(limits.max_datagram_len(AddressFamily::Ipv4) <= MAX_UDP_PAYLOAD_V4);
+        assert!(limits.max_gso_size() >= 1420 + 28 + 16 + 16);
+    }
+
+    #[test]
+    fn open_socket_applies_gso_limits() {
+        let socket = open_socket(0, 0).expect("socket is bound");
+        assert_eq!(socket.gso_limits(), gso_limits());
+        assert!(socket.max_gso_size() >= 1480);
     }
 
     #[test]

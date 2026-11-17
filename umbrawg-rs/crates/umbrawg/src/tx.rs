@@ -332,6 +332,29 @@ mod tests {
     }
 
     #[test]
+    fn obfuscated_segments_pass_the_gso_gate() {
+        let mut out = [Outgoing::new(&[]); MAX_OUTGOING];
+        let mut pending = 0;
+        let group = GsoGroup {
+            start: 0,
+            segment_len: 1480,
+            segments: 2,
+        };
+        let limits = limits(65_507, 64, 65_507);
+        assert!(append_group(
+            &mut out,
+            &mut pending,
+            &DATA,
+            group,
+            limits,
+            true
+        ));
+        assert_eq!(pending, 1);
+        assert_eq!(out[0].len(), 2960);
+        assert_eq!(out[0].gso_size(), Some(GsoSize::new(1480).unwrap()));
+    }
+
+    #[test]
     fn max_datagram_len_splits_gso_groups() {
         let mut out = [Outgoing::new(&[]); MAX_OUTGOING];
         let mut pending = 0;
