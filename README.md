@@ -1,5 +1,11 @@
 # UmbraWG
 
+[![Kernel build](https://github.com/ivlev-dev/umbrawg/actions/workflows/kernel-build.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/kernel-build.yml)
+[![netlink CI](https://github.com/ivlev-dev/umbrawg/actions/workflows/netlink-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/netlink-ci.yml)
+[![tools CI](https://github.com/ivlev-dev/umbrawg/actions/workflows/tools-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/tools-ci.yml)
+[![rs CI](https://github.com/ivlev-dev/umbrawg/actions/workflows/rs-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/rs-ci.yml)
+[![Go](https://github.com/ivlev-dev/umbrawg/actions/workflows/go-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/go-ci.yml)
+
 Монорепозиторий UmbraWG — VPN-протокола на базе WireGuard с обфускацией трафика.
 
 ## Что внутри
