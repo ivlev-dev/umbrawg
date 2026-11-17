@@ -409,3 +409,7 @@ python3 bench/peer-scaling.py --print-defaults               # только пу
 (9 колонок): при несовпадении заголовка `bench.sh` не перезаписывает файл,
 а пишет `results-<RUN_ID>.csv`. Юнит-тесты отчёта лежат в
 `bench/tests/test_bench_report.py`.
+
+## Эталонные матрицы
+
+Эталонные прогоны для сравнений лежат в `bench/baselines/` (см. `bench/baselines/README.md`). Сравнение: `python3 bench/bench-compare.py bench/baselines/final4-20261117.csv <new.csv> --threshold 10 --md report.md`.
