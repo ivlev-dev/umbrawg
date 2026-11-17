@@ -394,6 +394,12 @@ python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнени
 «симптом → причина → что сделать → как проверить» в
 [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
 
+## Миграция с AmneziaWG
+
+Пошаговый гайд перехода с AmneziaWG: что переименовано, совместимость,
+порядок действий, подводные камни, откат и проверочный чек-лист — в
+[docs/MIGRATION.md](docs/MIGRATION.md).
+
 ## Документация для разработчика
 
 Состояние проекта, известные проблемы и план работ — в [TODO.md](TODO.md).
