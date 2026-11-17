@@ -21,8 +21,9 @@ use netlink_packet_generic::{
     GenlMessage,
 };
 use netlink_packet_umbrawg::{
-    range::u32_range_from_string, UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage,
-    UmbrawgPeer, UmbrawgPeerAttribute,
+    range::{u32_range_from_string, u32_range_to_string},
+    UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgPeerAttribute,
 };
 
 /// Serializes access to netlink interface creation/deletion across tests.
@@ -319,12 +320,10 @@ async fn test_set_and_get_umbra_parameters() {
     });
     assert_eq!(s1, Some(92), "S1 mismatch");
 
-    let h1 = attrs.iter().find_map(|a| {
-        if let UmbrawgAttribute::H1(v) = a {
-            Some(v.clone())
-        } else {
-            None
-        }
+    let h1 = attrs.iter().find_map(|a| match a {
+        UmbrawgAttribute::H1(v) => Some(v.clone()),
+        UmbrawgAttribute::H1Range(v) => Some(u32_range_to_string(*v)),
+        _ => None,
     });
     assert_eq!(h1, Some("61220074-118999195".into()), "H1 mismatch");
 
