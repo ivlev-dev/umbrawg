@@ -47,6 +47,7 @@ fn print_help() {
     println!("  UMBRAWG_PARALLEL_RX   1 — параллельный приём (RX-поток + крипто-воркеры)");
     println!("  UMBRAWG_RX_WORKERS    число крипто-воркеров параллельного приёма");
     println!("  UMBRAWG_RX_SCHED      выбор воркера: peer (по умолчанию) или queue");
+    println!("  UMBRAWG_RX_QUEUE      глубина очереди воркера: 64..1024, степень двойки (256)");
     println!("  UMBRAWG_RX_STATS      1 — выводить счётчики приёма раз в 5 секунд");
     println!("  UMBRAWG_LOG_LEVEL     уровень логирования");
     println!("  UMBRAWG_RUNTIME_DIR   каталог сокетов управления");

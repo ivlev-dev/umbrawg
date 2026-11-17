@@ -41,10 +41,16 @@ use crate::{
 /// Максимальное число сегментов в одном задании.
 pub(crate) const MAX_SEGMENTS: usize = 64;
 
-/// Ёмкость очереди заданий и пула буферов на одного воркера (16 МиБ).
-const QUEUE_CAPACITY: usize = 256;
+/// Глубина очереди заданий и пула буферов по умолчанию: 256 слотов по 64 КиБ.
+const DEFAULT_QUEUE_DEPTH: usize = 256;
 
-/// Верхняя граница числа крипто-воркеров: 8 потоков по 16 МиБ буферов.
+/// Минимальная глубина очереди воркера.
+const MIN_QUEUE_DEPTH: usize = 64;
+
+/// Максимальная глубина очереди воркера.
+const MAX_QUEUE_DEPTH: usize = 1024;
+
+/// Верхняя граница числа крипто-воркеров.
 const MAX_WORKERS: usize = 8;
 
 /// Период вывода счётчиков при `UMBRAWG_RX_STATS=1`.
@@ -59,21 +65,27 @@ pub(crate) struct ParallelConfig {
     pub workers: usize,
     /// Правило выбора воркера для дейтаграммы.
     pub sched: RxSchedule,
+    /// Глубина очереди заданий и пула буферов каждого воркера.
+    pub queue_depth: usize,
 }
 
 impl ParallelConfig {
     /// Читает конфигурацию из окружения. `None` означает обычный режим.
-    pub fn from_env(available: usize) -> Option<Self> {
+    ///
+    /// Некорректная глубина очереди (`UMBRAWG_RX_QUEUE`) возвращается ошибкой.
+    pub fn from_env(available: usize) -> Result<Option<Self>, String> {
         let enabled = parallel_rx_enabled(std::env::var("UMBRAWG_PARALLEL_RX").ok().as_deref());
         if !enabled {
-            return None;
+            return Ok(None);
         }
         let requested = std::env::var("UMBRAWG_RX_WORKERS").ok();
         let sched = RxSchedule::from_env(std::env::var("UMBRAWG_RX_SCHED").ok().as_deref());
-        Some(Self {
+        let queue_depth = queue_depth_from_env(std::env::var("UMBRAWG_RX_QUEUE").ok().as_deref())?;
+        Ok(Some(Self {
             workers: crypto_worker_count(requested.as_deref(), available),
             sched,
-        })
+            queue_depth,
+        }))
     }
 }
 
@@ -128,6 +140,44 @@ pub(crate) fn crypto_worker_count(requested: Option<&str>, available: usize) -> 
             .map_or(default, |count| count.min(available)),
         None => default,
     }
+}
+
+/// Проверяет, что глубина очереди — степень двойки из допустимого диапазона.
+pub(crate) fn valid_queue_depth(depth: usize) -> bool {
+    (MIN_QUEUE_DEPTH..=MAX_QUEUE_DEPTH).contains(&depth) && depth.is_power_of_two()
+}
+
+/// Разбирает `UMBRAWG_RX_QUEUE` — глубину очереди воркера.
+///
+/// Пустое значение означает значение по умолчанию. Число обязано быть степенью
+/// двойки в диапазоне `MIN_QUEUE_DEPTH..=MAX_QUEUE_DEPTH`.
+pub(crate) fn queue_depth_from_env(value: Option<&str>) -> Result<usize, String> {
+    let Some(text) = value.map(str::trim) else {
+        return Ok(DEFAULT_QUEUE_DEPTH);
+    };
+    if text.is_empty() {
+        return Ok(DEFAULT_QUEUE_DEPTH);
+    }
+    let depth = text
+        .parse::<usize>()
+        .map_err(|_| format!("UMBRAWG_RX_QUEUE: ожидается целое число, получено {text:?}"))?;
+    if !(MIN_QUEUE_DEPTH..=MAX_QUEUE_DEPTH).contains(&depth) {
+        return Err(format!(
+            "UMBRAWG_RX_QUEUE: глубина {depth} вне диапазона {MIN_QUEUE_DEPTH}..={MAX_QUEUE_DEPTH}"
+        ));
+    }
+    if !depth.is_power_of_two() {
+        return Err(format!(
+            "UMBRAWG_RX_QUEUE: глубина {depth} должна быть степенью двойки: \
+             64, 128, 256, 512, 1024"
+        ));
+    }
+    Ok(depth)
+}
+
+/// Буферы, которые занимает пул воркера при глубине `depth`.
+pub(crate) const fn queue_bytes(depth: usize) -> usize {
+    depth * crate::MAX_PACKET
 }
 
 /// Счётчики потока приёма. Все поля — обычные атомики без блокировок.
@@ -264,24 +314,39 @@ pub(crate) struct WorkerChannel {
     buffers: BufferSlots,
     event: EventFd,
     sleeping: AtomicBool,
+    depth: usize,
 }
 
 impl WorkerChannel {
-    fn new(slot_len: usize) -> io::Result<Self> {
-        let free = SpscRing::new(QUEUE_CAPACITY);
-        for slot in 0..QUEUE_CAPACITY as u32 {
+    fn new(slot_len: usize, depth: usize) -> io::Result<Self> {
+        if !valid_queue_depth(depth) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "rx queue depth {depth} must be a power of two in \
+                     {MIN_QUEUE_DEPTH}..={MAX_QUEUE_DEPTH}"
+                ),
+            ));
+        }
+        let free = SpscRing::new(depth);
+        for slot in 0..depth as u32 {
             if free.push(slot).is_err() {
                 return Err(io::Error::other("cannot seed buffer pool"));
             }
         }
         Ok(Self {
-            jobs: SpscRing::new(QUEUE_CAPACITY),
+            jobs: SpscRing::new(depth),
             free,
-            reclaim: SpscRing::new(QUEUE_CAPACITY),
-            buffers: BufferSlots::new(QUEUE_CAPACITY, slot_len),
+            reclaim: SpscRing::new(depth),
+            buffers: BufferSlots::new(depth, slot_len),
             event: EventFd::new()?,
             sleeping: AtomicBool::new(false),
+            depth,
         })
+    }
+
+    fn depth(&self) -> usize {
+        self.depth
     }
 
     fn allocate(&self) -> Option<u32> {
@@ -397,10 +462,10 @@ pub(crate) struct SharedRx {
 }
 
 impl SharedRx {
-    pub fn new(workers: usize, sched: RxSchedule) -> io::Result<Self> {
+    pub fn new(workers: usize, sched: RxSchedule, queue_depth: usize) -> io::Result<Self> {
         let mut channels = Vec::with_capacity(workers);
         for _ in 0..workers {
-            channels.push(WorkerChannel::new(MAX_PACKET)?);
+            channels.push(WorkerChannel::new(MAX_PACKET, queue_depth)?);
         }
         Ok(Self {
             socket: RwLock::new(None),
@@ -725,7 +790,7 @@ fn publish_job(
     };
     let channel = &shared.channels[target];
     debug_assert!(
-        channel.pending() < QUEUE_CAPACITY,
+        channel.pending() < channel.depth(),
         "a free slot was allocated while the job queue is full"
     );
     if !channel.write(slot, data) {
@@ -1109,6 +1174,111 @@ mod tests {
         assert_eq!(crypto_worker_count(Some("abc"), 6), 3);
     }
 
+    #[test]
+    fn queue_depth_defaults_to_256() {
+        assert_eq!(DEFAULT_QUEUE_DEPTH, 256);
+        assert_eq!(queue_depth_from_env(None), Ok(DEFAULT_QUEUE_DEPTH));
+        assert_eq!(queue_depth_from_env(Some("")), Ok(DEFAULT_QUEUE_DEPTH));
+        assert_eq!(queue_depth_from_env(Some("   ")), Ok(DEFAULT_QUEUE_DEPTH));
+    }
+
+    #[test]
+    fn queue_depth_accepts_valid_powers_of_two() {
+        for value in ["64", "128", "256", "512", "1024", " 256 ", "\t512\n"] {
+            let depth = queue_depth_from_env(Some(value)).expect("valid depth");
+            assert_eq!(depth, value.trim().parse::<usize>().unwrap());
+            assert!(valid_queue_depth(depth));
+        }
+    }
+
+    #[test]
+    fn queue_depth_rejects_invalid_values() {
+        for value in [
+            "0",
+            "1",
+            "32",
+            "63",
+            "65",
+            "100",
+            "255",
+            "2048",
+            "4096",
+            "-64",
+            "64 KiB",
+            "abc",
+            "99999999999999999999999",
+        ] {
+            let error = queue_depth_from_env(Some(value)).expect_err("invalid depth");
+            assert!(error.contains("UMBRAWG_RX_QUEUE"), "{value}: {error}");
+        }
+    }
+
+    #[test]
+    fn queue_depth_checks_range_boundaries() {
+        assert_eq!(queue_depth_from_env(Some("64")), Ok(MIN_QUEUE_DEPTH));
+        assert_eq!(queue_depth_from_env(Some("1024")), Ok(MAX_QUEUE_DEPTH));
+        assert!(queue_depth_from_env(Some("32")).is_err());
+        assert!(queue_depth_from_env(Some("2048")).is_err());
+        assert!(valid_queue_depth(MIN_QUEUE_DEPTH));
+        assert!(valid_queue_depth(MAX_QUEUE_DEPTH));
+        assert!(!valid_queue_depth(MIN_QUEUE_DEPTH - 1));
+        assert!(!valid_queue_depth(MAX_QUEUE_DEPTH * 2));
+        assert!(!valid_queue_depth(100));
+    }
+
+    fn mib(bytes: usize) -> usize {
+        bytes.div_ceil(1024 * 1024)
+    }
+
+    #[test]
+    fn queue_memory_scales_with_depth() {
+        assert_eq!(queue_bytes(MIN_QUEUE_DEPTH), 64 * MAX_PACKET);
+        assert_eq!(mib(queue_bytes(64)), 4);
+        assert_eq!(mib(queue_bytes(128)), 8);
+        assert_eq!(mib(queue_bytes(256)), 16);
+        assert_eq!(mib(queue_bytes(512)), 32);
+        assert_eq!(mib(queue_bytes(1024)), 64);
+        assert_eq!(mib(queue_bytes(DEFAULT_QUEUE_DEPTH)), 16);
+        assert_eq!(mib(queue_bytes(DEFAULT_QUEUE_DEPTH) * 4), 64);
+    }
+
+    #[test]
+    fn parallel_config_reads_queue_depth_from_env() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let names = [
+            "UMBRAWG_PARALLEL_RX",
+            "UMBRAWG_RX_WORKERS",
+            "UMBRAWG_RX_SCHED",
+            "UMBRAWG_RX_QUEUE",
+        ];
+        let saved: Vec<(&str, Option<String>)> = names
+            .iter()
+            .map(|name| (*name, std::env::var(name).ok()))
+            .collect();
+        std::env::set_var("UMBRAWG_PARALLEL_RX", "1");
+        std::env::set_var("UMBRAWG_RX_WORKERS", "2");
+        std::env::set_var("UMBRAWG_RX_SCHED", "peer");
+        std::env::set_var("UMBRAWG_RX_QUEUE", "64");
+        let config = ParallelConfig::from_env(8)
+            .expect("valid env")
+            .expect("parallel rx is enabled");
+        assert_eq!(config.workers, 2);
+        assert_eq!(config.sched, RxSchedule::Peer);
+        assert_eq!(config.queue_depth, 64);
+        std::env::set_var("UMBRAWG_RX_QUEUE", "100");
+        let error = ParallelConfig::from_env(8).expect_err("invalid depth");
+        assert!(error.contains("UMBRAWG_RX_QUEUE"));
+        for (name, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
+
     fn job(slot: u32) -> Job {
         Job {
             slot,
@@ -1121,7 +1291,7 @@ mod tests {
 
     #[test]
     fn channel_transfers_jobs_and_buffers() {
-        let channel = WorkerChannel::new(128).unwrap();
+        let channel = WorkerChannel::new(128, MIN_QUEUE_DEPTH).unwrap();
         let slot = channel.allocate().unwrap();
         assert!(channel.write(slot, &[1, 2, 3]));
         assert!(channel.publish(job(slot)).0);
@@ -1133,7 +1303,7 @@ mod tests {
 
     #[test]
     fn channel_reports_overflow_and_keeps_buffers() {
-        let channel = WorkerChannel::new(128).unwrap();
+        let channel = WorkerChannel::new(128, MIN_QUEUE_DEPTH).unwrap();
         let mut published = 0;
         while let Some(slot) = channel.allocate() {
             if !channel.publish(job(slot)).0 {
@@ -1141,11 +1311,106 @@ mod tests {
             }
             published += 1;
         }
-        assert_eq!(published, QUEUE_CAPACITY);
+        assert_eq!(published, MIN_QUEUE_DEPTH);
         assert!(channel.allocate().is_none());
         let received = channel.pop().unwrap();
         channel.release(received.slot);
         assert!(channel.allocate().is_some());
+    }
+
+    #[test]
+    fn shared_rx_uses_configured_depth() {
+        for depth in [MIN_QUEUE_DEPTH, 128, 512] {
+            let shared = SharedRx::new(2, RxSchedule::Peer, depth).unwrap();
+            for channel in &shared.channels {
+                assert_eq!(channel.depth(), depth);
+                assert_eq!(channel.available(), depth);
+            }
+            let key = peer_key(5);
+            let worker = peer_worker(&key, shared.channels.len());
+            let mut cursor = 0usize;
+            for marker in 0..depth as u64 {
+                publish(&shared, &mut cursor, Some(key), marker);
+            }
+            assert_eq!(shared.channels[worker].pending(), depth);
+            assert_eq!(shared.channels[worker].available(), 0);
+            assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 0);
+            publish(&shared, &mut cursor, Some(key), 0);
+            assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 1);
+            assert_eq!(shared.channels[worker].pending(), depth);
+            let drained = drain(&shared);
+            assert_eq!(drained[worker].len(), depth);
+            assert_eq!(shared.channels[worker].available(), depth);
+            assert_eq!(shared.channels[worker].pending(), 0);
+            assert_eq!(shared.channels[worker].drain_reclaimed(), (0, 0));
+        }
+    }
+
+    #[test]
+    fn pool_and_ring_follow_depth() {
+        for depth in [MIN_QUEUE_DEPTH, 128, 256, MAX_QUEUE_DEPTH] {
+            let channel = WorkerChannel::new(16, depth).unwrap();
+            assert_eq!(channel.depth(), depth);
+            assert_eq!(channel.available(), depth);
+            let mut slots = Vec::new();
+            while let Some(slot) = channel.allocate() {
+                assert!(channel.write(slot, &[7u8; 16]));
+                assert!(channel.publish(job(slot)).0);
+                slots.push(slot);
+            }
+            assert_eq!(slots.len(), depth);
+            assert_eq!(channel.pending(), depth);
+            assert_eq!(channel.available(), 0);
+            for _ in 0..depth {
+                let received = channel.pop().expect("job is queued");
+                assert!(channel.release(received.slot));
+            }
+            assert_eq!(channel.pending(), 0);
+            assert_eq!(channel.available(), depth);
+            assert_eq!(channel.drain_reclaimed(), (0, 0));
+        }
+    }
+
+    #[test]
+    fn invalid_depth_is_an_error_not_a_panic() {
+        for depth in [0, 1, 32, 63, 65, 100, 2048, 4096] {
+            assert!(SharedRx::new(1, RxSchedule::Peer, depth).is_err());
+            assert!(WorkerChannel::new(64, depth).is_err());
+        }
+    }
+
+    #[test]
+    fn smallest_depth_serves_jobs() {
+        let shared = SharedRx::new(1, RxSchedule::Peer, MIN_QUEUE_DEPTH).unwrap();
+        let mut cursor = 0usize;
+        for marker in 0..MIN_QUEUE_DEPTH as u64 {
+            publish(&shared, &mut cursor, None, marker);
+        }
+        assert_eq!(shared.channels[0].pending(), MIN_QUEUE_DEPTH);
+        let drained = drain(&shared);
+        assert_eq!(drained[0].len(), MIN_QUEUE_DEPTH);
+        assert_eq!(shared.channels[0].available(), MIN_QUEUE_DEPTH);
+    }
+
+    #[test]
+    fn queue_mode_reports_drops_when_all_workers_are_full() {
+        let depth = MIN_QUEUE_DEPTH;
+        let shared = SharedRx::new(2, RxSchedule::Queue, depth).unwrap();
+        let mut cursor = 0usize;
+        for marker in 0..depth * 2 {
+            publish(&shared, &mut cursor, None, marker as u64);
+        }
+        assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 0);
+        assert!(shared
+            .channels
+            .iter()
+            .all(|channel| channel.pending() == depth));
+        publish(&shared, &mut cursor, None, 0);
+        assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            shared.stats.enqueued.load(Ordering::Relaxed),
+            (depth * 2) as u64
+        );
     }
 
     #[test]
@@ -1258,7 +1523,7 @@ mod tests {
 
     #[test]
     fn peer_mode_keeps_one_worker_per_peer_in_order() {
-        let shared = SharedRx::new(4, RxSchedule::Peer).unwrap();
+        let shared = SharedRx::new(4, RxSchedule::Peer, DEFAULT_QUEUE_DEPTH).unwrap();
         let mut cursor = 0usize;
         let key = peer_key(11);
         let worker = peer_worker(&key, shared.channels.len());
@@ -1280,7 +1545,7 @@ mod tests {
     #[test]
     fn peer_mode_spreads_peers_over_workers() {
         let workers = 4;
-        let shared = SharedRx::new(workers, RxSchedule::Peer).unwrap();
+        let shared = SharedRx::new(workers, RxSchedule::Peer, DEFAULT_QUEUE_DEPTH).unwrap();
         let keys = keys_by_worker(workers);
         let mut cursor = 0usize;
         for round in 0..6u64 {
@@ -1297,7 +1562,7 @@ mod tests {
 
     #[test]
     fn queue_mode_distributes_jobs_across_workers() {
-        let shared = SharedRx::new(2, RxSchedule::Queue).unwrap();
+        let shared = SharedRx::new(2, RxSchedule::Queue, DEFAULT_QUEUE_DEPTH).unwrap();
         let mut cursor = 0usize;
         let key = peer_key(3);
         for marker in 0..10u64 {
@@ -1311,21 +1576,22 @@ mod tests {
     #[test]
     fn peer_mode_drops_on_backpressure_without_moving() {
         let workers = 3;
-        let shared = SharedRx::new(workers, RxSchedule::Peer).unwrap();
+        let depth = MIN_QUEUE_DEPTH;
+        let shared = SharedRx::new(workers, RxSchedule::Peer, depth).unwrap();
         let keys = keys_by_worker(workers);
         let mut cursor = 0usize;
         let busy = 0usize;
         let busy_key = keys[busy];
         let other_key = keys[1];
-        for marker in 0..QUEUE_CAPACITY as u64 {
+        for marker in 0..depth as u64 {
             publish(&shared, &mut cursor, Some(busy_key), marker);
         }
-        assert_eq!(shared.channels[busy].pending(), QUEUE_CAPACITY);
+        assert_eq!(shared.channels[busy].pending(), depth);
         let before = shared.stats.enqueued.load(Ordering::Relaxed);
         publish(&shared, &mut cursor, Some(busy_key), 9_999);
         assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 1);
         assert_eq!(shared.stats.enqueued.load(Ordering::Relaxed), before);
-        assert_eq!(shared.channels[busy].pending(), QUEUE_CAPACITY);
+        assert_eq!(shared.channels[busy].pending(), depth);
         assert_eq!(shared.channels[1].pending(), 0);
         publish(&shared, &mut cursor, Some(other_key), 1_000);
         assert_eq!(shared.channels[1].pending(), 1);
@@ -1333,7 +1599,7 @@ mod tests {
         let drained = shared.channels[busy].pop().expect("job is queued");
         shared.channels[busy].release(drained.slot);
         publish(&shared, &mut cursor, Some(busy_key), 10_000);
-        assert_eq!(shared.channels[busy].pending(), QUEUE_CAPACITY);
+        assert_eq!(shared.channels[busy].pending(), depth);
         assert_eq!(shared.stats.drops_queue.load(Ordering::Relaxed), 1);
         let markers = drain(&shared)[busy].clone();
         assert_eq!(markers.first(), Some(&1));
@@ -1342,7 +1608,8 @@ mod tests {
 
     #[test]
     fn shared_channels_survive_concurrent_shutdown() {
-        let shared = Arc::new(SharedRx::new(2, RxSchedule::Peer).unwrap());
+        let depth = MIN_QUEUE_DEPTH;
+        let shared = Arc::new(SharedRx::new(2, RxSchedule::Peer, depth).unwrap());
         let producers: Vec<_> = (0..2)
             .map(|worker| {
                 let shared = Arc::clone(&shared);
@@ -1354,7 +1621,7 @@ mod tests {
                             std::hint::spin_loop();
                             continue;
                         };
-                        assert!(channel.pending() < QUEUE_CAPACITY);
+                        assert!(channel.pending() < channel.depth());
                         channel.write(slot, &round.to_le_bytes());
                         assert!(channel.publish(job(slot)).0);
                         round += 1;
@@ -1392,7 +1659,7 @@ mod tests {
     fn waiting_worker_wakes_up_and_exits() {
         use std::sync::atomic::AtomicBool;
 
-        let channel = Arc::new(WorkerChannel::new(64).unwrap());
+        let channel = Arc::new(WorkerChannel::new(64, MIN_QUEUE_DEPTH).unwrap());
         let idle = EventFd::new().unwrap();
         let stop = Arc::new(AtomicBool::new(false));
         let consumer = {
@@ -1435,7 +1702,7 @@ mod tests {
 
     #[test]
     fn oversized_datagram_is_rejected() {
-        let channel = WorkerChannel::new(16).unwrap();
+        let channel = WorkerChannel::new(16, MIN_QUEUE_DEPTH).unwrap();
         let slot = channel.allocate().unwrap();
         assert!(!channel.write(slot, &[0u8; 17]));
         assert!(channel.write(slot, &[0u8; 16]));
@@ -1444,16 +1711,17 @@ mod tests {
 
     #[test]
     fn rejected_slot_returns_through_worker() {
-        let channel = WorkerChannel::new(128).unwrap();
+        let depth = MIN_QUEUE_DEPTH;
+        let channel = WorkerChannel::new(128, depth).unwrap();
         let mut slots = Vec::new();
         while let Some(slot) = channel.allocate() {
             slots.push(slot);
         }
-        assert_eq!(slots.len(), QUEUE_CAPACITY);
-        for slot in &slots[..QUEUE_CAPACITY - 1] {
+        assert_eq!(slots.len(), depth);
+        for slot in &slots[..depth - 1] {
             assert!(channel.jobs.push(job(*slot)).is_ok());
         }
-        let held = slots[QUEUE_CAPACITY - 1];
+        let held = slots[depth - 1];
         assert!(channel.reject(held));
         assert_eq!(channel.available(), 0);
         assert_eq!(channel.drain_reclaimed(), (1, 0));
@@ -1463,29 +1731,29 @@ mod tests {
         while let Some(received) = channel.pop() {
             assert!(channel.release(received.slot));
         }
-        assert_eq!(channel.available(), QUEUE_CAPACITY);
+        assert_eq!(channel.available(), depth);
         let mut seen = Vec::new();
         while let Some(slot) = channel.allocate() {
             seen.push(slot);
         }
         seen.sort_unstable();
-        assert_eq!(seen, (0..QUEUE_CAPACITY as u32).collect::<Vec<_>>());
+        assert_eq!(seen, (0..depth as u32).collect::<Vec<_>>());
     }
 
     #[test]
     fn pool_survives_rejection_cycles() {
-        let channel = WorkerChannel::new(64).unwrap();
+        let channel = WorkerChannel::new(64, MIN_QUEUE_DEPTH).unwrap();
         for _ in 0..1_000 {
             let slot = channel.allocate().unwrap();
             assert!(channel.reject(slot));
             assert_eq!(channel.drain_reclaimed(), (1, 0));
-            assert_eq!(channel.available(), QUEUE_CAPACITY);
+            assert_eq!(channel.available(), MIN_QUEUE_DEPTH);
         }
     }
 
     #[test]
     fn pool_keeps_all_slots_after_publish_cycles() {
-        let channel = WorkerChannel::new(64).unwrap();
+        let channel = WorkerChannel::new(64, MIN_QUEUE_DEPTH).unwrap();
         for round in 0..10_000u32 {
             let slot = channel.allocate().expect("slot is free");
             assert!(channel.write(slot, &round.to_le_bytes()));
@@ -1495,7 +1763,7 @@ mod tests {
             assert_eq!(received.slot, slot);
             assert!(channel.release(received.slot));
         }
-        assert_eq!(channel.available(), QUEUE_CAPACITY);
+        assert_eq!(channel.available(), MIN_QUEUE_DEPTH);
     }
 
     #[test]
@@ -1564,7 +1832,7 @@ mod tests {
 
     #[test]
     fn failing_thread_requests_shutdown() {
-        let shared = SharedRx::new(1, RxSchedule::Peer).unwrap();
+        let shared = SharedRx::new(1, RxSchedule::Peer, MIN_QUEUE_DEPTH).unwrap();
         assert!(shared.failure().is_none());
         shared.register_failure("rx stop".to_owned());
         assert_eq!(shared.failure().as_deref(), Some("rx stop"));
