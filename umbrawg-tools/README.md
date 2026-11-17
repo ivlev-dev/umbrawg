@@ -387,6 +387,13 @@ python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнени
 (`REQUIRE_FAILED`, код 5), MTU-guard (`TUN_MTU` против `UNDERLAY_MTU`) и
 занятость машины (`IDLE_GUARD`, код 3).
 
+## Решение проблем
+
+Типовые сбои (нет handshake, MTU и фрагментация, сборка модуля и DKMS,
+упаковка, `uwg`/`uwg-quick`, параллельный RX, отладка) разобраны по схеме
+«симптом → причина → что сделать → как проверить» в
+[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
 ## Документация для разработчика
 
 Состояние проекта, известные проблемы и план работ — в [TODO.md](TODO.md).

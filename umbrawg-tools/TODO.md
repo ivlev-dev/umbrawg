@@ -38,6 +38,10 @@
 - Статические проверки упаковки: `scripts/check-packaging.sh` (версии,
   man-страницы, systemd-юниты, completions, YAML, артефакты в правилах
   сборки), job `packaging` в CI.
+- Единый troubleshooting по реальным сбоям (handshake, MTU и фрагментация,
+  сборка модуля и DKMS, упаковка, `uwg`/`uwg-quick`, параллельный RX,
+  отладка) — [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md), ссылка из
+  README.
 
 ## Сборка и тесты
 
