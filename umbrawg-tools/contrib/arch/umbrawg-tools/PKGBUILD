@@ -37,6 +37,7 @@ prepare() {
 
 build() {
   cd "${srcdir}/${pkgname}-${pkgver}"
+  export RUSTFLAGS="${RUSTFLAGS:-} --remap-path-prefix=${srcdir}/=/build/"
   cargo build --release --frozen --package uwg --package uwg-quick
 }
 
