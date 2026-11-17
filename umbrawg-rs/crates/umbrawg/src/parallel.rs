@@ -643,7 +643,11 @@ impl PacketIo for ControlIo<'_> {
 }
 
 /// Поток приёма: `recvmmsg`, классификация, раскладка по воркерам.
-pub(crate) fn rx_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Result<()> {
+pub(crate) fn rx_loop(
+    device: Arc<Device>,
+    shared: Arc<SharedRx>,
+    socket_buffer: usize,
+) -> io::Result<()> {
     let mut rng = BufferedRng::new(OsRng);
     let mut scratch = vec![0u8; MAX_PACKET + 512];
     let mut recv_queue =
@@ -666,7 +670,7 @@ pub(crate) fn rx_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Result<
             Some(current) => want_port != 0 && current.local_addr().port() != want_port,
         };
         if rebind {
-            match open_socket(want_port, device.fwmark()) {
+            match open_socket(want_port, device.fwmark(), socket_buffer) {
                 Ok(new_socket) => {
                     log::info!("parallel rx listening on {}", new_socket.local_addr());
                     let new_socket = Arc::new(new_socket);

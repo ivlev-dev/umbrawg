@@ -36,6 +36,9 @@ const TUN_BATCH: usize = 128;
 const TUN_PACKET_MARGIN: usize = 256;
 const IDLE_TIMEOUT_MS: i32 = 10;
 const SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const SOCKET_BUFFER_MIN_BYTES: usize = 212 * 1024;
+const SOCKET_BUFFER_MAX_BYTES: usize = 64 * 1024 * 1024;
+const SOCKET_BUFFER_TOLERANCE_BYTES: usize = 4096;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -216,12 +219,83 @@ fn gso_limits() -> GsoLimits {
     GsoLimits::new(GSO_SEGMENT_LIMIT, MAX_SEGMENTS).expect("GSO limits are valid")
 }
 
-fn open_socket(port: u16, fwmark: u32) -> io::Result<Socket> {
+fn socket_buffer_bytes(value: Option<&str>) -> Result<usize, String> {
+    let Some(raw) = value else {
+        return Ok(SOCKET_BUFFER_BYTES);
+    };
+    let text = raw.trim();
+    let size = text.parse::<usize>().map_err(|_| {
+        format!("UMBRAWG_SOCKET_BUFFER: ожидается размер в байтах, получено {text:?}")
+    })?;
+    if !(SOCKET_BUFFER_MIN_BYTES..=SOCKET_BUFFER_MAX_BYTES).contains(&size) {
+        return Err(format!(
+            "UMBRAWG_SOCKET_BUFFER: размер {size} вне диапазона \
+             {SOCKET_BUFFER_MIN_BYTES}..={SOCKET_BUFFER_MAX_BYTES} байт"
+        ));
+    }
+    Ok(size)
+}
+
+fn effective_socket_buffer(actual: usize) -> usize {
+    actual / 2
+}
+
+fn socket_buffer_shortfall(requested: usize, actual: usize) -> Option<usize> {
+    let effective = effective_socket_buffer(actual);
+    (effective.saturating_add(SOCKET_BUFFER_TOLERANCE_BYTES) < requested).then_some(effective)
+}
+
+fn read_socket_buffer(fd: libc::c_int, option: libc::c_int) -> io::Result<usize> {
+    let mut value: libc::c_int = 0;
+    let mut length = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
+    let result = unsafe {
+        libc::getsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            option,
+            (&mut value as *mut libc::c_int).cast(),
+            &mut length,
+        )
+    };
+    if result < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    usize::try_from(value).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("sockopt {option} returned negative value {value}"),
+        )
+    })
+}
+
+fn warn_if_buffer_clamped(
+    fd: libc::c_int,
+    option: libc::c_int,
+    name: &str,
+    sysctl: &str,
+    requested: usize,
+) {
+    match read_socket_buffer(fd, option) {
+        Ok(actual) => match socket_buffer_shortfall(requested, actual) {
+            Some(effective) => log::warn!(
+                "{name} was clamped by the kernel: effective {effective} bytes, \
+                 requested {requested} bytes; raise {sysctl} or lower UMBRAWG_SOCKET_BUFFER"
+            ),
+            None => log::debug!(
+                "{name}: requested {requested} bytes, effective {} bytes",
+                effective_socket_buffer(actual)
+            ),
+        },
+        Err(error) => log::debug!("cannot read {name}: {error}"),
+    }
+}
+
+fn open_socket(port: u16, fwmark: u32, buffer: usize) -> io::Result<Socket> {
     let mut options = OpenOptions::new(AddressFamily::Ipv4)
         .reuse_port(true)
         .nonblocking(true)
-        .receive_buffer(SOCKET_BUFFER_BYTES)
-        .send_buffer(SOCKET_BUFFER_BYTES)
+        .receive_buffer(buffer)
+        .send_buffer(buffer)
         .gso_limits(gso_limits());
     if port != 0 {
         options = options.port(port);
@@ -229,7 +303,22 @@ fn open_socket(port: u16, fwmark: u32) -> io::Result<Socket> {
     if fwmark != 0 {
         options = options.mark(fwmark);
     }
-    Socket::open(options).map_err(|error| io::Error::other(error.to_string()))
+    let socket = Socket::open(options).map_err(|error| io::Error::other(error.to_string()))?;
+    warn_if_buffer_clamped(
+        socket.fd(),
+        libc::SO_RCVBUF,
+        "SO_RCVBUF",
+        "net.core.rmem_max",
+        buffer,
+    );
+    warn_if_buffer_clamped(
+        socket.fd(),
+        libc::SO_SNDBUF,
+        "SO_SNDBUF",
+        "net.core.wmem_max",
+        buffer,
+    );
+    Ok(socket)
 }
 
 fn is_tun_would_block(error: &TunError) -> bool {
@@ -425,7 +514,7 @@ fn pump_tun_tx<R: rand_core::RngCore>(
     busy
 }
 
-fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
+fn worker_loop(device: Arc<Device>, mut tun: Tun, socket_buffer: usize) -> io::Result<()> {
     let mut rng = BufferedRng::new(rand_core::OsRng);
     let mut scratch = vec![0u8; MAX_PACKET + 512];
     let mut tx_buffer = vec![0u8; MAX_PACKET + 512];
@@ -459,7 +548,7 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun) -> io::Result<()> {
             Some(current) => want_port != 0 && current.local_addr().port() != want_port,
         };
         if rebind {
-            match open_socket(want_port, device.fwmark()) {
+            match open_socket(want_port, device.fwmark(), socket_buffer) {
                 Ok(new_socket) => {
                     log::info!("listening on {}", new_socket.local_addr());
                     socket = Some(new_socket);
@@ -634,6 +723,9 @@ fn daemonize() -> io::Result<()> {
 
 /// Запускает демон.
 pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let socket_buffer = socket_buffer_bytes(env::var("UMBRAWG_SOCKET_BUFFER").ok().as_deref())
+        .map_err(io::Error::other)?;
+
     if let Ok(value) = env::var("UMBRAWG_RUNTIME_DIR") {
         env::set_var("UWG_RUNTIME_DIR", value);
     }
@@ -662,7 +754,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
             parallel.queue_depth,
             parallel::queue_bytes(parallel.queue_depth).div_ceil(1024 * 1024)
         );
-        return run_parallel(device, ifname, parallel);
+        return run_parallel(device, ifname, parallel, socket_buffer);
     }
 
     let requested = env::var("UMBRAWG_THREADS").ok();
@@ -692,7 +784,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         let handle = thread::Builder::new()
             .name("umbrawg-worker".to_owned())
             .spawn(move || {
-                if let Err(error) = worker_loop(device, tun) {
+                if let Err(error) = worker_loop(device, tun, socket_buffer) {
                     log::error!("worker stopped: {error}");
                 }
             })?;
@@ -720,6 +812,7 @@ fn run_parallel(
     device: Arc<Device>,
     ifname: &str,
     parallel: parallel::ParallelConfig,
+    socket_buffer: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workers = parallel.workers;
     let config = TunConfig::new(ifname)
@@ -751,7 +844,7 @@ fn run_parallel(
     let rx_handle = thread::Builder::new()
         .name("umbrawg-rx".to_owned())
         .spawn(move || {
-            if let Err(error) = parallel::rx_loop(rx_device, rx_shared) {
+            if let Err(error) = parallel::rx_loop(rx_device, rx_shared, socket_buffer) {
                 rx_failure.register_failure(format!("rx thread stopped: {error}"));
             }
         })?;
@@ -913,26 +1006,63 @@ mod tests {
     }
 
     fn socket_buffer(fd: libc::c_int, name: libc::c_int) -> usize {
-        let mut value: libc::c_int = 0;
-        let mut len = std::mem::size_of::<libc::c_int>() as libc::socklen_t;
-        let rc = unsafe {
-            libc::getsockopt(
-                fd,
-                libc::SOL_SOCKET,
-                name,
-                (&mut value as *mut libc::c_int).cast(),
-                &mut len,
-            )
-        };
-        assert_eq!(rc, 0);
-        usize::try_from(value).expect("positive buffer size")
+        read_socket_buffer(fd, name).expect("socket buffer is readable")
     }
 
-    fn kernel_limit(name: &str) -> usize {
-        std::fs::read_to_string(format!("/proc/sys/net/core/{name}"))
-            .ok()
-            .and_then(|value| value.trim().parse::<usize>().ok())
-            .unwrap_or(212_992)
+    #[test]
+    fn socket_buffer_defaults_to_4_mib() {
+        assert_eq!(socket_buffer_bytes(None), Ok(SOCKET_BUFFER_BYTES));
+        assert_eq!(SOCKET_BUFFER_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn socket_buffer_parses_valid_values_and_boundaries() {
+        assert_eq!(socket_buffer_bytes(Some("8388608")), Ok(8 * 1024 * 1024));
+        assert_eq!(
+            socket_buffer_bytes(Some(" 217088 ")),
+            Ok(SOCKET_BUFFER_MIN_BYTES)
+        );
+        assert_eq!(
+            socket_buffer_bytes(Some("67108864")),
+            Ok(SOCKET_BUFFER_MAX_BYTES)
+        );
+    }
+
+    #[test]
+    fn socket_buffer_rejects_invalid_values() {
+        for value in [
+            "",
+            " ",
+            "abc",
+            "-1",
+            "4MiB",
+            "217087",
+            "67108865",
+            "999999999999999999999999",
+        ] {
+            let error = socket_buffer_bytes(Some(value)).expect_err(value);
+            assert!(error.contains("UMBRAWG_SOCKET_BUFFER"), "{value}: {error}");
+        }
+    }
+
+    #[test]
+    fn buffer_shortfall_detects_kernel_clamp() {
+        let requested = SOCKET_BUFFER_BYTES;
+        assert_eq!(socket_buffer_shortfall(requested, requested * 2), None);
+        assert_eq!(socket_buffer_shortfall(requested, 425_984), Some(212_992));
+        assert_eq!(socket_buffer_shortfall(requested, 0), Some(0));
+    }
+
+    #[test]
+    fn buffer_shortfall_allows_rounding_tolerance() {
+        let requested = SOCKET_BUFFER_BYTES;
+        let within = (requested - SOCKET_BUFFER_TOLERANCE_BYTES) * 2;
+        assert_eq!(socket_buffer_shortfall(requested, within), None);
+        let below = (requested - SOCKET_BUFFER_TOLERANCE_BYTES - 1) * 2;
+        assert_eq!(
+            socket_buffer_shortfall(requested, below),
+            Some(requested - SOCKET_BUFFER_TOLERANCE_BYTES - 1)
+        );
     }
 
     #[test]
@@ -946,22 +1076,33 @@ mod tests {
 
     #[test]
     fn open_socket_applies_gso_limits() {
-        let socket = open_socket(0, 0).expect("socket is bound");
+        let socket = open_socket(0, 0, SOCKET_BUFFER_BYTES).expect("socket is bound");
         assert_eq!(socket.gso_limits(), gso_limits());
         assert!(socket.max_gso_size() >= 1480);
     }
 
     #[test]
     fn open_socket_requests_large_buffers() {
-        let socket = open_socket(0, 0).expect("socket is bound");
+        let requested = 8 * 1024 * 1024;
+        let socket = open_socket(0, 0, requested).expect("socket is bound");
         let fd = socket.fd();
-        let receive_limit = kernel_limit("rmem_max");
-        let send_limit = kernel_limit("wmem_max");
         let receive = socket_buffer(fd, libc::SO_RCVBUF);
         let send = socket_buffer(fd, libc::SO_SNDBUF);
-        assert!(receive >= SOCKET_BUFFER_BYTES.min(receive_limit));
-        assert!(send >= SOCKET_BUFFER_BYTES.min(send_limit));
         assert!(receive > 0);
         assert!(send > 0);
+        assert!(effective_socket_buffer(receive) <= requested);
+        assert!(effective_socket_buffer(send) <= requested);
+    }
+
+    #[test]
+    fn open_socket_survives_small_kernel_limits() {
+        let requested = SOCKET_BUFFER_MAX_BYTES;
+        let socket = open_socket(0, 0, requested).expect("socket is bound");
+        let receive = effective_socket_buffer(socket_buffer(socket.fd(), libc::SO_RCVBUF));
+        let send = effective_socket_buffer(socket_buffer(socket.fd(), libc::SO_SNDBUF));
+        assert!(receive > 0);
+        assert!(send > 0);
+        assert!(receive <= requested);
+        assert!(send <= requested);
     }
 }
