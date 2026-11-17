@@ -208,6 +208,18 @@ fn bench_x25519(c: &mut Criterion) {
     group.finish();
 }
 
+fn make_obf_packet(obf: &Obfuscator, kind: MessageKind, seed: u64) -> Vec<u8> {
+    let mut dst = vec![0u8; 512];
+    let mut rng = FixedRng(seed);
+    let (_header, layout) = obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
+    obf.finish_fixed(kind, &mut dst, &layout).unwrap();
+    let mut packet = dst[..layout.total].to_vec();
+    if packet.len() < 32 {
+        packet.resize(32, 0);
+    }
+    packet
+}
+
 fn bench_obf(c: &mut Criterion) {
     let kinds = [MessageKind::Initiation, MessageKind::Transport];
     for &enabled in &[false, true] {
@@ -268,18 +280,7 @@ fn bench_obf(c: &mut Criterion) {
         for &kind in &kinds {
             group.bench_function(format!("{:?}", kind), |b| {
                 b.iter_with_setup(
-                    || {
-                        let mut dst = vec![0u8; 512];
-                        let mut rng = FixedRng(3);
-                        let (_header, layout) =
-                            obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
-                        obf.finish_fixed(kind, &mut dst, &layout).unwrap();
-                        let mut packet = dst[..layout.total].to_vec();
-                        if packet.len() < 32 {
-                            packet.resize(32, 0);
-                        }
-                        packet
-                    },
+                    || make_obf_packet(&obf, kind, 3),
                     |dst| {
                         let detected = obf.detect(&dst);
                         black_box(detected);
@@ -293,21 +294,25 @@ fn bench_obf(c: &mut Criterion) {
         for &kind in &kinds {
             group.bench_function(format!("{:?}", kind), |b| {
                 b.iter_with_setup(
-                    || {
-                        let mut dst = vec![0u8; 512];
-                        let mut rng = FixedRng(4);
-                        let (_header, layout) =
-                            obf.begin_fixed(kind, &mut rng, 500, &mut dst).unwrap();
-                        obf.finish_fixed(kind, &mut dst, &layout).unwrap();
-                        let mut packet = dst[..layout.total].to_vec();
-                        if packet.len() < 32 {
-                            packet.resize(32, 0);
-                        }
-                        packet
-                    },
+                    || make_obf_packet(&obf, kind, 4),
                     |mut dst| {
                         let detected = obf.detect(&dst).unwrap();
                         obf.unprotect_detected(&mut dst, detected).unwrap();
+                        black_box(dst);
+                    },
+                );
+            });
+        }
+        group.finish();
+
+        let mut group = c.benchmark_group(format!("obf_open_incoming_{}", label));
+        for &kind in &kinds {
+            group.bench_function(format!("{:?}", kind), |b| {
+                b.iter_with_setup(
+                    || make_obf_packet(&obf, kind, 4),
+                    |mut dst| {
+                        let detected = obf.open_incoming(&mut dst);
+                        black_box(detected);
                         black_box(dst);
                     },
                 );

@@ -14,6 +14,8 @@
 | obf_begin_fixed plain Initiation | ~58.2 ns |
 | obf_unprotect obf Initiation | ~507.8 ns |
 | obf_unprotect obf Transport | ~811.2 ns |
+| obf_open_incoming obf Initiation | ~314.2 ns |
+| obf_open_incoming obf Transport | ~154.1 ns |
 | GSO split_into_segments 64×1420 | ~2.54 µs |
 | GSO coalesce_into 64×1420 | ~1.83 µs |
 | virtio header encode | ~535 ps |
