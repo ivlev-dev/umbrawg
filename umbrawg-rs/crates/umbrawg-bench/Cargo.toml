@@ -9,6 +9,7 @@ publish = false
 
 [dependencies]
 umbrawg-crypto.workspace = true
+umbrawg-device.workspace = true
 umbrawg-proto.workspace = true
 umbrawg-transport.workspace = true
 umbrawg-tun.workspace = true

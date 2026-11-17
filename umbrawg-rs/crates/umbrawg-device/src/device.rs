@@ -259,7 +259,22 @@ impl Device {
     }
 
     pub fn set_under_load(&self, value: bool) {
-        self.under_load.store(value, Ordering::Relaxed);
+        self.transition_under_load(value);
+    }
+
+    fn transition_under_load(&self, next: bool) {
+        let mut current = self.under_load.load(Ordering::Relaxed);
+        while current != next {
+            match self.under_load.compare_exchange_weak(
+                current,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return,
+                Err(actual) => current = actual,
+            }
+        }
     }
 
     /// Возвращает порог детектора флуда в инициациях на секунду.
@@ -287,7 +302,7 @@ impl Device {
         self.under_load_detection.store(enabled, Ordering::Relaxed);
         self.under_load_detector.reset(Instant::now());
         if !enabled {
-            self.under_load.store(false, Ordering::Relaxed);
+            self.transition_under_load(false);
         }
     }
 
@@ -297,7 +312,7 @@ impl Device {
             return;
         }
         let next = self.under_load_detector.note(now, self.under_load());
-        self.under_load.store(next, Ordering::Relaxed);
+        self.transition_under_load(next);
     }
 
     /// Пересчитывает `under_load` по скользящему окну без новой инициации.
@@ -306,7 +321,7 @@ impl Device {
             return;
         }
         let next = self.under_load_detector.refresh(now, self.under_load());
-        self.under_load.store(next, Ordering::Relaxed);
+        self.transition_under_load(next);
     }
 
     #[must_use]

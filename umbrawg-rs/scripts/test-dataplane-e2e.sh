@@ -16,6 +16,7 @@ PORT_B="${PORT_B:-51821}"
 TUN_A="${TUN_A:-10.71.0.1}"
 TUN_B="${TUN_B:-10.71.0.2}"
 TUN_PREFIX="${TUN_PREFIX:-24}"
+UNDERLAY_MTU="${UNDERLAY_MTU:-1500}"
 FILE_MIB="${FILE_MIB:-32}"
 KEEP_ARTIFACTS="${KEEP_ARTIFACTS:-0}"
 HANDSHAKE_TIMEOUT="${HANDSHAKE_TIMEOUT:-20}"
@@ -219,6 +220,7 @@ start_daemons() {
         UMBRAWG_PARALLEL_RX="$parallel" \
         UMBRAWG_RX_SCHED="${UMBRAWG_RX_SCHED:-peer}" \
         UMBRAWG_RX_STATS="${UMBRAWG_RX_STATS:-1}" \
+        UMBRAWG_UNDERLAY_MTU="$UNDERLAY_MTU" \
         "$DAEMON_BIN" --foreground "$IFACE_A" >>"$RUNDIR/$tag-a.log" 2>&1 &
     DAEMON_PID_A=$!
     ns "$PID_B" env \
@@ -228,6 +230,7 @@ start_daemons() {
         UMBRAWG_PARALLEL_RX="$parallel" \
         UMBRAWG_RX_SCHED="${UMBRAWG_RX_SCHED:-peer}" \
         UMBRAWG_RX_STATS="${UMBRAWG_RX_STATS:-1}" \
+        UMBRAWG_UNDERLAY_MTU="$UNDERLAY_MTU" \
         "$DAEMON_BIN" --foreground "$IFACE_B" >>"$RUNDIR/$tag-b.log" 2>&1 &
     DAEMON_PID_B=$!
 
@@ -718,6 +721,7 @@ log "UMBRAWG_RX_SCHED: ${UMBRAWG_RX_SCHED:-peer}"
 log "iperf3: ${IPERF3:-нет}"
 log "nc: ${NC:-нет}"
 log "файл для проверки целостности: ${FILE_MIB} MiB"
+log "MTU подложки: ${UNDERLAY_MTU}"
 
 ip link set lo up
 start_netns_holder A
@@ -729,6 +733,8 @@ log "netns: A=$PID_A B=$PID_B"
 ip link add uwgveth0 type veth peer name uwgveth1
 ip link set uwgveth0 netns "$PID_A"
 ip link set uwgveth1 netns "$PID_B"
+ns "$PID_A" ip link set uwgveth0 mtu "$UNDERLAY_MTU"
+ns "$PID_B" ip link set uwgveth1 mtu "$UNDERLAY_MTU"
 ns "$PID_A" ip link set uwgveth0 up
 ns "$PID_B" ip link set uwgveth1 up
 ns "$PID_A" ip addr add "$UNDERLAY_A/$UNDERLAY_PREFIX" dev uwgveth0

@@ -17,16 +17,20 @@ use umbrawg_device::{
 };
 use umbrawg_transport::{
     AddressFamily, Endpoint, GsoLimits, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
-    MAX_BATCH_SIZE, MAX_SEGMENTS, MAX_UDP_PAYLOAD_V4,
+    MAX_BATCH_SIZE,
 };
 use umbrawg_tun::{Tun, TunConfig, TunError, TunSet, VirtioNetHdr};
 use umbrawg_uapi::{socket_dir, ServerHandle, UapiListener};
 
+mod control;
+mod mtu;
 mod parallel;
 mod ring;
 mod rx;
 mod tx;
 
+use control::ConfigControl;
+use mtu::{MtuGuard, Underlay};
 use rx::RxBatch;
 use tx::TxBatch;
 
@@ -213,12 +217,6 @@ fn packet_destination(packet: &[u8]) -> Option<IpAddr> {
     }
 }
 
-const GSO_SEGMENT_LIMIT: usize = MAX_UDP_PAYLOAD_V4;
-
-fn gso_limits() -> GsoLimits {
-    GsoLimits::new(GSO_SEGMENT_LIMIT, MAX_SEGMENTS).expect("GSO limits are valid")
-}
-
 fn socket_buffer_bytes(value: Option<&str>) -> Result<usize, String> {
     let Some(raw) = value else {
         return Ok(SOCKET_BUFFER_BYTES);
@@ -290,13 +288,13 @@ fn warn_if_buffer_clamped(
     }
 }
 
-fn open_socket(port: u16, fwmark: u32, buffer: usize) -> io::Result<Socket> {
+fn open_socket(port: u16, fwmark: u32, buffer: usize, limits: GsoLimits) -> io::Result<Socket> {
     let mut options = OpenOptions::new(AddressFamily::Ipv4)
         .reuse_port(true)
         .nonblocking(true)
         .receive_buffer(buffer)
         .send_buffer(buffer)
-        .gso_limits(gso_limits());
+        .gso_limits(limits);
     if port != 0 {
         options = options.port(port);
     }
@@ -549,7 +547,12 @@ fn pump_tun_tx<R: rand_core::RngCore>(
     busy
 }
 
-fn worker_loop(device: Arc<Device>, mut tun: Tun, socket_buffer: usize) -> io::Result<()> {
+fn worker_loop(
+    device: Arc<Device>,
+    mut tun: Tun,
+    socket_buffer: usize,
+    underlay: Underlay,
+) -> io::Result<()> {
     let mut rng = BufferedRng::new(rand_core::OsRng);
     let mut scratch = vec![0u8; MAX_PACKET + 512];
     let mut tx_buffer = vec![0u8; MAX_PACKET + 512];
@@ -583,7 +586,12 @@ fn worker_loop(device: Arc<Device>, mut tun: Tun, socket_buffer: usize) -> io::R
             Some(current) => want_port != 0 && current.local_addr().port() != want_port,
         };
         if rebind {
-            match open_socket(want_port, device.fwmark(), socket_buffer) {
+            match open_socket(
+                want_port,
+                device.fwmark(),
+                socket_buffer,
+                underlay.gso_limits(),
+            ) {
                 Ok(new_socket) => {
                     log::info!("listening on {}", new_socket.local_addr());
                     socket = Some(new_socket);
@@ -760,6 +768,7 @@ fn daemonize() -> io::Result<()> {
 pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Error>> {
     let socket_buffer = socket_buffer_bytes(env::var("UMBRAWG_SOCKET_BUFFER").ok().as_deref())
         .map_err(io::Error::other)?;
+    let underlay = Underlay::from_env().map_err(io::Error::other)?;
 
     if let Ok(value) = env::var("UMBRAWG_RUNTIME_DIR") {
         env::set_var("UWG_RUNTIME_DIR", value);
@@ -777,6 +786,9 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
 
     let device = Arc::new(Device::new(DeviceConfig::default())?);
     apply_under_load_config(&device);
+    log::info!("{underlay}");
+    let guard = Arc::new(MtuGuard::new(underlay));
+    guard.check(device.mtu(), device.obfuscation().s4);
     device.up();
 
     if let Some(parallel) =
@@ -789,7 +801,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
             parallel.queue_depth,
             parallel::queue_bytes(parallel.queue_depth).div_ceil(1024 * 1024)
         );
-        return run_parallel(device, ifname, parallel, socket_buffer);
+        return run_parallel(device, ifname, parallel, socket_buffer, underlay, guard);
     }
 
     let requested = env::var("UMBRAWG_THREADS").ok();
@@ -811,7 +823,10 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
     };
 
     let listener = UapiListener::bind(&socket_dir(), ifname)?;
-    let server = listener.spawn(Arc::clone(&device))?;
+    let server = listener.spawn(Arc::new(ConfigControl::new(
+        Arc::clone(&device),
+        Arc::clone(&guard),
+    )))?;
 
     let mut handles = Vec::with_capacity(workers);
     for tun in tun_set.into_queues() {
@@ -819,7 +834,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         let handle = thread::Builder::new()
             .name("umbrawg-worker".to_owned())
             .spawn(move || {
-                if let Err(error) = worker_loop(device, tun, socket_buffer) {
+                if let Err(error) = worker_loop(device, tun, socket_buffer, underlay) {
                     log::error!("worker stopped: {error}");
                 }
             })?;
@@ -848,6 +863,8 @@ fn run_parallel(
     ifname: &str,
     parallel: parallel::ParallelConfig,
     socket_buffer: usize,
+    underlay: Underlay,
+    guard: Arc<MtuGuard>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workers = parallel.workers;
     let config = TunConfig::new(ifname)
@@ -866,7 +883,10 @@ fn run_parallel(
     };
 
     let listener = UapiListener::bind(&socket_dir(), ifname)?;
-    let server = listener.spawn(Arc::clone(&device))?;
+    let server = listener.spawn(Arc::new(ConfigControl::new(
+        Arc::clone(&device),
+        Arc::clone(&guard),
+    )))?;
     let shared = Arc::new(parallel::SharedRx::new(
         workers,
         parallel.sched,
@@ -879,7 +899,7 @@ fn run_parallel(
     let rx_handle = thread::Builder::new()
         .name("umbrawg-rx".to_owned())
         .spawn(move || {
-            if let Err(error) = parallel::rx_loop(rx_device, rx_shared, socket_buffer) {
+            if let Err(error) = parallel::rx_loop(rx_device, rx_shared, socket_buffer, underlay) {
                 rx_failure.register_failure(format!("rx thread stopped: {error}"));
             }
         })?;
@@ -1115,24 +1135,40 @@ mod tests {
 
     #[test]
     fn gso_limits_cover_obfuscated_segments() {
-        let limits = gso_limits();
-        assert_eq!(limits.max_segments(), MAX_SEGMENTS);
+        let limits = Underlay::new(9000, mtu::DEFAULT_GSO_SEGMENTS)
+            .unwrap()
+            .gso_limits();
+        assert_eq!(limits.max_segments(), mtu::DEFAULT_GSO_SEGMENTS);
         assert!(limits.max_gso_size() >= 1480);
-        assert!(limits.max_datagram_len(AddressFamily::Ipv4) <= MAX_UDP_PAYLOAD_V4);
         assert!(limits.max_gso_size() >= 1420 + 28 + 16 + 16);
     }
 
     #[test]
+    fn gso_limits_leave_ether_underlay_plain() {
+        let limits = Underlay::new(1500, mtu::DEFAULT_GSO_SEGMENTS)
+            .unwrap()
+            .gso_limits();
+        assert_eq!(limits.max_gso_size(), 1472);
+        assert!(limits.max_gso_size() < 1420 + 32 + 60);
+    }
+
+    #[test]
     fn open_socket_applies_gso_limits() {
-        let socket = open_socket(0, 0, SOCKET_BUFFER_BYTES).expect("socket is bound");
-        assert_eq!(socket.gso_limits(), gso_limits());
+        let limits = Underlay::new(9000, mtu::DEFAULT_GSO_SEGMENTS)
+            .unwrap()
+            .gso_limits();
+        let socket = open_socket(0, 0, SOCKET_BUFFER_BYTES, limits).expect("socket is bound");
+        assert_eq!(socket.gso_limits(), limits);
         assert!(socket.max_gso_size() >= 1480);
     }
 
     #[test]
     fn open_socket_requests_large_buffers() {
         let requested = 8 * 1024 * 1024;
-        let socket = open_socket(0, 0, requested).expect("socket is bound");
+        let limits = Underlay::new(1500, mtu::DEFAULT_GSO_SEGMENTS)
+            .unwrap()
+            .gso_limits();
+        let socket = open_socket(0, 0, requested, limits).expect("socket is bound");
         let fd = socket.fd();
         let receive = socket_buffer(fd, libc::SO_RCVBUF);
         let send = socket_buffer(fd, libc::SO_SNDBUF);
@@ -1145,7 +1181,10 @@ mod tests {
     #[test]
     fn open_socket_survives_small_kernel_limits() {
         let requested = SOCKET_BUFFER_MAX_BYTES;
-        let socket = open_socket(0, 0, requested).expect("socket is bound");
+        let limits = Underlay::new(1500, mtu::DEFAULT_GSO_SEGMENTS)
+            .unwrap()
+            .gso_limits();
+        let socket = open_socket(0, 0, requested, limits).expect("socket is bound");
         let receive = effective_socket_buffer(socket_buffer(socket.fd(), libc::SO_RCVBUF));
         let send = effective_socket_buffer(socket_buffer(socket.fd(), libc::SO_SNDBUF));
         assert!(receive > 0);

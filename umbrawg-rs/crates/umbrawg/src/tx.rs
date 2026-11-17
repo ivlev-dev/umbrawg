@@ -11,6 +11,13 @@ pub const MAX_OUTGOING: usize = 64;
 /// Максимальное число GSO-групп в одном накопителе.
 pub const MAX_GROUPS: usize = 64;
 
+/// Максимальное число сегментов, сливаемых в одну GSO-группу.
+///
+/// При `per_datagram == 1` группа даёт ровно столько датаграмм, поэтому
+/// потолок [`MAX_OUTGOING`] гарантирует, что группа всегда помещается в
+/// `sendmmsg` и не теряется при отправке.
+pub const MAX_GROUP_SEGMENTS: usize = MAX_OUTGOING;
+
 const MAX_SEND_ATTEMPTS: usize = 8;
 const SEND_POLL_TIMEOUT_MS: i32 = 1;
 
@@ -102,7 +109,9 @@ impl TxBatch {
             let start = group.start + base;
             let merged = same_peer
                 && self.groups.last().is_some_and(|last| {
-                    last.segment_len == group.segment_len && last.end() == start
+                    last.segment_len == group.segment_len
+                        && last.end() == start
+                        && last.segments + group.segments <= MAX_GROUP_SEGMENTS
                 });
             if merged {
                 if let Some(last) = self.groups.last_mut() {
@@ -157,6 +166,12 @@ impl TxBatch {
                 let group = self.groups[peer.first_group + offset];
                 while !append_group(&mut outgoings, &mut pending, buffer, group, limits, gso) {
                     if pending == 0 {
+                        self.dropped += 1;
+                        log::debug!(
+                            "dropping GSO group of {} segments: it does not fit {} datagrams",
+                            group.segments,
+                            outgoings.len()
+                        );
                         break;
                     }
                     sent += self.send(socket, peer.endpoint, &outgoings[..pending]);
@@ -273,6 +288,7 @@ fn append_group<'a>(
 mod tests {
     use super::*;
     use umbrawg_device::GsoGroup;
+    use umbrawg_transport::AddressFamily;
 
     const DATA: [u8; 4096] = [0x5a; 4096];
 
@@ -573,6 +589,46 @@ mod tests {
         assert_eq!(batch.groups.len(), 3);
         assert_eq!(batch.peers.len(), 3);
         assert!(batch.groups.iter().all(|group| group.segments == 1));
+    }
+
+    #[test]
+    fn push_splits_groups_at_segment_cap() {
+        let mut batch = TxBatch::new(MAX_OUTGOING).unwrap();
+        let endpoint: SocketAddr = "10.0.0.1:1111".parse().unwrap();
+        assert!(batch.push(endpoint, 0, &layout(&[(100, MAX_GROUP_SEGMENTS)])));
+        assert_eq!(batch.groups.len(), 1);
+        assert_eq!(batch.groups[0].segments, MAX_GROUP_SEGMENTS);
+        assert!(batch.push(
+            endpoint,
+            MAX_GROUP_SEGMENTS * 100,
+            &layout(&[(100, MAX_GROUP_SEGMENTS)])
+        ));
+        assert_eq!(batch.groups.len(), 2);
+        assert_eq!(batch.peers[0].group_count, 2);
+        assert_eq!(batch.groups[1].segments, MAX_GROUP_SEGMENTS);
+        assert_eq!(batch.groups[1].start, MAX_GROUP_SEGMENTS * 100);
+    }
+
+    #[test]
+    fn flush_counts_group_that_does_not_fit_as_dropped() {
+        let socket = Socket::bind(AddressFamily::Ipv4, 0).unwrap();
+        socket.disable_gso();
+        let segments = MAX_OUTGOING + 1;
+        let mut batch = TxBatch::new(MAX_OUTGOING).unwrap();
+        batch.groups.push(GsoGroup {
+            start: 0,
+            segment_len: 100,
+            segments,
+        });
+        batch.peers.push(PeerBatch {
+            endpoint: "127.0.0.1:9".parse().unwrap(),
+            first_group: 0,
+            group_count: 1,
+        });
+        let buffer = vec![0u8; segments * 100];
+        let (sent, dropped) = batch.flush_tracked(&socket, &buffer);
+        assert_eq!(sent, 0);
+        assert_eq!(dropped, 1);
     }
 
     #[test]
