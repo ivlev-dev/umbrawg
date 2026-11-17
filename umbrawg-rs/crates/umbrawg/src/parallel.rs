@@ -647,6 +647,7 @@ pub(crate) fn rx_loop(
     device: Arc<Device>,
     shared: Arc<SharedRx>,
     socket_buffer: usize,
+    underlay: crate::mtu::Underlay,
 ) -> io::Result<()> {
     let mut rng = BufferedRng::new(OsRng);
     let mut scratch = vec![0u8; MAX_PACKET + 512];
@@ -670,7 +671,12 @@ pub(crate) fn rx_loop(
             Some(current) => want_port != 0 && current.local_addr().port() != want_port,
         };
         if rebind {
-            match open_socket(want_port, device.fwmark(), socket_buffer) {
+            match open_socket(
+                want_port,
+                device.fwmark(),
+                socket_buffer,
+                underlay.gso_limits(),
+            ) {
                 Ok(new_socket) => {
                     log::info!("parallel rx listening on {}", new_socket.local_addr());
                     let new_socket = Arc::new(new_socket);
