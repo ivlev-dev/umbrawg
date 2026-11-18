@@ -39,7 +39,7 @@ const RECV_BATCH: usize = 64;
 const TUN_BATCH: usize = 128;
 const TUN_PACKET_MARGIN: usize = 256;
 const IDLE_TIMEOUT_MS: i32 = 10;
-const SOCKET_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const SOCKET_BUFFER_MIN_BYTES: usize = 212 * 1024;
 const SOCKET_BUFFER_MAX_BYTES: usize = 64 * 1024 * 1024;
 const SOCKET_BUFFER_TOLERANCE_BYTES: usize = 4096;
@@ -1078,9 +1078,9 @@ mod tests {
     }
 
     #[test]
-    fn socket_buffer_defaults_to_4_mib() {
+    fn socket_buffer_defaults_to_8_mib() {
         assert_eq!(socket_buffer_bytes(None), Ok(SOCKET_BUFFER_BYTES));
-        assert_eq!(SOCKET_BUFFER_BYTES, 4 * 1024 * 1024);
+        assert_eq!(SOCKET_BUFFER_BYTES, 8 * 1024 * 1024);
     }
 
     #[test]

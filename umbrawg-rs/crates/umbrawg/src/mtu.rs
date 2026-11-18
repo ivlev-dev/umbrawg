@@ -19,7 +19,7 @@ pub const MIN_UNDERLAY_MTU: u32 = 576;
 pub const MAX_UNDERLAY_MTU: u32 = 65_535;
 
 /// Ограничение числа сегментов в одной GSO-датаграмме по умолчанию.
-pub const DEFAULT_GSO_SEGMENTS: usize = 32;
+pub const DEFAULT_GSO_SEGMENTS: usize = 64;
 
 /// Накладные расходы WireGuard/UmbraWG на пакет данных без `S4`.
 pub const WIRE_OVERHEAD: usize = 32;

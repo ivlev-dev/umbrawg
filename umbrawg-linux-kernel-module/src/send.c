@@ -25,10 +25,10 @@
 #include <net/udp.h>
 #include <net/sock.h>
 
-#define UWG_TX_MAX_ENTRIES 32
-#define UWG_TX_MAX_SKBS (UWG_TX_MAX_ENTRIES * 4)
-#define UWG_GSO_SEGS_MAX 32
-#define UWG_GSO_MAX_BYTES 60000
+#define UWG_TX_MAX_ENTRIES 48
+#define UWG_TX_MAX_SKBS 128
+#define UWG_GSO_SEGS_MAX 44
+#define UWG_GSO_MAX_BYTES 65000
 
 static void uwg_packet_send_handshake_initiation(struct uwg_peer *peer)
 {
