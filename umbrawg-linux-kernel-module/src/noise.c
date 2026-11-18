@@ -850,6 +850,18 @@ bool uwg_noise_handshake_begin_session(struct noise_handshake *handshake,
 		derive_keys(&new_keypair->receiving, &new_keypair->sending,
 			    handshake->chaining_key);
 
+	new_keypair->cipher = handshake->entry.peer->cipher;
+	if (new_keypair->cipher == UWG_CIPHER_AES256GCM &&
+	    (aes_gcm_preparekey(&new_keypair->sending_aes,
+				new_keypair->sending.key,
+				NOISE_SYMMETRIC_KEY_LEN, NOISE_AUTHTAG_LEN) ||
+	     aes_gcm_preparekey(&new_keypair->receiving_aes,
+				new_keypair->receiving.key,
+				NOISE_SYMMETRIC_KEY_LEN, NOISE_AUTHTAG_LEN))) {
+		kfree_sensitive(new_keypair);
+		goto out;
+	}
+
 	handshake_zero(handshake);
 	rcu_read_lock_bh();
 	if (likely(!READ_ONCE(container_of(handshake, struct uwg_peer,

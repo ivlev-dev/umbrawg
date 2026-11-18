@@ -38,6 +38,7 @@ struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 	WRITE_ONCE(peer->udp_window, DEFAULT_UDP_WINDOW);
 
 	peer->device = uwg;
+	peer->cipher = UWG_CIPHER_CHACHA20POLY1305;
 	uwg_noise_handshake_init(&peer->handshake, &uwg->static_identity,
 				public_key, preshared_key, peer);
 	peer->internal_id = atomic64_inc_return(&peer_counter);

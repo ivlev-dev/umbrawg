@@ -13,6 +13,8 @@
 #include "messages.h"
 #include "cookie.h"
 #include "type.h"
+#include <linux/unaligned.h>
+#include <linux/highmem.h>
 
 #include <linux/uio.h>
 #include <linux/inetdevice.h>
@@ -305,6 +307,32 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	if (skb_to_sgvec(skb, sg, sizeof(struct message_data) + padding,
 			 noise_encrypted_len(plaintext_len)) <= 0)
 		return false;
+
+	if (keypair->cipher == UWG_CIPHER_AES256GCM) {
+		u8 aes_nonce[12] = { 0 };
+		u8 tag[NOISE_AUTHTAG_LEN];
+		struct aes_gcm_ctx ctx;
+		struct scatterlist *part;
+		unsigned int left = plaintext_len;
+
+		put_unaligned_le64(PACKET_CB(skb)->nonce, aes_nonce + 4);
+		aes_gcm_init(&ctx, aes_nonce, &keypair->sending_aes);
+		for (part = sg; part && left; part = sg_next(part)) {
+			unsigned int len = min_t(unsigned int, left, part->length);
+			u8 *addr = kmap_local_page(sg_page(part)) + part->offset;
+
+			aes_gcm_encrypt_update(&ctx, addr, addr, len);
+			kunmap_local(addr);
+			left -= len;
+		}
+		aes_gcm_encrypt_final(&ctx, tag);
+		if (skb_store_bits(skb,
+				   sizeof(struct message_data) + padding + plaintext_len,
+				   tag, sizeof(tag)))
+			return false;
+		return true;
+	}
+
 	return chacha20poly1305_encrypt_sg_inplace(sg, plaintext_len, NULL, 0,
 						   PACKET_CB(skb)->nonce,
 						   keypair->sending.key);

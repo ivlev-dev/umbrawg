@@ -12,6 +12,8 @@
 #include "cookie.h"
 #include "socket.h"
 #include "type.h"
+#include <linux/unaligned.h>
+#include <linux/highmem.h>
 
 #include <linux/ip.h>
 #include <linux/ipv6.h>
@@ -361,10 +363,35 @@ static bool decrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	if (skb_to_sgvec(skb, sg, 0, skb->len) <= 0)
 		return false;
 
-	if (!chacha20poly1305_decrypt_sg_inplace(sg, skb->len, NULL, 0,
-						 PACKET_CB(skb)->nonce,
-						 keypair->receiving.key))
-		return false;
+	if (keypair->cipher == UWG_CIPHER_AES256GCM) {
+		u8 aes_nonce[12] = { 0 };
+		u8 tag[NOISE_AUTHTAG_LEN];
+		struct aes_gcm_ctx ctx;
+		struct scatterlist *part;
+		unsigned int data_len = skb->len - NOISE_AUTHTAG_LEN;
+		unsigned int left = data_len;
+
+		if (skb->len < NOISE_AUTHTAG_LEN ||
+		    skb_copy_bits(skb, data_len, tag, sizeof(tag)))
+			return false;
+		put_unaligned_le64(PACKET_CB(skb)->nonce, aes_nonce + 4);
+		aes_gcm_init(&ctx, aes_nonce, &keypair->receiving_aes);
+		for (part = sg; part && left; part = sg_next(part)) {
+			unsigned int len = min_t(unsigned int, left, part->length);
+			u8 *addr = kmap_local_page(sg_page(part)) + part->offset;
+
+			aes_gcm_decrypt_update(&ctx, addr, addr, len);
+			kunmap_local(addr);
+			left -= len;
+		}
+		if (aes_gcm_decrypt_final(&ctx, tag))
+			return false;
+	} else {
+		if (!chacha20poly1305_decrypt_sg_inplace(sg, skb->len, NULL, 0,
+							 PACKET_CB(skb)->nonce,
+							 keypair->receiving.key))
+			return false;
+	}
 
 	/* Another ugly situation of pushing and pulling the header so as to
 	 * keep endpoint information intact.

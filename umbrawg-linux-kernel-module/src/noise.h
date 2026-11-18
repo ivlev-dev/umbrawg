@@ -7,6 +7,8 @@
 
 #include "messages.h"
 #include "peerlookup.h"
+#include "uapi/umbrawg.h"
+#include <crypto/aes-gcm.h>
 
 #include <linux/types.h>
 #include <linux/spinlock.h>
@@ -33,6 +35,9 @@ struct noise_keypair {
 	atomic64_t sending_counter;
 	struct noise_symmetric_key receiving;
 	struct noise_replay_counter receiving_counter;
+	struct aes_gcm_key sending_aes;
+	struct aes_gcm_key receiving_aes;
+	enum uwg_cipher cipher;
 	__le32 remote_index;
 	bool i_am_the_initiator;
 	struct kref refcount;
