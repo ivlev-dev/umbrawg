@@ -69,7 +69,8 @@ cd go && go build ./... && go test ./...
 
 - Производительность и отклонённые эксперименты —
   `umbrawg-linux-kernel-module/docs/PERFORMANCE.md`.
-- Дизайн шардирования — `umbrawg-linux-kernel-module/docs/PEER-SHARDING.md`.
+- Дизайн шардирования — `umbrawg-linux-kernel-module/docs/PEER-SHARDING.md`
+  (S1/S2) и `umbrawg-linux-kernel-module/docs/PEER-PATH-SHARDING.md` (S3).
 - Стенд и методика — `bench/README.md`; результаты замеров хранятся на
   тестовом сервере, а не в репозитории.
 
