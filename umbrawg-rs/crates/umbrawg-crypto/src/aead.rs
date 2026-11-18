@@ -314,7 +314,7 @@ impl Algorithm {
 
 enum Cipher {
     ChaCha(ChaCha20Poly1305),
-    Aes(Aes256Gcm),
+    Aes(Box<Aes256Gcm>),
 }
 
 impl Cipher {
@@ -324,10 +324,10 @@ impl Cipher {
                 ChaCha20Poly1305::new_from_slice(key.as_bytes())
                     .expect("ChaCha20-Poly1305 requires a 32-byte key"),
             ),
-            Algorithm::Aes256Gcm => Self::Aes(
+            Algorithm::Aes256Gcm => Self::Aes(Box::new(
                 Aes256Gcm::new_from_slice(key.as_bytes())
                     .expect("AES-256-GCM requires a 32-byte key"),
-            ),
+            )),
         }
     }
 
@@ -339,7 +339,7 @@ impl Cipher {
     ) -> Result<(), Error> {
         match self {
             Self::ChaCha(cipher) => seal_with(cipher, nonce, aad, buffer),
-            Self::Aes(cipher) => seal_with(cipher, nonce, aad, buffer),
+            Self::Aes(cipher) => seal_with(cipher.as_ref(), nonce, aad, buffer),
         }
     }
 
@@ -351,7 +351,7 @@ impl Cipher {
     ) -> Result<&'a mut [u8], Error> {
         match self {
             Self::ChaCha(cipher) => open_with(cipher, nonce, aad, buffer),
-            Self::Aes(cipher) => open_with(cipher, nonce, aad, buffer),
+            Self::Aes(cipher) => open_with(cipher.as_ref(), nonce, aad, buffer),
         }
     }
 
@@ -366,7 +366,7 @@ impl Cipher {
             Self::ChaCha(cipher) => {
                 open_detached_with(cipher, nonce, aad, buffer, tag)
             }
-            Self::Aes(cipher) => open_detached_with(cipher, nonce, aad, buffer, tag),
+            Self::Aes(cipher) => open_detached_with(cipher.as_ref(), nonce, aad, buffer, tag),
         }
     }
 }

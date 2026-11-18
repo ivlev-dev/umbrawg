@@ -285,6 +285,16 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
                 peer.persistent_keepalive
             );
         }
+        if let Some(cipher) = peer.cipher {
+            if cipher != umbrawg_config::Cipher::ChaCha20Poly1305 {
+                let _ = writeln!(
+                    output,
+                    "  {}: {}",
+                    style.bold("cipher"),
+                    cipher
+                );
+            }
+        }
         let _ = writeln!(
             output,
             "  {}: {}",
