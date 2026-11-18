@@ -1,9 +1,15 @@
-//! ChaCha20-Poly1305 in the WireGuard nonce format.
+//! Transport AEAD ciphers in the WireGuard nonce format.
 //!
 //! WireGuard builds the 96-bit AEAD nonce as four zero bytes followed by the
 //! 64-bit little-endian packet counter. All routines operate in place on a
 //! caller-provided buffer and never allocate.
+//!
+//! The handshake and cookie messages always use ChaCha20-Poly1305 and
+//! XChaCha20-Poly1305 respectively. Transport data may use either
+//! ChaCha20-Poly1305 or AES-256-GCM, selected per peer; both use the same
+//! 32-byte key and 16-byte tag, so the wire format does not change.
 
+use aes_gcm::Aes256Gcm;
 use chacha20poly1305::aead::consts::{U12, U16, U24};
 use chacha20poly1305::aead::AeadInPlace;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, Tag, XChaCha20Poly1305, XNonce};
@@ -93,6 +99,22 @@ fn open_with<'a, C: AeadInPlace<NonceSize = U12, TagSize = U16>>(
         )
         .map_err(|_| Error::Authentication)?;
     Ok(plaintext)
+}
+
+fn open_detached_with<C: AeadInPlace<NonceSize = U12, TagSize = U16>>(
+    cipher: &C,
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    buffer: &mut [u8],
+    tag: &[u8],
+) -> Result<(), Error> {
+    let tag: &[u8; TAG_LEN] = tag.try_into().map_err(|_| Error::BufferTooSmall {
+        required: TAG_LEN,
+        available: tag.len(),
+    })?;
+    cipher
+        .decrypt_in_place_detached(Nonce::from_slice(nonce), aad, buffer, Tag::from_slice(tag))
+        .map_err(|_| Error::Authentication)
 }
 
 fn xseal_with<C: AeadInPlace<NonceSize = U24, TagSize = U16>>(
@@ -265,19 +287,116 @@ pub fn xopen_with_nonce<'a>(
     xopen_with(&cipher, nonce, aad, buffer)
 }
 
-/// A reusable ChaCha20-Poly1305 instance bound to one key.
+/// Transport data cipher of a peer.
+///
+/// ChaCha20-Poly1305 is the default and is also used by the handshake; AES-256-GCM
+/// is an opt-in per-peer alternative for transport packets. Both algorithms use
+/// the same 32-byte key, 96-bit nonce and 16-byte tag.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Algorithm {
+    /// ChaCha20-Poly1305.
+    #[default]
+    ChaCha20Poly1305,
+    /// AES-256-GCM.
+    Aes256Gcm,
+}
+
+impl Algorithm {
+    /// Returns the canonical lowercase name used by configuration files.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChaCha20Poly1305 => "chacha20-poly1305",
+            Self::Aes256Gcm => "aes-256-gcm",
+        }
+    }
+}
+
+enum Cipher {
+    ChaCha(ChaCha20Poly1305),
+    Aes(Aes256Gcm),
+}
+
+impl Cipher {
+    fn new(algorithm: Algorithm, key: &Key) -> Self {
+        match algorithm {
+            Algorithm::ChaCha20Poly1305 => Self::ChaCha(
+                ChaCha20Poly1305::new_from_slice(key.as_bytes())
+                    .expect("ChaCha20-Poly1305 requires a 32-byte key"),
+            ),
+            Algorithm::Aes256Gcm => Self::Aes(
+                Aes256Gcm::new_from_slice(key.as_bytes())
+                    .expect("AES-256-GCM requires a 32-byte key"),
+            ),
+        }
+    }
+
+    fn seal(
+        &self,
+        nonce: &[u8; NONCE_LEN],
+        aad: &[u8],
+        buffer: &mut [u8],
+    ) -> Result<(), Error> {
+        match self {
+            Self::ChaCha(cipher) => seal_with(cipher, nonce, aad, buffer),
+            Self::Aes(cipher) => seal_with(cipher, nonce, aad, buffer),
+        }
+    }
+
+    fn open<'a>(
+        &self,
+        nonce: &[u8; NONCE_LEN],
+        aad: &[u8],
+        buffer: &'a mut [u8],
+    ) -> Result<&'a mut [u8], Error> {
+        match self {
+            Self::ChaCha(cipher) => open_with(cipher, nonce, aad, buffer),
+            Self::Aes(cipher) => open_with(cipher, nonce, aad, buffer),
+        }
+    }
+
+    fn open_detached(
+        &self,
+        nonce: &[u8; NONCE_LEN],
+        aad: &[u8],
+        buffer: &mut [u8],
+        tag: &[u8],
+    ) -> Result<(), Error> {
+        match self {
+            Self::ChaCha(cipher) => {
+                open_detached_with(cipher, nonce, aad, buffer, tag)
+            }
+            Self::Aes(cipher) => open_detached_with(cipher, nonce, aad, buffer, tag),
+        }
+    }
+}
+
+/// A reusable AEAD instance bound to one key and one transport cipher.
 pub struct Aead {
-    cipher: ChaCha20Poly1305,
+    cipher: Cipher,
+    algorithm: Algorithm,
 }
 
 impl Aead {
-    /// Creates an AEAD instance from a symmetric key.
+    /// Creates a ChaCha20-Poly1305 instance from a symmetric key.
     #[must_use]
     pub fn new(key: &Key) -> Self {
+        Self::new_with(Algorithm::ChaCha20Poly1305, key)
+    }
+
+    /// Creates an instance of `algorithm` from a symmetric key.
+    #[must_use]
+    pub fn new_with(algorithm: Algorithm, key: &Key) -> Self {
         Self {
-            cipher: ChaCha20Poly1305::new_from_slice(key.as_bytes())
-                .expect("ChaCha20-Poly1305 requires a 32-byte key"),
+            cipher: Cipher::new(algorithm, key),
+            algorithm,
         }
+    }
+
+    /// Returns the transport cipher of this instance.
+    #[must_use]
+    pub const fn algorithm(&self) -> Algorithm {
+        self.algorithm
     }
 
     /// Seals `buffer` in place with an explicit nonce.
@@ -287,7 +406,7 @@ impl Aead {
         aad: &[u8],
         buffer: &mut [u8],
     ) -> Result<(), Error> {
-        seal_with(&self.cipher, nonce, aad, buffer)
+        self.cipher.seal(nonce, aad, buffer)
     }
 
     /// Opens `buffer` in place with an explicit nonce.
@@ -297,7 +416,7 @@ impl Aead {
         aad: &[u8],
         buffer: &'a mut [u8],
     ) -> Result<&'a mut [u8], Error> {
-        open_with(&self.cipher, nonce, aad, buffer)
+        self.cipher.open(nonce, aad, buffer)
     }
 
     /// Seals `buffer` in place using the WireGuard counter nonce.
@@ -357,14 +476,12 @@ impl Aead {
             });
         }
         dst[..plaintext_len].copy_from_slice(&ciphertext[..plaintext_len]);
-        self.cipher
-            .decrypt_in_place_detached(
-                Nonce::from_slice(&nonce(counter)),
-                aad,
-                &mut dst[..plaintext_len],
-                Tag::from_slice(&ciphertext[plaintext_len..]),
-            )
-            .map_err(|_| Error::Authentication)?;
+        self.cipher.open_detached(
+            &nonce(counter),
+            aad,
+            &mut dst[..plaintext_len],
+            &ciphertext[plaintext_len..],
+        )?;
         Ok(plaintext_len)
     }
 }
@@ -499,5 +616,55 @@ mod tests {
         aead.seal_in_place(3, b"ad", &mut first).unwrap();
         seal_in_place(&key, 3, b"ad", &mut second).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn aes256gcm_nist_vector() {
+        let key = Key::from_bytes([0u8; KEY_LEN]);
+        let aead = Aead::new_with(Algorithm::Aes256Gcm, &key);
+        let mut buffer = [0u8; 16 + TAG_LEN];
+        aead.seal_in_place(0, &[], &mut buffer).unwrap();
+        assert_eq!(
+            &buffer[..16],
+            hex("cea7403d4d606b6e074ec5d3baf39d18").as_slice()
+        );
+        assert_eq!(
+            &buffer[16..],
+            hex("d0d1c8a799996bf0265b98b5d48ab919").as_slice()
+        );
+        let plaintext = aead.open_in_place(0, &[], &mut buffer).unwrap();
+        assert_eq!(plaintext, [0u8; 16]);
+    }
+
+    #[test]
+    fn aes256gcm_round_trip_and_tamper() {
+        let key = Key::from_bytes([0x42; KEY_LEN]);
+        let aead = Aead::new_with(Algorithm::Aes256Gcm, &key);
+        assert_eq!(aead.algorithm(), Algorithm::Aes256Gcm);
+        let mut buffer = b"payload".to_vec();
+        buffer.resize(buffer.len() + TAG_LEN, 0);
+        aead.seal_in_place(1, b"aad", &mut buffer).unwrap();
+        let mut tampered = buffer.clone();
+        tampered[0] ^= 1;
+        assert_eq!(
+            aead.open_in_place(1, b"aad", &mut tampered).unwrap_err(),
+            Error::Authentication
+        );
+        let plaintext = aead.open_in_place(1, b"aad", &mut buffer).unwrap();
+        assert_eq!(plaintext, b"payload");
+    }
+
+    #[test]
+    fn ciphers_do_not_interoperate() {
+        let key = Key::from_bytes([0x33; KEY_LEN]);
+        let chacha = Aead::new(&key);
+        let aes = Aead::new_with(Algorithm::Aes256Gcm, &key);
+        let mut sealed = b"secret".to_vec();
+        sealed.resize(sealed.len() + TAG_LEN, 0);
+        chacha.seal_in_place(5, b"", &mut sealed).unwrap();
+        assert_eq!(
+            aes.open_in_place(5, b"", &mut sealed).unwrap_err(),
+            Error::Authentication
+        );
     }
 }

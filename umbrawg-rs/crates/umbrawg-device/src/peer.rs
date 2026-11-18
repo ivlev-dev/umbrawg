@@ -6,6 +6,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use parking_lot::{Mutex, RwLock};
 
+use umbrawg_crypto::aead::Algorithm;
 use umbrawg_crypto::{Key, PublicKey};
 use umbrawg_noise::{CookieGenerator, Handshake, HandshakeState, StaticIdentity};
 use umbrawg_proto::messages::limits::{DEFAULT_UDP_WINDOW, MAX_STAGED_PACKETS};
@@ -371,6 +372,15 @@ impl Peer {
     /// algorithm; until then the setting only round-trips through the UAPI.
     pub fn set_cipher(&self, cipher: Cipher) {
         self.cipher.store(cipher.as_u32() as u8, Ordering::Relaxed);
+    }
+
+    /// Returns the transport AEAD algorithm of the peer.
+    #[must_use]
+    pub fn aead_algorithm(&self) -> Algorithm {
+        match self.cipher() {
+            Cipher::ChaCha20Poly1305 => Algorithm::ChaCha20Poly1305,
+            Cipher::Aes256Gcm => Algorithm::Aes256Gcm,
+        }
     }
 
     #[must_use]
