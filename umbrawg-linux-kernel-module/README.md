@@ -7,10 +7,11 @@
 
 The module uses only the in-kernel cryptography API (`chacha20poly1305`,
 `aes-gcm`, `blake2s`, `curve25519`, `chacha`) and builds against the kernel
-headers of the running kernel. AES-256-GCM requires
-`CONFIG_CRYPTO_LIB_AES_GCM` and `CONFIG_CRYPTO_LIB_GF128HASH`; the module
-selects both, and the transport cipher stays ChaCha20-Poly1305 unless a peer
-enables AES explicitly.
+headers of the running kernel. AES-256-GCM uses Crypto API `gcm(aes)`
+(`CONFIG_CRYPTO_GCM`; AES-NI, ARMv8 Crypto Extensions or a hardware driver
+such as qce) and falls back to `CONFIG_CRYPTO_LIB_AES_GCM` when `gcm(aes)`
+is unavailable. The module selects all of them, and the transport cipher
+stays ChaCha20-Poly1305 unless a peer enables AES explicitly.
 
 ## Table of contents
 
