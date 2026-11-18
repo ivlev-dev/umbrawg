@@ -46,6 +46,7 @@ struct uwg_peer {
 	bool timer_need_another_keepalive;
 	bool sent_lastminute_handshake;
 	struct noise_keypairs keypairs;
+	enum uwg_cipher cipher;
 	struct endpoint endpoint;
 	struct dst_cache endpoint_cache;
 	rwlock_t endpoint_lock;
