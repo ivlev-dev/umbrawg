@@ -10,10 +10,9 @@
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
-static struct workqueue_struct *uwg_aead_wq;
+#define UWG_AEAD_OPS 4
 
-struct uwg_aead {
-	struct crypto_aead *tfm;
+struct uwg_aead_op {
 	struct aead_request *req;
 	struct scatterlist sg[MAX_SKB_FRAGS + 8];
 	struct completion completion;
@@ -21,6 +20,13 @@ struct uwg_aead {
 	u8 iv[GCM_AES_IV_SIZE];
 	int result;
 };
+
+struct uwg_aead {
+	struct crypto_aead *tfm;
+	struct uwg_aead_op ops[UWG_AEAD_OPS];
+};
+
+static struct workqueue_struct *uwg_aead_wq;
 
 int uwg_aead_init(void)
 {
@@ -42,10 +48,10 @@ bool uwg_aead_queue_free(struct work_struct *work)
 
 static void uwg_aead_done(void *data, int err)
 {
-	struct uwg_aead *aead = data;
+	struct uwg_aead_op *op = data;
 
-	aead->result = err;
-	complete(&aead->completion);
+	op->result = err;
+	complete(&op->completion);
 }
 
 struct uwg_aead *uwg_aead_alloc(const u8 *key)
@@ -53,6 +59,7 @@ struct uwg_aead *uwg_aead_alloc(const u8 *key)
 	struct uwg_aead *aead;
 	struct crypto_aead *tfm;
 	int ret;
+	unsigned int i;
 
 	aead = kzalloc(sizeof(*aead), GFP_KERNEL);
 	if (!aead)
@@ -68,27 +75,35 @@ struct uwg_aead *uwg_aead_alloc(const u8 *key)
 	ret = crypto_aead_setauthsize(tfm, NOISE_AUTHTAG_LEN);
 	if (!ret)
 		ret = crypto_aead_setkey(tfm, key, NOISE_SYMMETRIC_KEY_LEN);
+	if (ret)
+		goto err;
 
-	aead->req = aead_request_alloc(tfm, GFP_KERNEL);
-	if (ret || !aead->req) {
-		if (!ret)
-			ret = -ENOMEM;
-		uwg_aead_free(aead);
-		return ERR_PTR(ret);
+	for (i = 0; i < UWG_AEAD_OPS; i++) {
+		struct uwg_aead_op *op = &aead->ops[i];
+
+		op->req = aead_request_alloc(tfm, GFP_KERNEL);
+		if (!op->req)
+			goto err;
+		init_completion(&op->completion);
+		mutex_init(&op->lock);
+		aead_request_set_callback(op->req, 0, uwg_aead_done, op);
 	}
 
-	init_completion(&aead->completion);
-	mutex_init(&aead->lock);
-	aead_request_set_callback(aead->req, 0, uwg_aead_done, aead);
 	return aead;
+err:
+	uwg_aead_free(aead);
+	return ERR_PTR(ret ?: -ENOMEM);
 }
 
 void uwg_aead_free(struct uwg_aead *aead)
 {
+	unsigned int i;
+
 	if (IS_ERR_OR_NULL(aead))
 		return;
-	if (aead->req)
-		aead_request_free(aead->req);
+	for (i = 0; i < UWG_AEAD_OPS; i++)
+		if (aead->ops[i].req)
+			aead_request_free(aead->ops[i].req);
 	if (aead->tfm)
 		crypto_free_aead(aead->tfm);
 	kfree_sensitive(aead);
@@ -99,32 +114,44 @@ static int uwg_aead_crypt(struct uwg_aead *aead, struct sk_buff *skb,
 			  u64 counter, bool encrypt)
 {
 	unsigned int total = data_len + NOISE_AUTHTAG_LEN;
+	struct uwg_aead_op *op = NULL;
 	int ret;
+	unsigned int i;
 
 	if (unlikely(skb->len < offset + total))
 		return -EINVAL;
 
-	mutex_lock(&aead->lock);
-	sg_init_table(aead->sg, ARRAY_SIZE(aead->sg));
-	if (unlikely(skb_to_sgvec(skb, aead->sg, offset, total) <= 0)) {
+	for (i = 0; i < UWG_AEAD_OPS; i++) {
+		if (mutex_trylock(&aead->ops[i].lock)) {
+			op = &aead->ops[i];
+			break;
+		}
+	}
+	if (!op) {
+		op = &aead->ops[0];
+		mutex_lock(&op->lock);
+	}
+
+	sg_init_table(op->sg, ARRAY_SIZE(op->sg));
+	if (unlikely(skb_to_sgvec(skb, op->sg, offset, total) <= 0)) {
 		ret = -EINVAL;
 		goto out;
 	}
 
-	put_unaligned_le64(counter, aead->iv + 4);
-	aead_request_set_crypt(aead->req, aead->sg, aead->sg,
-			       encrypt ? data_len : total, aead->iv);
-	aead_request_set_ad(aead->req, 0);
-	reinit_completion(&aead->completion);
-	aead->result = -EINPROGRESS;
-	ret = encrypt ? crypto_aead_encrypt(aead->req) :
-			crypto_aead_decrypt(aead->req);
+	put_unaligned_le64(counter, op->iv + 4);
+	aead_request_set_crypt(op->req, op->sg, op->sg,
+			       encrypt ? data_len : total, op->iv);
+	aead_request_set_ad(op->req, 0);
+	reinit_completion(&op->completion);
+	op->result = -EINPROGRESS;
+	ret = encrypt ? crypto_aead_encrypt(op->req) :
+			crypto_aead_decrypt(op->req);
 	if (ret == -EINPROGRESS || ret == -EBUSY) {
-		wait_for_completion(&aead->completion);
-		ret = aead->result;
+		wait_for_completion(&op->completion);
+		ret = op->result;
 	}
 out:
-	mutex_unlock(&aead->lock);
+	mutex_unlock(&op->lock);
 	return ret;
 }
 

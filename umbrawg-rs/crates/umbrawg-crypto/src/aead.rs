@@ -9,7 +9,10 @@
 //! ChaCha20-Poly1305 or AES-256-GCM, selected per peer; both use the same
 //! 32-byte key and 16-byte tag, so the wire format does not change.
 
+#[cfg(not(feature = "aes-ring"))]
 use aes_gcm::Aes256Gcm;
+#[cfg(feature = "aes-ring")]
+use ring::aead::{Aad as RingAad, LessSafeKey as RingKey, Nonce as RingNonce};
 use chacha20poly1305::aead::consts::{U12, U16, U24};
 use chacha20poly1305::aead::AeadInPlace;
 use chacha20poly1305::{ChaCha20Poly1305, KeyInit, Nonce, Tag, XChaCha20Poly1305, XNonce};
@@ -99,6 +102,73 @@ fn open_with<'a, C: AeadInPlace<NonceSize = U12, TagSize = U16>>(
         )
         .map_err(|_| Error::Authentication)?;
     Ok(plaintext)
+}
+
+#[cfg(feature = "aes-ring")]
+fn ring_seal(
+    cipher: &RingKey,
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    buffer: &mut [u8],
+) -> Result<(), Error> {
+    if buffer.len() < TAG_LEN {
+        return Err(Error::BufferTooSmall {
+            required: TAG_LEN,
+            available: buffer.len(),
+        });
+    }
+    let plaintext_len = buffer.len() - TAG_LEN;
+    let (plaintext, tag) = buffer.split_at_mut(plaintext_len);
+    let computed = cipher
+        .seal_in_place_separate_tag(
+            RingNonce::assume_unique_for_key(*nonce),
+            RingAad::from(aad),
+            plaintext,
+        )
+        .map_err(|_| Error::Encryption)?;
+    tag.copy_from_slice(computed.as_ref());
+    Ok(())
+}
+
+#[cfg(feature = "aes-ring")]
+fn ring_open<'a>(
+    cipher: &RingKey,
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    buffer: &'a mut [u8],
+) -> Result<&'a mut [u8], Error> {
+    cipher
+        .open_in_place(
+            RingNonce::assume_unique_for_key(*nonce),
+            RingAad::from(aad),
+            buffer,
+        )
+        .map_err(|_| Error::Authentication)
+}
+
+#[cfg(feature = "aes-ring")]
+fn ring_open_detached(
+    cipher: &RingKey,
+    nonce: &[u8; NONCE_LEN],
+    aad: &[u8],
+    buffer: &mut [u8],
+    tag: &[u8],
+) -> Result<(), Error> {
+    if tag.len() != TAG_LEN {
+        return Err(Error::BufferTooSmall {
+            required: TAG_LEN,
+            available: tag.len(),
+        });
+    }
+    let mut combined = vec![0u8; buffer.len() + TAG_LEN];
+    combined[..buffer.len()].copy_from_slice(buffer);
+    combined[buffer.len()..].copy_from_slice(tag);
+    let plaintext = ring_open(cipher, nonce, aad, &mut combined)?;
+    if plaintext.len() != buffer.len() {
+        return Err(Error::Authentication);
+    }
+    buffer.copy_from_slice(plaintext);
+    Ok(())
 }
 
 fn open_detached_with<C: AeadInPlace<NonceSize = U12, TagSize = U16>>(
@@ -314,7 +384,10 @@ impl Algorithm {
 
 enum Cipher {
     ChaCha(ChaCha20Poly1305),
+    #[cfg(not(feature = "aes-ring"))]
     Aes(Box<Aes256Gcm>),
+    #[cfg(feature = "aes-ring")]
+    Ring(Box<RingKey>),
 }
 
 impl Cipher {
@@ -324,10 +397,22 @@ impl Cipher {
                 ChaCha20Poly1305::new_from_slice(key.as_bytes())
                     .expect("ChaCha20-Poly1305 requires a 32-byte key"),
             ),
-            Algorithm::Aes256Gcm => Self::Aes(Box::new(
-                Aes256Gcm::new_from_slice(key.as_bytes())
-                    .expect("AES-256-GCM requires a 32-byte key"),
-            )),
+            Algorithm::Aes256Gcm => {
+                #[cfg(not(feature = "aes-ring"))]
+                {
+                    Self::Aes(Box::new(
+                        Aes256Gcm::new_from_slice(key.as_bytes())
+                            .expect("AES-256-GCM requires a 32-byte key"),
+                    ))
+                }
+                #[cfg(feature = "aes-ring")]
+                {
+                    Self::Ring(Box::new(RingKey::new(
+                        ring::aead::UnboundKey::new(&ring::aead::AES_256_GCM, key.as_bytes())
+                            .expect("AES-256-GCM requires a 32-byte key"),
+                    )))
+                }
+            }
         }
     }
 
@@ -339,7 +424,10 @@ impl Cipher {
     ) -> Result<(), Error> {
         match self {
             Self::ChaCha(cipher) => seal_with(cipher, nonce, aad, buffer),
+            #[cfg(not(feature = "aes-ring"))]
             Self::Aes(cipher) => seal_with(cipher.as_ref(), nonce, aad, buffer),
+            #[cfg(feature = "aes-ring")]
+            Self::Ring(cipher) => ring_seal(cipher.as_ref(), nonce, aad, buffer),
         }
     }
 
@@ -351,7 +439,10 @@ impl Cipher {
     ) -> Result<&'a mut [u8], Error> {
         match self {
             Self::ChaCha(cipher) => open_with(cipher, nonce, aad, buffer),
+            #[cfg(not(feature = "aes-ring"))]
             Self::Aes(cipher) => open_with(cipher.as_ref(), nonce, aad, buffer),
+            #[cfg(feature = "aes-ring")]
+            Self::Ring(cipher) => ring_open(cipher.as_ref(), nonce, aad, buffer),
         }
     }
 
@@ -366,7 +457,10 @@ impl Cipher {
             Self::ChaCha(cipher) => {
                 open_detached_with(cipher, nonce, aad, buffer, tag)
             }
+            #[cfg(not(feature = "aes-ring"))]
             Self::Aes(cipher) => open_detached_with(cipher.as_ref(), nonce, aad, buffer, tag),
+            #[cfg(feature = "aes-ring")]
+            Self::Ring(cipher) => ring_open_detached(cipher.as_ref(), nonce, aad, buffer, tag),
         }
     }
 }

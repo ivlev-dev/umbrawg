@@ -48,6 +48,10 @@ static int __init uwg_mod_init(void)
 	if (ret < 0)
 		goto err_device;
 
+	ret = uwg_aead_init();
+	if (ret < 0)
+		goto err_aead;
+
 	ret = uwg_genetlink_init();
 	if (ret < 0)
 		goto err_netlink;
@@ -56,15 +60,11 @@ static int __init uwg_mod_init(void)
 	pr_info("Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.\n");
 	pr_info("Copyright (C) 2024-2025 AmneziaVPN <admin@amnezia.org>. All Rights Reserved.\n");
 
-	ret = uwg_aead_init();
-	if (ret) {
-		uwg_genetlink_uninit();
-		goto err_device;
-	}
-
 	return 0;
 
 err_netlink:
+	uwg_aead_uninit();
+err_aead:
 	uwg_device_uninit();
 err_device:
 	uwg_peer_uninit();

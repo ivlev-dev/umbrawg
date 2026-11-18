@@ -6,11 +6,15 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+aes-ring = ["dep:ring"]
+
 [dependencies]
 aes-gcm = "0.10"
 blake2 = "0.10"
 chacha20 = "0.9"
 chacha20poly1305 = "0.10"
+ring = { version = "0.17", optional = true }
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand_core.workspace = true
 zeroize.workspace = true
