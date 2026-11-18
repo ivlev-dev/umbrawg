@@ -27,7 +27,8 @@
 
 #define UWG_TX_MAX_ENTRIES 32
 #define UWG_TX_MAX_SKBS (UWG_TX_MAX_ENTRIES * 4)
-#define UWG_GSO_SEGS_MAX 16
+#define UWG_GSO_SEGS_MAX 32
+#define UWG_GSO_MAX_BYTES 60000
 
 static void uwg_packet_send_handshake_initiation(struct uwg_peer *peer)
 {
@@ -383,7 +384,7 @@ static struct sk_buff *uwg_packet_gso_alloc(struct sk_buff **pkts,
 	unsigned int i;
 	struct sk_buff *skb;
 
-	skb = alloc_skb(DATA_PACKET_HEAD_ROOM + count * len, GFP_ATOMIC);
+	skb = alloc_skb(DATA_PACKET_HEAD_ROOM + count * len, GFP_KERNEL);
 	if (unlikely(!skb))
 		return NULL;
 
@@ -459,6 +460,8 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 			if (skbs[j]->len != len || PACKET_CB(skbs[j])->ds != ds)
 				break;
 			if (j - i >= UWG_GSO_SEGS_MAX)
+				break;
+			if ((j - i + 1) * len > UWG_GSO_MAX_BYTES)
 				break;
 		}
 
