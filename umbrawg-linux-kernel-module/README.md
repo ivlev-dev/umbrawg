@@ -5,7 +5,12 @@
 > [!IMPORTANT]
 > UmbraWG requires Linux 7.0 or newer. Older kernels are not supported.
 
-The module uses only the in-kernel cryptography API (`chacha20poly1305`, `blake2s`, `curve25519`, `chacha`) and builds against the kernel headers of the running kernel.
+The module uses only the in-kernel cryptography API (`chacha20poly1305`,
+`aes-gcm`, `blake2s`, `curve25519`, `chacha`) and builds against the kernel
+headers of the running kernel. AES-256-GCM requires
+`CONFIG_CRYPTO_LIB_AES_GCM` and `CONFIG_CRYPTO_LIB_GF128HASH`; the module
+selects both, and the transport cipher stays ChaCha20-Poly1305 unless a peer
+enables AES explicitly.
 
 ## Table of contents
 
