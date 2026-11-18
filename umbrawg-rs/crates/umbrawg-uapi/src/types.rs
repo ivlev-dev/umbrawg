@@ -27,6 +27,9 @@ pub enum ValueError {
     /// An allowed-IP prefix is malformed.
     #[error("invalid allowed IP `{0}`")]
     AllowedIp(String),
+    /// A cipher name is not `chacha20-poly1305` or `aes-256-gcm`.
+    #[error("invalid cipher `{0}`")]
+    Cipher(String),
 }
 
 /// An inclusive `u16` range written as `lo`, `hi` or `lo-hi`.
@@ -198,6 +201,70 @@ fn parse_range_parts(spec: &str) -> Option<(u64, u64)> {
 
 fn is_decimal(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+/// Data cipher of a peer, the `cipher` line of the userspace UAPI.
+///
+/// The cipher is chosen per peer, so one device may serve ChaCha20-Poly1305
+/// and AES-256-GCM peers at the same time. An absent line means
+/// [`ChaCha20Poly1305`](Self::ChaCha20Poly1305).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Cipher {
+    /// ChaCha20-Poly1305, the default WireGuard cipher.
+    #[default]
+    ChaCha20Poly1305,
+    /// AES-256-GCM.
+    Aes256Gcm,
+}
+
+impl Cipher {
+    /// Returns the canonical lowercase name used by the UAPI.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ChaCha20Poly1305 => "chacha20-poly1305",
+            Self::Aes256Gcm => "aes-256-gcm",
+        }
+    }
+
+    /// Returns the numeric `enum uwg_cipher` value of the kernel UAPI.
+    #[must_use]
+    pub const fn as_u32(self) -> u32 {
+        match self {
+            Self::ChaCha20Poly1305 => 0,
+            Self::Aes256Gcm => 1,
+        }
+    }
+
+    /// Converts a numeric `enum uwg_cipher` value.
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Option<Self> {
+        match value {
+            0 => Some(Self::ChaCha20Poly1305),
+            1 => Some(Self::Aes256Gcm),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for Cipher {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for Cipher {
+    type Err = ValueError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.eq_ignore_ascii_case(Self::ChaCha20Poly1305.as_str()) {
+            Ok(Self::ChaCha20Poly1305)
+        } else if value.eq_ignore_ascii_case(Self::Aes256Gcm.as_str()) {
+            Ok(Self::Aes256Gcm)
+        } else {
+            Err(ValueError::Cipher(value.to_owned()))
+        }
+    }
 }
 
 /// An IP address and prefix length as used by `allowed_ip` lines.
@@ -435,6 +502,10 @@ pub struct PeerSnapshot {
     /// `advanced_security` but does not enforce advanced security; `None` means
     /// the value was never configured and the line is omitted from `get=1`.
     pub advanced_security: Option<bool>,
+    /// Data cipher of the peer.
+    ///
+    /// [`Cipher::ChaCha20Poly1305`] is the default and is omitted from `get=1`.
+    pub cipher: Cipher,
     /// Allowed IP prefixes.
     pub allowed_ips: Vec<AllowedIp>,
 }
@@ -451,6 +522,7 @@ impl Default for PeerSnapshot {
             rx_bytes: 0,
             persistent_keepalive_interval: U16Range::default(),
             advanced_security: None,
+            cipher: Cipher::ChaCha20Poly1305,
             allowed_ips: Vec::new(),
         }
     }
@@ -627,6 +699,8 @@ pub struct PeerRequest {
     /// userspace daemon has no advanced-security implementation. Real
     /// enforcement requires the kernel module.
     pub advanced_security: Option<bool>,
+    /// New data cipher; `None` keeps the current one.
+    pub cipher: Option<Cipher>,
     /// Drop all existing allowed IPs before applying [`Self::allowed_ips`].
     pub replace_allowed_ips: bool,
     /// Allowed-IP modifications in request order.
@@ -647,6 +721,7 @@ impl PeerRequest {
             endpoint: None,
             persistent_keepalive_interval: None,
             advanced_security: None,
+            cipher: None,
             replace_allowed_ips: false,
             allowed_ips: Vec::new(),
             protocol_version: None,
@@ -692,6 +767,33 @@ pub trait DeviceControl {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_cipher_names() {
+        assert_eq!(
+            "chacha20-poly1305".parse::<Cipher>().expect("valid"),
+            Cipher::ChaCha20Poly1305
+        );
+        assert_eq!(
+            "AES-256-GCM".parse::<Cipher>().expect("valid"),
+            Cipher::Aes256Gcm
+        );
+        for value in ["", "aes", "gcm", "chacha20poly1305"] {
+            assert!(value.parse::<Cipher>().is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn formats_and_maps_cipher_values() {
+        assert_eq!(Cipher::default(), Cipher::ChaCha20Poly1305);
+        assert_eq!(Cipher::ChaCha20Poly1305.to_string(), "chacha20-poly1305");
+        assert_eq!(Cipher::Aes256Gcm.to_string(), "aes-256-gcm");
+        assert_eq!(Cipher::ChaCha20Poly1305.as_u32(), 0);
+        assert_eq!(Cipher::Aes256Gcm.as_u32(), 1);
+        assert_eq!(Cipher::from_u32(0), Some(Cipher::ChaCha20Poly1305));
+        assert_eq!(Cipher::from_u32(1), Some(Cipher::Aes256Gcm));
+        assert_eq!(Cipher::from_u32(2), None);
+    }
 
     #[test]
     fn parses_u16_ranges() {

@@ -11,6 +11,7 @@
 #include "noise.h"
 #include "cookie.h"
 #include "type.h"
+#include "uapi/umbrawg.h"
 
 #include <linux/types.h>
 #include <linux/netfilter.h>
@@ -60,6 +61,7 @@ struct uwg_peer {
 	unsigned int timer_handshake_attempts;
 	unsigned int max_handshake_attempts;
 	u32 persistent_keepalive_interval;
+	enum uwg_cipher cipher;
 	struct timespec64 walltime_last_handshake;
 	struct kref refcount;
 	struct rcu_head rcu;

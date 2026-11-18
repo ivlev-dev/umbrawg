@@ -92,6 +92,20 @@ pub const UWGPEER_A_PROTOCOL_VERSION: u16 = 10;
 /// kernel mirrors the setting in `UWGPEER_A_FLAGS`.
 pub const UWGPEER_A_ADVANCED_SECURITY: u16 = 11;
 
+/// `UWGPEER_A_CIPHER`: `u32` data cipher of the peer, one of the
+/// `UWG_CIPHER_*` values.
+///
+/// An absent attribute means
+/// [`UWG_CIPHER_CHACHA20POLY1305`].
+pub const UWGPEER_A_CIPHER: u16 = 12;
+
+/// `UWG_CIPHER_CHACHA20POLY1305`: ChaCha20-Poly1305 transport cipher, the
+/// default.
+pub const UWG_CIPHER_CHACHA20POLY1305: u32 = 0;
+
+/// `UWG_CIPHER_AES256GCM`: AES-256-GCM transport cipher.
+pub const UWG_CIPHER_AES256GCM: u32 = 1;
+
 /// Placeholder allowed IP attribute; never used on the wire.
 pub const UWGALLOWEDIP_A_UNSPEC: u16 = 0;
 

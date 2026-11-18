@@ -12,7 +12,8 @@ use umbrawg_proto::SpecialPacket;
 
 use crate::error::{invalid_value, UapiError};
 use crate::types::{
-    AllowedIp, AllowedIpChange, PeerRequest, SetRequest, SpecialPacketUpdate, U16Range, U32Range,
+    AllowedIp, AllowedIpChange, Cipher, PeerRequest, SetRequest, SpecialPacketUpdate, U16Range,
+    U32Range,
 };
 
 /// Maximum accepted length of a single UAPI line.
@@ -177,6 +178,13 @@ fn apply_peer_line(peer: &mut PeerRequest, key: &str, value: &str) -> Result<(),
         }
         "advanced_security" => {
             peer.advanced_security = Some(parse_bool(key, value)?);
+        }
+        "cipher" => {
+            peer.cipher = Some(
+                value
+                    .parse::<Cipher>()
+                    .map_err(|_| invalid_value(key, value))?,
+            );
         }
         "replace_allowed_ips" => {
             require_true(key, value)?;
@@ -474,6 +482,23 @@ allowed_ip=fd00::/64
         ];
         for case in cases {
             assert!(parse(case).is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn parses_peer_cipher() {
+        let key = "public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\n";
+        let request = format!("{key}cipher=aes-256-gcm\n\n");
+        let parsed = parse(&request).expect("valid cipher");
+        assert_eq!(parsed.peers[0].cipher, Some(Cipher::Aes256Gcm));
+
+        let request = format!("{key}cipher=CHACHA20-POLY1305\n\n");
+        let parsed = parse(&request).expect("valid cipher");
+        assert_eq!(parsed.peers[0].cipher, Some(Cipher::ChaCha20Poly1305));
+
+        for value in ["aes", "", "gcm"] {
+            let request = format!("{key}cipher={value}\n\n");
+            assert!(parse(&request).is_err(), "{value}");
         }
     }
 

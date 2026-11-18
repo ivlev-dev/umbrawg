@@ -9,6 +9,7 @@ use parking_lot::{Mutex, RwLock};
 use umbrawg_crypto::{Key, PublicKey};
 use umbrawg_noise::{CookieGenerator, Handshake, HandshakeState, StaticIdentity};
 use umbrawg_proto::messages::limits::{DEFAULT_UDP_WINDOW, MAX_STAGED_PACKETS};
+use umbrawg_uapi::Cipher;
 
 use crate::allowedips::{AllowedIp, PeerId};
 use crate::buffer::Buffer;
@@ -22,6 +23,7 @@ pub struct PeerConfig {
     pub endpoint: Option<SocketAddr>,
     pub persistent_keepalive: Option<u16>,
     pub allowed_ips: Vec<AllowedIp>,
+    pub cipher: Cipher,
 }
 
 impl PeerConfig {
@@ -33,6 +35,7 @@ impl PeerConfig {
             endpoint: None,
             persistent_keepalive: None,
             allowed_ips: Vec::new(),
+            cipher: Cipher::ChaCha20Poly1305,
         }
     }
 }
@@ -135,6 +138,7 @@ pub struct Peer {
     last_handshake_ns: AtomicU64,
     persistent_keepalive: AtomicU32,
     advanced_security: AtomicU8,
+    cipher: AtomicU8,
     special_counter: AtomicU32,
     pub(crate) handshake: Mutex<PeerHandshake>,
     pub(crate) keypairs: RwLock<Keypairs>,
@@ -154,6 +158,7 @@ impl Peer {
             .persistent_keepalive
             .filter(|value| *value != 0)
             .map_or(0, |value| (u32::from(value) << 16) | u32::from(value));
+        let cipher = config.cipher.as_u32() as u8;
         Self {
             id,
             public_key,
@@ -167,6 +172,7 @@ impl Peer {
             last_handshake_ns: AtomicU64::new(0),
             persistent_keepalive: AtomicU32::new(persistent_keepalive),
             advanced_security: AtomicU8::new(ADVANCED_SECURITY_UNKNOWN),
+            cipher: AtomicU8::new(cipher),
             special_counter: AtomicU32::new(0),
             handshake: Mutex::new(PeerHandshake {
                 noise,
@@ -353,6 +359,20 @@ impl Peer {
         self.advanced_security.store(encoded, Ordering::Relaxed);
     }
 
+    /// Returns the data cipher configured for the peer.
+    #[must_use]
+    pub fn cipher(&self) -> Cipher {
+        Cipher::from_u32(u32::from(self.cipher.load(Ordering::Relaxed))).unwrap_or_default()
+    }
+
+    /// Stores the data cipher of the peer.
+    ///
+    /// The transport keypair layer reads this value when it selects the AEAD
+    /// algorithm; until then the setting only round-trips through the UAPI.
+    pub fn set_cipher(&self, cipher: Cipher) {
+        self.cipher.store(cipher.as_u32() as u8, Ordering::Relaxed);
+    }
+
     #[must_use]
     pub fn state(&self, now: Instant, keychain_expire: Duration) -> PeerState {
         if !self.running() {
@@ -526,6 +546,24 @@ mod tests {
         assert_eq!(peer.advanced_security(), Some(false));
         peer.set_advanced_security(None);
         assert_eq!(peer.advanced_security(), None);
+    }
+
+    #[test]
+    fn cipher_defaults_to_chacha_and_is_stored() {
+        let peer = peer();
+        assert_eq!(peer.cipher(), Cipher::ChaCha20Poly1305);
+        peer.set_cipher(Cipher::Aes256Gcm);
+        assert_eq!(peer.cipher(), Cipher::Aes256Gcm);
+        peer.set_cipher(Cipher::ChaCha20Poly1305);
+        assert_eq!(peer.cipher(), Cipher::ChaCha20Poly1305);
+    }
+
+    #[test]
+    fn peer_uses_configured_cipher() {
+        let mut config = PeerConfig::new(PublicKey::from_bytes([8u8; 32]));
+        config.cipher = Cipher::Aes256Gcm;
+        let peer = Peer::new(PeerId::new_unchecked(2), config, None);
+        assert_eq!(peer.cipher(), Cipher::Aes256Gcm);
     }
 
     #[test]

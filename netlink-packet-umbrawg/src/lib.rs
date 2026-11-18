@@ -116,6 +116,7 @@ pub mod range;
 
 mod allowedip;
 mod attribute;
+mod cipher;
 mod device;
 mod error;
 mod message;
@@ -129,6 +130,7 @@ mod test;
 pub use self::{
     allowedip::{UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr},
     attribute::UmbrawgAttribute,
+    cipher::UmbrawgCipher,
     device::{
         UmbrawgDeviceConfig, UmbrawgMagicHeader, HEADER_PROTECTION_NONCE_LEN,
         INTERMEDIATE_SPEC_MAX_LEN,

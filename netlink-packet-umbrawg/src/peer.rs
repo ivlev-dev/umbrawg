@@ -17,13 +17,13 @@ use super::{
 };
 use crate::{
     constants::{
-        UWGPEER_A_ADVANCED_SECURITY, UWGPEER_A_ALLOWEDIPS, UWGPEER_A_ENDPOINT,
-        UWGPEER_A_FLAGS, UWGPEER_A_LAST_HANDSHAKE_TIME,
+        UWGPEER_A_ADVANCED_SECURITY, UWGPEER_A_ALLOWEDIPS, UWGPEER_A_CIPHER,
+        UWGPEER_A_ENDPOINT, UWGPEER_A_FLAGS, UWGPEER_A_LAST_HANDSHAKE_TIME,
         UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL, UWGPEER_A_PRESHARED_KEY,
         UWGPEER_A_PROTOCOL_VERSION, UWGPEER_A_PUBLIC_KEY, UWGPEER_A_RX_BYTES,
         UWGPEER_A_TX_BYTES,
     },
-    UmbrawgAllowedIp,
+    UmbrawgAllowedIp, UmbrawgCipher,
 };
 
 pub(crate) struct UmbrawgPeers(pub(crate) Vec<UmbrawgPeer>);
@@ -214,6 +214,13 @@ pub enum UmbrawgPeerAttribute {
     /// [`Flags`](Self::Flags) via
     /// [`UWGPEER_F_HAS_ADVANCED_SECURITY`](crate::constants::UWGPEER_F_HAS_ADVANCED_SECURITY).
     AdvancedSecurity(bool),
+    /// `UWGPEER_A_CIPHER`: data cipher of the peer.
+    ///
+    /// Absent means [`UmbrawgCipher::ChaCha20Poly1305`]. The kernel reports
+    /// the value it uses and accepts it on input; only
+    /// [`ChaCha20Poly1305`](UmbrawgCipher::ChaCha20Poly1305) and
+    /// [`Aes256Gcm`](UmbrawgCipher::Aes256Gcm) are valid.
+    Cipher(UmbrawgCipher),
     /// An attribute this crate does not know; kept verbatim.
     Other(DefaultNla),
 }
@@ -236,6 +243,7 @@ impl Nla for UmbrawgPeerAttribute {
             Self::ProtocolVersion(v) => size_of_val(v),
             Self::Flags(v) => size_of_val(v),
             Self::AdvancedSecurity(_) => 0,
+            Self::Cipher(_) => 4,
             Self::Other(v) => v.value_len(),
         }
     }
@@ -256,6 +264,7 @@ impl Nla for UmbrawgPeerAttribute {
             Self::ProtocolVersion(_) => UWGPEER_A_PROTOCOL_VERSION,
             Self::Flags(_) => UWGPEER_A_FLAGS,
             Self::AdvancedSecurity(_) => UWGPEER_A_ADVANCED_SECURITY,
+            Self::Cipher(_) => UWGPEER_A_CIPHER,
             Self::Other(v) => v.kind(),
         }
     }
@@ -274,6 +283,7 @@ impl Nla for UmbrawgPeerAttribute {
             Self::ProtocolVersion(v) => emit_u32(buffer, *v).unwrap(),
             Self::Flags(v) => emit_u32(buffer, *v).unwrap(),
             Self::AdvancedSecurity(_) => {}
+            Self::Cipher(v) => emit_u32(buffer, v.as_u32()).unwrap(),
             Self::Other(v) => v.emit_value(buffer),
         }
     }
@@ -353,6 +363,17 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 parse_u32(payload).context("invalid UWGPEER_A_FLAGS value")?,
             ),
             UWGPEER_A_ADVANCED_SECURITY => Self::AdvancedSecurity(true),
+            UWGPEER_A_CIPHER => {
+                let value = parse_u32(payload)
+                    .context("invalid UWGPEER_A_CIPHER value")?;
+                Self::Cipher(UmbrawgCipher::from_u32(value).ok_or_else(
+                    || {
+                        DecodeError::from(format!(
+                            "invalid UWGPEER_A_CIPHER value {value}"
+                        ))
+                    },
+                )?)
+            }
             kind => Self::Other(
                 DefaultNla::parse(buf)
                     .context(format!("unknown NLA type {kind}"))?,

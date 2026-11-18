@@ -36,8 +36,9 @@ pub use ratelimiter::RateLimiter;
 pub use replay::{AtomicReplayFilter, ReplayFilter, REPLAY_WINDOW_BITS};
 pub use timers::{Range16, TimerKind, Timers, Timings, TIMER_COUNT};
 pub use umbrawg_uapi::{
-    AllowedIpChange, DeviceControl, DeviceSnapshot, ObfuscationRequest, ObfuscationSnapshot,
-    PeerRequest, PeerSnapshot, SetRequest, SpecialPacketUpdate, TimingRequest, TimingSnapshot,
+    AllowedIpChange, Cipher, DeviceControl, DeviceSnapshot, ObfuscationRequest,
+    ObfuscationSnapshot, PeerRequest, PeerSnapshot, SetRequest, SpecialPacketUpdate, TimingRequest,
+    TimingSnapshot,
 };
 pub use underload::{UnderLoadDetector, DEFAULT_UNDER_LOAD_PPS, MIN_UNDER_LOAD_PPS};
 

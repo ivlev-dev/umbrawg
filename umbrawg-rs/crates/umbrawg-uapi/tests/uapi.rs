@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use umbrawg_crypto::{Key, PublicKey};
 use umbrawg_uapi::{
-    format_get_response, AllowedIp, AllowedIpChange, DeviceControl, DeviceSnapshot,
+    format_get_response, AllowedIp, AllowedIpChange, Cipher, DeviceControl, DeviceSnapshot,
     ObfuscationSnapshot, PeerSnapshot, ServerHandle, SetRequest, SpecialPacketUpdate,
     TimingSnapshot, U16Range, UapiError, UapiListener,
 };
@@ -104,6 +104,7 @@ struct MockPeer {
     endpoint: Option<SocketAddr>,
     persistent_keepalive: U16Range,
     advanced_security: Option<bool>,
+    cipher: Cipher,
     allowed_ips: Vec<AllowedIp>,
 }
 
@@ -115,6 +116,7 @@ impl MockPeer {
             endpoint: None,
             persistent_keepalive: U16Range::default(),
             advanced_security: None,
+            cipher: Cipher::ChaCha20Poly1305,
             allowed_ips: Vec::new(),
         }
     }
@@ -164,6 +166,7 @@ impl DeviceControl for MockControl {
                     rx_bytes: 0,
                     persistent_keepalive_interval: peer.persistent_keepalive,
                     advanced_security: peer.advanced_security,
+                    cipher: peer.cipher,
                     allowed_ips: peer.allowed_ips.clone(),
                 })
                 .collect(),
@@ -287,6 +290,9 @@ impl DeviceControl for MockControl {
             }
             if let Some(value) = peer.advanced_security {
                 slot.advanced_security = Some(value);
+            }
+            if let Some(cipher) = peer.cipher {
+                slot.cipher = cipher;
             }
             if peer.replace_allowed_ips {
                 slot.allowed_ips.clear();
@@ -466,6 +472,57 @@ fn round_trips_every_31_field() {
     drop(stream);
     handle.join().expect("listener thread");
     assert!(!socket_path.exists(), "socket must be removed on shutdown");
+}
+
+#[test]
+fn round_trips_cipher_over_the_socket() {
+    let directory = TempDir::new("cipher");
+    let control = MockControl::new();
+    let handle = spawn_as_current_user(
+        UapiListener::bind(directory.path(), "uwg0").expect("bind"),
+        control,
+    );
+    let socket_path = directory.path().join("uwg0.sock");
+
+    let mut stream = UnixStream::connect(&socket_path).expect("connect");
+    let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+
+    stream
+        .write_all(
+            b"set=1\npublic_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ncipher=aes-256-gcm\n\n",
+        )
+        .expect("set");
+    assert_eq!(read_response(&mut reader), "errno=0\n");
+
+    stream.write_all(b"get=1\n\n").expect("get");
+    let response = read_response(&mut reader);
+    assert!(response.contains("cipher=aes-256-gcm\n"), "{response}");
+
+    stream
+        .write_all(
+            b"set=1\npublic_key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\ncipher=chacha20-poly1305\n\n",
+        )
+        .expect("set");
+    assert_eq!(read_response(&mut reader), "errno=0\n");
+
+    stream.write_all(b"get=1\n\n").expect("get");
+    let response = read_response(&mut reader);
+    assert!(!response.contains("cipher="), "{response}");
+
+    stream
+        .write_all(
+            b"set=1\npublic_key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n\n",
+        )
+        .expect("set");
+    assert_eq!(read_response(&mut reader), "errno=0\n");
+
+    stream.write_all(b"get=1\n\n").expect("get");
+    let response = read_response(&mut reader);
+    assert!(!response.contains("cipher="), "{response}");
+
+    drop(reader);
+    drop(stream);
+    handle.join().expect("listener thread");
 }
 
 #[test]

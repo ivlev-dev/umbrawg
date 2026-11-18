@@ -12,10 +12,10 @@ use netlink_packet_umbrawg::constants::{
     UWGPEER_F_HAS_ADVANCED_SECURITY, UWGPEER_F_REMOVE_ME, UWGPEER_F_REPLACE_ALLOWEDIPS,
 };
 use netlink_packet_umbrawg::{
-    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCmd,
-    UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
+    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCipher,
+    UmbrawgCmd, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
 };
-use umbrawg_config::{AllowedIp, Key, U16Range, U32Range};
+use umbrawg_config::{AllowedIp, Cipher, Key, U16Range, U32Range};
 
 use crate::error::Error;
 use crate::model::{Device, Peer, SetDevice, TimeSpec};
@@ -349,6 +349,9 @@ fn peer_attributes(peer: &umbrawg_config::PeerConfig, version: u32) -> Result<Um
     if peer.advanced_security == Some(true) {
         attributes.push(UmbrawgPeerAttribute::AdvancedSecurity(true));
     }
+    if let Some(cipher) = peer.cipher {
+        attributes.push(UmbrawgPeerAttribute::Cipher(cipher_attributes(cipher)));
+    }
     if let Some(allowed_ips) = &peer.allowed_ips {
         if !allowed_ips.is_empty() {
             attributes.push(UmbrawgPeerAttribute::AllowedIps(
@@ -357,6 +360,13 @@ fn peer_attributes(peer: &umbrawg_config::PeerConfig, version: u32) -> Result<Um
         }
     }
     Ok(UmbrawgPeer(attributes))
+}
+
+fn cipher_attributes(cipher: Cipher) -> UmbrawgCipher {
+    match cipher {
+        Cipher::ChaCha20Poly1305 => UmbrawgCipher::ChaCha20Poly1305,
+        Cipher::Aes256Gcm => UmbrawgCipher::Aes256Gcm,
+    }
 }
 
 fn allowed_ip_attributes(allowed_ip: &AllowedIp) -> UmbrawgAllowedIp {
@@ -531,6 +541,12 @@ impl DeviceBuilder {
                         target.advanced_security = Some(false);
                     }
                 }
+                UmbrawgPeerAttribute::Cipher(cipher) => {
+                    target.cipher = match cipher {
+                        UmbrawgCipher::ChaCha20Poly1305 => Some(Cipher::ChaCha20Poly1305),
+                        UmbrawgCipher::Aes256Gcm => Some(Cipher::Aes256Gcm),
+                    };
+                }
                 _ => {}
             }
         }
@@ -586,6 +602,7 @@ mod tests {
             )
             .expect("valid"),
             preshared_key: None,
+            cipher: Some(Cipher::Aes256Gcm),
             advanced_security: None,
             allowed_ips: Some(vec!["10.0.0.0/8".parse().expect("valid")]),
             endpoint: Some("192.0.2.1:51820".parse().expect("valid")),
@@ -603,6 +620,7 @@ mod tests {
             )
             .expect("valid"),
             preshared_key: None,
+            cipher: None,
             advanced_security: None,
             allowed_ips: None,
             endpoint: None,
@@ -636,6 +654,9 @@ mod tests {
         assert!(peers[0]
             .0
             .contains(&UmbrawgPeerAttribute::Flags(UWGPEER_F_REPLACE_ALLOWEDIPS)));
+        assert!(peers[0]
+            .0
+            .contains(&UmbrawgPeerAttribute::Cipher(UmbrawgCipher::Aes256Gcm)));
     }
 
     #[test]
@@ -751,6 +772,7 @@ mod tests {
             config.peers.push(umbrawg_config::PeerConfig {
                 public_key: Key::from_bytes(key),
                 preshared_key: None,
+                cipher: None,
                 advanced_security: None,
                 allowed_ips: Some(vec!["10.0.0.0/8".parse().expect("valid")]),
                 endpoint: None,
@@ -821,6 +843,7 @@ mod tests {
                     }),
                     UmbrawgPeerAttribute::RxBytes(10),
                     UmbrawgPeerAttribute::TxBytes(20),
+                    UmbrawgPeerAttribute::Cipher(UmbrawgCipher::Aes256Gcm),
                 ])]),
             ],
         };
@@ -853,6 +876,7 @@ mod tests {
         assert_eq!(peer.rx_bytes, 10);
         assert_eq!(peer.tx_bytes, 20);
         assert_eq!(peer.advanced_security, Some(true));
+        assert_eq!(peer.cipher, Some(Cipher::Aes256Gcm));
     }
 
     #[test]
@@ -916,6 +940,47 @@ mod tests {
             UmbrawgPeerAttribute::AdvancedSecurity(true),
         ]));
         assert_eq!(device.peers[0].advanced_security, Some(true));
+    }
+
+    #[test]
+    fn reads_cipher_from_peer_attribute() {
+        let key = Key::from_bytes([7u8; 32]);
+        let device = peer_device(UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey(key.to_bytes()),
+            UmbrawgPeerAttribute::Cipher(UmbrawgCipher::Aes256Gcm),
+        ]));
+        assert_eq!(device.peers[0].cipher, Some(Cipher::Aes256Gcm));
+
+        let device = peer_device(UmbrawgPeer(vec![UmbrawgPeerAttribute::PublicKey(
+            key.to_bytes(),
+        )]));
+        assert_eq!(device.peers[0].cipher, None);
+    }
+
+    #[test]
+    fn sends_cipher_for_configured_peers_only() {
+        let mut config = config();
+        assert!(sent_peer_from(&config)
+            .0
+            .contains(&UmbrawgPeerAttribute::Cipher(UmbrawgCipher::Aes256Gcm)));
+
+        config.peers[0].cipher = None;
+        assert!(!sent_peer_from(&config)
+            .0
+            .iter()
+            .any(|attribute| matches!(attribute, UmbrawgPeerAttribute::Cipher(_))));
+    }
+
+    fn sent_peer_from(config: &SetDevice) -> UmbrawgPeer {
+        let messages = build_set_messages(config, 3).expect("valid");
+        messages[0]
+            .attributes
+            .iter()
+            .find_map(|attribute| match attribute {
+                UmbrawgAttribute::Peers(peers) => Some(peers[0].clone()),
+                _ => None,
+            })
+            .expect("peer")
     }
 
     fn sent_peer(advanced_security: Option<bool>) -> UmbrawgPeer {

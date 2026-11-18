@@ -807,6 +807,7 @@ mod tests {
             tx_bytes: 10,
             allowed_ips: vec!["10.0.0.0/8".parse::<AllowedIp>().expect("valid")],
             advanced_security: Some(true),
+            cipher: None,
         });
         device
     }
