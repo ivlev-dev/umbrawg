@@ -345,7 +345,7 @@ make_configs() {
     local peers=$2
     local out0=$3
     local out1=$4
-    local k0 k1 p0 p1 obfblock extra0 extra1 i
+    local k0 k1 p0 p1 obfblock extra0 extra1 i cipherblock
     k0=$("$UWG" genkey)
     k1=$("$UWG" genkey)
     p0=$(printf '%s' "$k0" | "$UWG" pubkey)
@@ -353,6 +353,10 @@ make_configs() {
     obfblock=""
     if [ "$obf" = "1" ]; then
         obfblock=$(grep -vE '^(PrivateKey|ListenPort|PublicKey|AllowedIPs|\[Peer\]|\[Interface\])' "$OBF" || true)
+    fi
+    cipherblock=""
+    if [ -n "${CIPHER:-}" ]; then
+        cipherblock="Cipher = $CIPHER"
     fi
     extra0=""
     extra1=""
@@ -373,10 +377,10 @@ PublicKey = $pk0
 AllowedIPs = 10.98.$i.0/24"
         i=$((i + 1))
     done
-    printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.2:%s\nPersistentKeepalive = 5\n%s\n' \
-        "$k0" "$PORT0" "$obfblock" "$p1" "$PORT1" "$extra0" > "$out0"
-    printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.1:%s\nPersistentKeepalive = 5\n%s\n' \
-        "$k1" "$PORT1" "$obfblock" "$p0" "$PORT0" "$extra1" > "$out1"
+    printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.2:%s\nPersistentKeepalive = 5\n%s\n%s\n' \
+        "$k0" "$PORT0" "$obfblock" "$p1" "$PORT1" "$cipherblock" "$extra0" > "$out0"
+    printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.1:%s\nPersistentKeepalive = 5\n%s\n%s\n' \
+        "$k1" "$PORT1" "$obfblock" "$p0" "$PORT0" "$cipherblock" "$extra1" > "$out1"
 }
 
 bring_up_addrs() {

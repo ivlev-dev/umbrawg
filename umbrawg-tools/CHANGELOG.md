@@ -7,6 +7,12 @@
 
 ### Добавлено
 
+- `Cipher` в `[Peer]` и `uwg set <if> peer <key> cipher
+  chacha20-poly1305|aes-256-gcm`: выбор шифра transport-пакетов для модуля
+  ядра и демона. По умолчанию ChaCha20-Poly1305; `showconf` печатает
+  `Cipher` только для не-дефолтного значения, `show` — отдельной строкой.
+  Для kernel-интерфейсов значение уходит netlink-атрибутом
+  `UWGPEER_A_CIPHER`, для userspace — ключом UAPI `cipher=`.
 - `AdvancedSecurity` пира передаётся в userspace UAPI: `uwg set` и
   `uwg setconf`/`addconf`/`syncconf` отправляют `advanced_security=1|0`
   (явный `off` — это `0`, отсутствие ключа в файле — ключ не отправляется).

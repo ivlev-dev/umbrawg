@@ -5,6 +5,14 @@
 
 ## [Не выпущено]
 
+### Добавлено
+
+- Per-peer выбор шифра transport-пакетов: `UWGPEER_A_CIPHER` и
+  `enum uwg_cipher` (ChaCha20-Poly1305 по умолчанию, AES-256-GCM).
+  AES реализован через `aes_gcm_*` (AES-NI, ARMv8 Crypto Extensions,
+  GF128HASH/PCLMUL), handshake, cookie, обфускация и формат провода не
+  изменились; один сервер обслуживает пиров с разными шифрами одновременно.
+
 ## [3.1.20261113-02] — 2026-11-13
 
 Первый релиз UmbraWG (форк AmneziaWG).
