@@ -148,8 +148,8 @@ TCP через туннель. Проверяются `under_load=1`, отсут
   размеры сообщений не меняются; ключ сессии используется напрямую в обоих
   AEAD, поэтому Rust, ядро и совместимые реализации расшифровывают пакеты друг
   друга при одинаковом значении `Cipher` на обеих сторонах. AES-256-GCM
-  использует `ring` (feature `aes-ring`, по умолчанию в демоне) с fallback на
-  RustCrypto `aes-gcm`; ChaCha остаётся на RustCrypto.
+  использует `ring` (features `aes-ring` и `ring-chacha`, по умолчанию в
+  демоне) с fallback на RustCrypto; ChaCha и AES на стенде обгоняют `go`.
 
 ## Быстрый путь (fast path)
 

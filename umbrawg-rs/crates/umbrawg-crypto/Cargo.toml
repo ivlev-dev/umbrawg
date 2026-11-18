@@ -8,6 +8,7 @@ repository.workspace = true
 
 [features]
 aes-ring = ["dep:ring"]
+ring-chacha = ["dep:ring"]
 
 [dependencies]
 aes-gcm = "0.10"

@@ -11,7 +11,7 @@
 
 #[cfg(not(feature = "aes-ring"))]
 use aes_gcm::Aes256Gcm;
-#[cfg(feature = "aes-ring")]
+#[cfg(any(feature = "aes-ring", feature = "ring-chacha"))]
 use ring::aead::{Aad as RingAad, LessSafeKey as RingKey, Nonce as RingNonce};
 use chacha20poly1305::aead::consts::{U12, U16, U24};
 use chacha20poly1305::aead::AeadInPlace;
@@ -104,7 +104,7 @@ fn open_with<'a, C: AeadInPlace<NonceSize = U12, TagSize = U16>>(
     Ok(plaintext)
 }
 
-#[cfg(feature = "aes-ring")]
+#[cfg(any(feature = "aes-ring", feature = "ring-chacha"))]
 fn ring_seal(
     cipher: &RingKey,
     nonce: &[u8; NONCE_LEN],
@@ -130,7 +130,7 @@ fn ring_seal(
     Ok(())
 }
 
-#[cfg(feature = "aes-ring")]
+#[cfg(any(feature = "aes-ring", feature = "ring-chacha"))]
 fn ring_open<'a>(
     cipher: &RingKey,
     nonce: &[u8; NONCE_LEN],
@@ -146,7 +146,7 @@ fn ring_open<'a>(
         .map_err(|_| Error::Authentication)
 }
 
-#[cfg(feature = "aes-ring")]
+#[cfg(any(feature = "aes-ring", feature = "ring-chacha"))]
 fn ring_open_detached(
     cipher: &RingKey,
     nonce: &[u8; NONCE_LEN],
@@ -171,6 +171,7 @@ fn ring_open_detached(
     Ok(())
 }
 
+#[cfg(any(not(feature = "aes-ring"), not(feature = "ring-chacha")))]
 fn open_detached_with<C: AeadInPlace<NonceSize = U12, TagSize = U16>>(
     cipher: &C,
     nonce: &[u8; NONCE_LEN],
@@ -383,20 +384,36 @@ impl Algorithm {
 }
 
 enum Cipher {
+    #[cfg(not(feature = "ring-chacha"))]
     ChaCha(ChaCha20Poly1305),
     #[cfg(not(feature = "aes-ring"))]
     Aes(Box<Aes256Gcm>),
-    #[cfg(feature = "aes-ring")]
+    #[cfg(any(feature = "aes-ring", feature = "ring-chacha"))]
     Ring(Box<RingKey>),
 }
 
 impl Cipher {
     fn new(algorithm: Algorithm, key: &Key) -> Self {
         match algorithm {
-            Algorithm::ChaCha20Poly1305 => Self::ChaCha(
-                ChaCha20Poly1305::new_from_slice(key.as_bytes())
-                    .expect("ChaCha20-Poly1305 requires a 32-byte key"),
-            ),
+            Algorithm::ChaCha20Poly1305 => {
+                #[cfg(not(feature = "ring-chacha"))]
+                {
+                    Self::ChaCha(
+                        ChaCha20Poly1305::new_from_slice(key.as_bytes())
+                            .expect("ChaCha20-Poly1305 requires a 32-byte key"),
+                    )
+                }
+                #[cfg(feature = "ring-chacha")]
+                {
+                    Self::Ring(Box::new(RingKey::new(
+                        ring::aead::UnboundKey::new(
+                            &ring::aead::CHACHA20_POLY1305,
+                            key.as_bytes(),
+                        )
+                        .expect("ChaCha20-Poly1305 requires a 32-byte key"),
+                    )))
+                }
+            }
             Algorithm::Aes256Gcm => {
                 #[cfg(not(feature = "aes-ring"))]
                 {
@@ -423,10 +440,11 @@ impl Cipher {
         buffer: &mut [u8],
     ) -> Result<(), Error> {
         match self {
+            #[cfg(not(feature = "ring-chacha"))]
             Self::ChaCha(cipher) => seal_with(cipher, nonce, aad, buffer),
             #[cfg(not(feature = "aes-ring"))]
             Self::Aes(cipher) => seal_with(cipher.as_ref(), nonce, aad, buffer),
-            #[cfg(feature = "aes-ring")]
+            #[cfg(any(feature = "aes-ring", feature = "ring-chacha"))]
             Self::Ring(cipher) => ring_seal(cipher.as_ref(), nonce, aad, buffer),
         }
     }
@@ -438,10 +456,11 @@ impl Cipher {
         buffer: &'a mut [u8],
     ) -> Result<&'a mut [u8], Error> {
         match self {
+            #[cfg(not(feature = "ring-chacha"))]
             Self::ChaCha(cipher) => open_with(cipher, nonce, aad, buffer),
             #[cfg(not(feature = "aes-ring"))]
             Self::Aes(cipher) => open_with(cipher.as_ref(), nonce, aad, buffer),
-            #[cfg(feature = "aes-ring")]
+            #[cfg(any(feature = "aes-ring", feature = "ring-chacha"))]
             Self::Ring(cipher) => ring_open(cipher.as_ref(), nonce, aad, buffer),
         }
     }
@@ -454,12 +473,13 @@ impl Cipher {
         tag: &[u8],
     ) -> Result<(), Error> {
         match self {
+            #[cfg(not(feature = "ring-chacha"))]
             Self::ChaCha(cipher) => {
                 open_detached_with(cipher, nonce, aad, buffer, tag)
             }
             #[cfg(not(feature = "aes-ring"))]
             Self::Aes(cipher) => open_detached_with(cipher.as_ref(), nonce, aad, buffer, tag),
-            #[cfg(feature = "aes-ring")]
+            #[cfg(any(feature = "aes-ring", feature = "ring-chacha"))]
             Self::Ring(cipher) => ring_open_detached(cipher.as_ref(), nonce, aad, buffer, tag),
         }
     }

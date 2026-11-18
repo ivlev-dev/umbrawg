@@ -8,6 +8,7 @@ repository.workspace = true
 
 [features]
 aes-ring = ["umbrawg-crypto/aes-ring"]
+ring-chacha = ["umbrawg-crypto/ring-chacha"]
 
 [dependencies]
 umbrawg-crypto.workspace = true

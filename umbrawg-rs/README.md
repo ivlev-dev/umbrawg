@@ -556,12 +556,13 @@ Cipher = aes-256-gcm
 Шифр должен совпадать на обеих сторонах, иначе handshake проходит, а
 transport-пакеты отбрасываются.
 
-AES-256-GCM в демоне по умолчанию считается через `ring` (feature
-`aes-ring`, включён в `umbrawg`): на стенде это дало ~6.0 Гбит/с против
-~4.1 Гбит/с у RustCrypto `aes-gcm`. `ring` использует AES-NI/VAES на x86 и
-ARMv8 Crypto Extensions на aarch64 и требует C-ассемблер при сборке.
-Сборка без него — `cargo build -p umbrawg --no-default-features` — оставляет
-RustCrypto. ChaCha20-Poly1305 в обоих случаях остаётся на RustCrypto.
+Transport-AEAD в демоне по умолчанию считается через `ring` (features
+`aes-ring` и `ring-chacha`, включены в `umbrawg`): на стенде AES дал
+~6.0 Гбит/с против ~4.1 у RustCrypto, ChaCha — 5.26/5.01 Гбит/с
+(obf0/obf1) против 4.67/4.21 у `go`. `ring` использует AES-NI/VAES,
+AVX2 ChaCha и ARMv8 Crypto Extensions и требует C-ассемблер при сборке.
+Сборка без него — `cargo build -p umbrawg --no-default-features` —
+оставляет RustCrypto для обоих шифров.
 
 ## systemd
 

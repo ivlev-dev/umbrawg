@@ -8,8 +8,9 @@ repository.workspace = true
 description = "UmbraWG userspace daemon"
 
 [features]
-default = ["aes-ring"]
+default = ["aes-ring", "ring-chacha"]
 aes-ring = ["umbrawg-device/aes-ring"]
+ring-chacha = ["umbrawg-device/ring-chacha"]
 
 [[bin]]
 name = "umbrawg"
