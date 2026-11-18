@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use umbrawg_crypto::aead::Aead;
+use umbrawg_crypto::aead::{Aead, Algorithm};
 use umbrawg_noise::Keypair as NoiseKeypair;
 use umbrawg_proto::messages::limits::{REJECT_AFTER_MESSAGES, REKEY_AFTER_MESSAGES};
 
@@ -13,6 +13,7 @@ pub struct Keypair {
     local_index: u32,
     remote_index: u32,
     is_initiator: bool,
+    algorithm: Algorithm,
     send: Aead,
     receive: Aead,
     send_nonce: AtomicU64,
@@ -22,13 +23,23 @@ pub struct Keypair {
 impl Keypair {
     #[must_use]
     pub fn from_noise(keys: &NoiseKeypair, created: Instant) -> Self {
+        Self::from_noise_with(keys, created, Algorithm::ChaCha20Poly1305)
+    }
+
+    #[must_use]
+    pub fn from_noise_with(
+        keys: &NoiseKeypair,
+        created: Instant,
+        algorithm: Algorithm,
+    ) -> Self {
         Self {
             created,
             local_index: keys.local_index(),
             remote_index: keys.remote_index(),
             is_initiator: keys.is_initiator(),
-            send: Aead::new(keys.send_key()),
-            receive: Aead::new(keys.receive_key()),
+            algorithm,
+            send: Aead::new_with(algorithm, keys.send_key()),
+            receive: Aead::new_with(algorithm, keys.receive_key()),
             send_nonce: AtomicU64::new(0),
             replay: AtomicReplayFilter::new(),
         }
@@ -43,16 +54,44 @@ impl Keypair {
         send: &umbrawg_crypto::Key,
         receive: &umbrawg_crypto::Key,
     ) -> Self {
+        Self::from_keys_with(
+            created,
+            local_index,
+            remote_index,
+            is_initiator,
+            Algorithm::ChaCha20Poly1305,
+            send,
+            receive,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_keys_with(
+        created: Instant,
+        local_index: u32,
+        remote_index: u32,
+        is_initiator: bool,
+        algorithm: Algorithm,
+        send: &umbrawg_crypto::Key,
+        receive: &umbrawg_crypto::Key,
+    ) -> Self {
         Self {
             created,
             local_index,
             remote_index,
             is_initiator,
-            send: Aead::new(send),
-            receive: Aead::new(receive),
+            algorithm,
+            send: Aead::new_with(algorithm, send),
+            receive: Aead::new_with(algorithm, receive),
             send_nonce: AtomicU64::new(0),
             replay: AtomicReplayFilter::new(),
         }
+    }
+
+    /// Returns the transport cipher of this keypair.
+    #[must_use]
+    pub const fn algorithm(&self) -> Algorithm {
+        self.algorithm
     }
 
     #[must_use]
@@ -392,5 +431,57 @@ mod tests {
         assert_eq!(plaintext, b"payload");
         assert!(receiver.validate_replay(0));
         assert!(!receiver.validate_replay(0));
+    }
+
+    #[test]
+    fn aes_keypair_round_trip() {
+        let now = Instant::now();
+        let send_key = Key::from_bytes([0x11; 32]);
+        let receive_key = Key::from_bytes([0x22; 32]);
+        let sender = Keypair::from_keys_with(
+            now,
+            1,
+            2,
+            true,
+            Algorithm::Aes256Gcm,
+            &send_key,
+            &receive_key,
+        );
+        let receiver = Keypair::from_keys_with(
+            now,
+            2,
+            1,
+            false,
+            Algorithm::Aes256Gcm,
+            &receive_key,
+            &send_key,
+        );
+        assert_eq!(sender.algorithm(), Algorithm::Aes256Gcm);
+        let mut sealed = [0u8; 32 + aead::TAG_LEN];
+        let length = sender.seal(0, b"payload", &mut sealed).unwrap();
+        let mut opened = sealed;
+        let plaintext = receiver.open(0, &mut opened[..length]).unwrap();
+        assert_eq!(plaintext, b"payload");
+    }
+
+    #[test]
+    fn chacha_keypair_cannot_open_aes_packet() {
+        let now = Instant::now();
+        let send_key = Key::from_bytes([0x11; 32]);
+        let receive_key = Key::from_bytes([0x22; 32]);
+        let sender = Keypair::from_keys_with(
+            now,
+            1,
+            2,
+            true,
+            Algorithm::Aes256Gcm,
+            &send_key,
+            &receive_key,
+        );
+        let receiver = Keypair::from_keys(now, 2, 1, false, &receive_key, &send_key);
+        let mut sealed = [0u8; 32 + aead::TAG_LEN];
+        let length = sender.seal(0, b"payload", &mut sealed).unwrap();
+        let mut opened = sealed;
+        assert!(receiver.open(0, &mut opened[..length]).is_none());
     }
 }

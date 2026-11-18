@@ -15,10 +15,10 @@ use netlink_packet_umbrawg::{
     },
     range::{u16_range_pack, u32_range_pack},
     UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
-    UmbrawgAttribute, UmbrawgCmd, UmbrawgConfigError, UmbrawgDeviceConfig,
-    UmbrawgMagicHeader, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
-    UmbrawgPeerConfig, UmbrawgTimeSpec, HEADER_PROTECTION_NONCE_LEN,
-    INTERMEDIATE_SPEC_MAX_LEN,
+    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgConfigError,
+    UmbrawgDeviceConfig, UmbrawgMagicHeader, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgPeerAttribute, UmbrawgPeerConfig, UmbrawgTimeSpec,
+    HEADER_PROTECTION_NONCE_LEN, INTERMEDIATE_SPEC_MAX_LEN,
 };
 
 fn roundtrip_msg(msg: UmbrawgMessage) -> UmbrawgMessage {
@@ -72,6 +72,7 @@ fn full_peer() -> UmbrawgPeerConfig {
         .allowed_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED), 0)
         .unwrap()
         .advanced_security(true)
+        .cipher(UmbrawgCipher::Aes256Gcm)
 }
 
 #[test]
@@ -124,6 +125,7 @@ fn builds_full_device_message() {
                     25, 25
                 )),
                 UmbrawgPeerAttribute::AdvancedSecurity(true),
+                UmbrawgPeerAttribute::Cipher(UmbrawgCipher::Aes256Gcm),
                 UmbrawgPeerAttribute::AllowedIps(vec![
                     UmbrawgAllowedIp(vec![
                         UmbrawgAllowedIpAttr::Family(

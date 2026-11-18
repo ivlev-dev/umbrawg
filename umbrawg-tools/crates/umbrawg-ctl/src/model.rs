@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use umbrawg_config::{
-    AllowedIp, Config, DeviceConfig, Key, ObfuscationConfig, PeerConfig, U16Range,
+    AllowedIp, Cipher, Config, DeviceConfig, Key, ObfuscationConfig, PeerConfig, U16Range,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -38,6 +38,7 @@ pub struct Peer {
     pub tx_bytes: u64,
     pub allowed_ips: Vec<AllowedIp>,
     pub advanced_security: Option<bool>,
+    pub cipher: Option<Cipher>,
 }
 
 impl Default for Peer {
@@ -52,6 +53,7 @@ impl Default for Peer {
             tx_bytes: 0,
             allowed_ips: Vec::new(),
             advanced_security: None,
+            cipher: None,
         }
     }
 }
@@ -89,6 +91,9 @@ impl Device {
             .map(|peer| PeerConfig {
                 public_key: peer.public_key.clone(),
                 preshared_key: peer.preshared_key.clone().filter(|key| !key.is_zero()),
+                cipher: peer
+                    .cipher
+                    .filter(|cipher| *cipher != Cipher::ChaCha20Poly1305),
                 advanced_security: peer.advanced_security,
                 allowed_ips: if peer.allowed_ips.is_empty() {
                     None
@@ -190,6 +195,7 @@ impl SetDevice {
             set.peers.push(PeerConfig {
                 public_key: peer.public_key.clone(),
                 preshared_key: None,
+                cipher: None,
                 advanced_security: None,
                 allowed_ips: None,
                 endpoint: None,
@@ -225,6 +231,7 @@ mod tests {
             tx_bytes: 20,
             allowed_ips: vec!["10.0.0.0/8".parse().expect("valid")],
             advanced_security: Some(true),
+            cipher: Some(Cipher::Aes256Gcm),
         }
     }
 
@@ -265,6 +272,17 @@ mod tests {
             Some(U16Range::single(25))
         );
         assert_eq!(config.peers[0].advanced_security, Some(true));
+        assert_eq!(config.peers[0].cipher, Some(Cipher::Aes256Gcm));
+    }
+
+    #[test]
+    fn drops_default_runtime_cipher() {
+        let mut device = Device::new("uwg0");
+        device.peers.push(Peer {
+            cipher: Some(Cipher::ChaCha20Poly1305),
+            ..peer()
+        });
+        assert_eq!(device.to_config().peers[0].cipher, None);
     }
 
     #[test]
@@ -295,6 +313,7 @@ mod tests {
             config.peers.push(PeerConfig {
                 public_key: Key::from_bytes(*key),
                 preshared_key: None,
+                cipher: None,
                 advanced_security: None,
                 allowed_ips: None,
                 endpoint: None,

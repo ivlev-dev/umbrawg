@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use umbrawg_config::{format_endpoint, parse_endpoint, AllowedIp, Key, U16Range, U32Range};
+use umbrawg_config::{format_endpoint, parse_endpoint, AllowedIp, Cipher, Key, U16Range, U32Range};
 
 use crate::error::Error;
 use crate::model::{Device, Peer, SetDevice};
@@ -206,6 +206,9 @@ pub fn build_set_request(config: &SetDevice) -> Result<String, Error> {
         if let Some(value) = peer.advanced_security {
             write_line(&mut output, "advanced_security", bool_number(value))?;
         }
+        if let Some(cipher) = peer.cipher {
+            write_line(&mut output, "cipher", cipher.as_str())?;
+        }
         if let Some(allowed_ips) = &peer.allowed_ips {
             write_line(&mut output, "replace_allowed_ips", "true")?;
             for allowed_ip in allowed_ips {
@@ -346,6 +349,7 @@ fn apply_peer_line(peer: &mut Peer, key: &str, value: &str) -> Result<(), Error>
             peer.persistent_keepalive = parse_u16_range(key, value)?;
         }
         "advanced_security" => peer.advanced_security = Some(parse_bool(key, value)?),
+        "cipher" => peer.cipher = Some(Cipher::parse(value)?),
         "allowed_ip" | "allowed_ips" => {
             if !value.contains('/') {
                 return Err(Error::Protocol(format!(
@@ -513,6 +517,7 @@ disable_cookies=0
 public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 preshared_key=606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f
 protocol_version=1
+cipher=aes-256-gcm
 endpoint=192.0.2.1:51820
 last_handshake_time_sec=1700000000
 last_handshake_time_nsec=123
@@ -553,6 +558,7 @@ errno=0
                 Key::from_hex("606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f")
                     .expect("valid"),
             ),
+            cipher: Some(Cipher::Aes256Gcm),
             advanced_security: Some(true),
             allowed_ips: Some(vec![
                 "10.0.0.0/8".parse().expect("valid"),
@@ -593,6 +599,7 @@ errno=0
             Some("192.0.2.1:51820".parse().expect("valid"))
         );
         assert_eq!(peer.advanced_security, None);
+        assert_eq!(peer.cipher, Some(Cipher::Aes256Gcm));
     }
 
     #[test]
@@ -638,6 +645,44 @@ errno=0
     }
 
     #[test]
+    fn parses_cipher_from_get_response() {
+        let device = parse_get_response(GET_RESPONSE, "test0").expect("valid response");
+        assert_eq!(device.peers[0].cipher, Some(Cipher::Aes256Gcm));
+        assert!(device
+            .to_config()
+            .to_ini(false)
+            .contains("Cipher = aes-256-gcm\n"));
+
+        let device = parse_get_response(
+            "public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\n\
+             cipher=chacha20-poly1305\nerrno=0\n\n",
+            "test0",
+        )
+        .expect("valid response");
+        assert_eq!(device.peers[0].cipher, Some(Cipher::ChaCha20Poly1305));
+        assert!(!device.to_config().to_ini(false).contains("Cipher"));
+
+        assert!(parse_get_response(
+            "public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\n\
+             cipher=aes\nerrno=0\n\n",
+            "test0",
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn sends_cipher_to_the_daemon() {
+        let mut config = set_device();
+        assert_eq!(config.peers[0].cipher, Some(Cipher::Aes256Gcm));
+        let request = build_set_request(&config).expect("valid request");
+        assert!(request.contains("cipher=aes-256-gcm\n"));
+
+        config.peers[0].cipher = None;
+        let request = build_set_request(&config).expect("valid request");
+        assert!(!request.contains("cipher="));
+    }
+
+    #[test]
     fn showconf_round_trips_advanced_security() {
         for (value, enabled, expected) in [
             ("1", true, "AdvancedSecurity = on\n"),
@@ -674,9 +719,32 @@ errno=0
             "public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\n"
         ));
         assert!(request.contains("persistent_keepalive_interval=25\n"));
+        assert!(request.contains("cipher=aes-256-gcm\n"));
         assert!(request.contains("replace_allowed_ips=true\n"));
         assert!(request.contains("allowed_ip=10.0.0.0/8\n"));
         assert!(request.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn showconf_round_trips_cipher() {
+        let device = parse_get_response(GET_RESPONSE, "test0").expect("valid response");
+        let config = device.to_config();
+        assert_eq!(config.peers[0].cipher, Some(Cipher::Aes256Gcm));
+        assert!(config.to_ini(false).contains("Cipher = aes-256-gcm\n"));
+
+        let response =
+            "public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\n\
+                        cipher=chacha20-poly1305\nerrno=0\n\n";
+        let device = parse_get_response(response, "test0").expect("valid response");
+        assert_eq!(device.peers[0].cipher, Some(Cipher::ChaCha20Poly1305));
+        assert!(!device.to_config().to_ini(false).contains("Cipher"));
+
+        let device = parse_get_response(
+            "public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f\n\
+             cipher=aes\nerrno=0\n\n",
+            "test0",
+        );
+        assert!(device.is_err());
     }
 
     #[test]
@@ -721,6 +789,7 @@ errno=0
             )
             .expect("valid"),
             preshared_key: None,
+            cipher: None,
             advanced_security: None,
             allowed_ips: None,
             endpoint: None,
@@ -740,6 +809,7 @@ errno=0
         config.peers.push(umbrawg_config::PeerConfig {
             public_key: Key::from_bytes([1u8; 32]),
             preshared_key: None,
+            cipher: None,
             advanced_security: None,
             allowed_ips: Some(vec!["10.0.0.0/8".parse().expect("valid")]),
             endpoint: None,

@@ -3,6 +3,7 @@ use std::net::SocketAddr;
 use std::str::FromStr;
 
 use crate::allowed_ip::AllowedIp;
+use crate::cipher::Cipher;
 use crate::endpoint::{format_endpoint, parse_endpoint};
 use crate::error::Error;
 use crate::ini::{Document, Entry, Section, SectionKind};
@@ -180,6 +181,10 @@ pub struct DeviceConfig {
 pub struct PeerConfig {
     pub public_key: Key,
     pub preshared_key: Option<Key>,
+    /// `Cipher` of the peer: the transport data cipher.
+    ///
+    /// Missing means [`Cipher::ChaCha20Poly1305`], the historical default.
+    pub cipher: Option<Cipher>,
     /// `AdvancedSecurity` of the peer.
     ///
     /// The kernel module owns this setting: `uwg` only reports it through
@@ -552,6 +557,9 @@ impl Config {
             if let Some(key) = &peer.preshared_key {
                 push_entry(&mut section, "PresharedKey", key.to_base64());
             }
+            if let Some(cipher) = peer.cipher {
+                push_entry(&mut section, "Cipher", cipher.to_string());
+            }
             if let Some(value) = peer.advanced_security {
                 push_entry(&mut section, "AdvancedSecurity", bool_text(value));
             }
@@ -700,6 +708,7 @@ impl DeviceConfig {
 struct PeerBuilder {
     public_key: Option<Key>,
     preshared_key: Option<Key>,
+    cipher: Option<Cipher>,
     advanced_security: Option<bool>,
     allowed_ips: Option<Vec<AllowedIp>>,
     endpoint: Option<SocketAddr>,
@@ -713,6 +722,9 @@ impl PeerBuilder {
         match key.as_str() {
             "publickey" => self.public_key = Some(Key::from_base64(&entry.value)?),
             "presharedkey" => self.preshared_key = Some(Key::from_base64(&entry.value)?),
+            "cipher" => {
+                self.cipher = Some(parse_cipher_at(entry, "Cipher", &entry.value)?);
+            }
             "advancedsecurity" => {
                 self.advanced_security =
                     Some(parse_bool_at(entry, "AdvancedSecurity", &entry.value)?);
@@ -757,6 +769,10 @@ impl PeerBuilder {
                 self.endpoint = Some(parse_endpoint(value, true)?);
                 2
             }
+            "cipher" => {
+                self.cipher = Some(Cipher::parse(value)?);
+                2
+            }
             "advanced-security" => {
                 self.advanced_security = Some(parse_bool("AdvancedSecurity", value)?);
                 2
@@ -782,6 +798,7 @@ impl PeerBuilder {
         Ok(PeerConfig {
             public_key: self.public_key.ok_or(Error::MissingPeerPublicKey)?,
             preshared_key: self.preshared_key,
+            cipher: self.cipher,
             advanced_security: self.advanced_security,
             allowed_ips: self.allowed_ips,
             endpoint: self.endpoint,
@@ -848,6 +865,14 @@ fn parse_u16_range_at(entry: &Entry, key: &str, value: &str) -> Result<U16Range,
 
 fn parse_bool_at(entry: &Entry, key: &str, value: &str) -> Result<bool, Error> {
     parse_bool(key, value).map_err(|_| Error::InvalidValue {
+        line: entry.line,
+        key: key.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn parse_cipher_at(entry: &Entry, key: &str, value: &str) -> Result<Cipher, Error> {
+    Cipher::parse(value).map_err(|_| Error::InvalidValue {
         line: entry.line,
         key: key.to_owned(),
         value: value.to_owned(),
@@ -1024,6 +1049,7 @@ DisableCookies = off
 [Peer]
 PublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=
 PresharedKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
+Cipher = aes-256-gcm
 AdvancedSecurity = on
 AllowedIPs = 10.0.0.0/8, fd00::/64
 Endpoint = 192.0.2.1:51820
@@ -1063,6 +1089,7 @@ PersistentKeepalive = 25
         );
         assert_eq!(peer.persistent_keepalive, Some(U16Range::single(25)));
         assert_eq!(peer.advanced_security, Some(true));
+        assert_eq!(peer.cipher, Some(Cipher::Aes256Gcm));
     }
 
     #[test]
@@ -1075,6 +1102,41 @@ PersistentKeepalive = 25
         assert!(emitted.contains("I1 = <b 0x160d2f><c>"));
         assert!(emitted.contains("AllowedIPs = 10.0.0.0/8, fd00::/64"));
         assert!(emitted.contains("AdvancedSecurity = on"));
+        assert!(emitted.contains("Cipher = aes-256-gcm"));
+    }
+
+    #[test]
+    fn parses_peer_cipher() {
+        let config = Config::parse(
+            "[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nCIPHER = AES-256-GCM\n",
+        )
+        .expect("valid config");
+        assert_eq!(config.peers[0].cipher, Some(Cipher::Aes256Gcm));
+        assert!(config.to_ini(false).contains("Cipher = aes-256-gcm\n"));
+
+        let config = Config::parse(
+            "[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nCipher = chacha20-poly1305\n",
+        )
+        .expect("valid config");
+        assert_eq!(config.peers[0].cipher, Some(Cipher::ChaCha20Poly1305));
+    }
+
+    #[test]
+    fn rejects_bad_peer_cipher() {
+        assert!(Config::parse(
+            "[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\nCipher = aes\n"
+        )
+        .is_err());
+        assert!(Config::from_args(["peer", PUBLIC, "cipher", "aes"]).is_err());
+    }
+
+    #[test]
+    fn omits_cipher_when_unset() {
+        let config =
+            Config::parse("[Peer]\nPublicKey = xTIBA5rboUvnH4htodjb6e697QjLERt1NAB4mZqp8Dg=\n")
+                .expect("valid config");
+        assert_eq!(config.peers[0].cipher, None);
+        assert!(!config.to_ini(false).contains("Cipher"));
     }
 
     #[test]
@@ -1174,6 +1236,8 @@ PersistentKeepalive = 25
             "10.0.0.0/8,fd00::/64",
             "persistent-keepalive",
             "25",
+            "cipher",
+            "aes-256-gcm",
             "advanced-security",
             "on",
         ];
@@ -1186,6 +1250,7 @@ PersistentKeepalive = 25
         assert_eq!(config.peers.len(), 1);
         assert_eq!(config.peers[0].allowed_ips.as_ref().map(Vec::len), Some(2));
         assert_eq!(config.peers[0].advanced_security, Some(true));
+        assert_eq!(config.peers[0].cipher, Some(Cipher::Aes256Gcm));
     }
 
     #[test]
@@ -1275,6 +1340,7 @@ PersistentKeepalive = 25
         config.peers.push(PeerConfig {
             public_key: Key::from_base64(PUBLIC).expect("valid"),
             preshared_key: None,
+            cipher: None,
             advanced_security: None,
             allowed_ips: Some(vec![
                 "10.0.0.0/8".parse().expect("valid"),

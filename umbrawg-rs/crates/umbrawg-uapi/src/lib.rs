@@ -28,7 +28,7 @@ pub use error::UapiError;
 pub use parse::parse_set_request;
 pub use serialize::{format_errno, format_errno_response, format_get_response};
 pub use types::{
-    max_prefix_len, validate_obfuscation_update, AllowedIp, AllowedIpChange, DeviceControl,
+    max_prefix_len, validate_obfuscation_update, AllowedIp, AllowedIpChange, Cipher, DeviceControl,
     DeviceSnapshot, ObfuscationRequest, ObfuscationSnapshot, PeerRequest, PeerSnapshot, SetRequest,
     SpecialPacketUpdate, TimingRequest, TimingSnapshot, U16Range, U32Range, ValueError,
 };

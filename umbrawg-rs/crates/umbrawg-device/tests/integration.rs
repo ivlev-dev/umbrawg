@@ -13,8 +13,8 @@ use umbrawg_device::{
 use umbrawg_proto::special::SpecialPacket;
 use umbrawg_proto::ObfParams;
 use umbrawg_uapi::{
-    AllowedIp as UapiAllowedIp, AllowedIpChange, PeerRequest, SetRequest, SpecialPacketUpdate,
-    U16Range,
+    AllowedIp as UapiAllowedIp, AllowedIpChange, Cipher, PeerRequest, SetRequest,
+    SpecialPacketUpdate, U16Range,
 };
 
 struct TestRng(u64);
@@ -443,6 +443,62 @@ fn transport_round_trip_respects_allowed_ips() {
     );
     assert_eq!(pair.io_b.delivered.len(), 2);
     assert_eq!(pair.io_b.delivered[1].1, packet6);
+}
+
+#[test]
+fn aes256gcm_transport_round_trip() {
+    let mut pair = pair(ObfParams::default());
+    pair.peer_a.set_cipher(Cipher::Aes256Gcm);
+    pair.peer_b.set_cipher(Cipher::Aes256Gcm);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"aes payload");
+    let mut output = vec![0u8; 65_535];
+    {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_data(&pair.peer_b, &packet, &mut output, &mut ctx)
+            .unwrap();
+    }
+    flush(
+        pair.addr_a,
+        &pair.b,
+        &mut pair.io_a,
+        &mut pair.io_b,
+        &mut pair.rng,
+        now,
+        &mut pair.scratch,
+    );
+    assert_eq!(pair.io_b.delivered.len(), 1);
+    assert_eq!(pair.io_b.delivered[0].1, packet);
+}
+
+#[test]
+fn cipher_mismatch_drops_transport_packets() {
+    let mut pair = pair(ObfParams::default());
+    pair.peer_a.set_cipher(Cipher::Aes256Gcm);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"wrong cipher");
+    let mut output = vec![0u8; 65_535];
+    {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_data(&pair.peer_b, &packet, &mut output, &mut ctx)
+            .unwrap();
+    }
+    flush(
+        pair.addr_a,
+        &pair.b,
+        &mut pair.io_a,
+        &mut pair.io_b,
+        &mut pair.rng,
+        now,
+        &mut pair.scratch,
+    );
+    assert!(pair.io_b.delivered.is_empty());
 }
 
 #[test]

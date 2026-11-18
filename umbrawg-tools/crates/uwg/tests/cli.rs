@@ -130,6 +130,18 @@ fn get_response_with_advanced_security(value: &str) -> String {
          errno=0\n\n"
     )
 }
+
+fn get_response_with_cipher(value: &str) -> String {
+    format!(
+        "listen_port=51820\n\
+         public_key={RUNTIME_PEER_HEX}\n\
+         cipher={value}\n\
+         endpoint=192.0.2.1:51820\n\
+         allowed_ip=10.0.0.0/8\n\
+         errno=0\n\n"
+    )
+}
+
 fn write_config(directory: &Path, peers: &[(&str, &str)]) -> PathBuf {
     let mut text = format!("[Interface]\nPrivateKey = {PRIVATE}\n");
     for (key, allowed_ips) in peers {
@@ -417,6 +429,28 @@ fn show_reports_advanced_security_from_uapi() {
             "{value}: {stdout}"
         );
     }
+}
+
+#[test]
+fn showconf_prints_cipher_from_uapi() {
+    let directory = runtime_dir();
+    let _fake = FakeUapi::start(&directory, get_response_with_cipher("aes-256-gcm"));
+
+    let output = run(&directory, &["showconf", "uwg0"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(stdout.contains("Cipher = aes-256-gcm\n"), "{stdout}");
+}
+
+#[test]
+fn showconf_omits_default_cipher() {
+    let directory = runtime_dir();
+    let _fake = FakeUapi::start(&directory, get_response_with_cipher("chacha20-poly1305"));
+
+    let output = run(&directory, &["showconf", "uwg0"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(!stdout.contains("Cipher"), "{stdout}");
 }
 
 #[test]

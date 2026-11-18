@@ -653,7 +653,7 @@ impl Device {
             (raw, keys)
         };
         drop(identity);
-        let keypair = Arc::new(Keypair::from_noise(&keys, ctx.now));
+        let keypair = Arc::new(Keypair::from_noise_with(&keys, ctx.now, peer.aead_algorithm()));
         self.install_keypair(peer, &keypair, false);
         let timings = self.timings();
         self.timers_session_derived(peer, &timings, ctx.now);
@@ -1418,7 +1418,7 @@ impl Device {
         let Some(keys) = keys else {
             return Ok(IncomingOutcome::Dropped);
         };
-        let keypair = Arc::new(Keypair::from_noise(&keys, ctx.now));
+        let keypair = Arc::new(Keypair::from_noise_with(&keys, ctx.now, peer.aead_algorithm()));
         self.install_keypair(&peer, &keypair, true);
         peer.set_endpoint_from_packet(source);
         peer.add_rx(RESPONSE_SIZE as u64);

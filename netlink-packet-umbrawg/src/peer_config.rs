@@ -15,6 +15,7 @@ use crate::{
     error::UmbrawgConfigError,
     peer::{UmbrawgPeer, UmbrawgPeerAttribute},
     range::u16_range_pack,
+    UmbrawgCipher,
 };
 
 /// Flags a caller may set through [`UmbrawgPeerConfig`].
@@ -72,6 +73,7 @@ pub struct UmbrawgPeerConfig {
     keepalive: Option<Keepalive>,
     allowed_ips: Vec<UmbrawgAllowedIp>,
     advanced_security: bool,
+    cipher: Option<UmbrawgCipher>,
     flags: u32,
     protocol_version: Option<u32>,
 }
@@ -86,6 +88,7 @@ impl UmbrawgPeerConfig {
             keepalive: None,
             allowed_ips: Vec::new(),
             advanced_security: false,
+            cipher: None,
             flags: 0,
             protocol_version: None,
         }
@@ -266,6 +269,15 @@ impl UmbrawgPeerConfig {
         self
     }
 
+    /// Sets the data cipher of the peer (`UWGPEER_A_CIPHER`).
+    ///
+    /// The attribute is only emitted when this method is called; an absent
+    /// attribute means [`UmbrawgCipher::ChaCha20Poly1305`].
+    pub fn cipher(mut self, cipher: UmbrawgCipher) -> Self {
+        self.cipher = Some(cipher);
+        self
+    }
+
     /// Removes the peer instead of adding or updating it.
     pub fn remove(mut self) -> Self {
         self.flags |= UWGPEER_F_REMOVE_ME;
@@ -331,6 +343,9 @@ impl UmbrawgPeerConfig {
         if self.advanced_security {
             attributes.push(UmbrawgPeerAttribute::AdvancedSecurity(true));
         }
+        if let Some(cipher) = self.cipher {
+            attributes.push(UmbrawgPeerAttribute::Cipher(cipher));
+        }
         if !self.allowed_ips.is_empty()
             || self.flags & UWGPEER_F_REPLACE_ALLOWEDIPS != 0
         {
@@ -391,6 +406,9 @@ impl UmbrawgPeerConfig {
                 }
                 UmbrawgPeerAttribute::AdvancedSecurity(enabled) => {
                     config.advanced_security |= *enabled;
+                }
+                UmbrawgPeerAttribute::Cipher(cipher) => {
+                    config.cipher = Some(*cipher);
                 }
                 UmbrawgPeerAttribute::LastHandshake(_)
                 | UmbrawgPeerAttribute::RxBytes(_)

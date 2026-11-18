@@ -1,6 +1,7 @@
 //! UmbraWG configuration model: keys, INI parsing and emitting.
 
 pub mod allowed_ip;
+pub mod cipher;
 pub mod endpoint;
 pub mod error;
 pub mod ini;
@@ -9,6 +10,7 @@ pub mod model;
 pub mod range;
 
 pub use allowed_ip::{max_prefix_len, AllowedIp};
+pub use cipher::Cipher;
 pub use endpoint::{format_endpoint, parse_endpoint};
 pub use error::Error;
 pub use ini::{Document, Entry, Section, SectionKind};

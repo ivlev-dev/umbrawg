@@ -82,7 +82,8 @@ static const struct nla_policy peer_policy[UWGPEER_A_MAX + 1] = {
 	[UWGPEER_A_TX_BYTES]				= { .type = NLA_U64 },
 	[UWGPEER_A_ALLOWEDIPS]				= { .type = NLA_NESTED },
 	[UWGPEER_A_PROTOCOL_VERSION]			= { .type = NLA_U32 },
-	[UWGPEER_A_ADVANCED_SECURITY]    		= { .type = NLA_FLAG }
+	[UWGPEER_A_ADVANCED_SECURITY]    		= { .type = NLA_FLAG },
+	[UWGPEER_A_CIPHER]				= { .type = NLA_U32 }
 };
 
 static const struct nla_policy allowedip_policy[UWGALLOWEDIP_A_MAX + 1] = {
@@ -332,7 +333,8 @@ get_peer(struct uwg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 				      UWGPEER_A_UNSPEC) ||
 		    nla_put_u64_64bit(skb, UWGPEER_A_RX_BYTES, peer->rx_bytes,
 				      UWGPEER_A_UNSPEC) ||
-		    nla_put_u32(skb, UWGPEER_A_PROTOCOL_VERSION, 1))
+		    nla_put_u32(skb, UWGPEER_A_PROTOCOL_VERSION, 1) ||
+		    nla_put_u32(skb, UWGPEER_A_CIPHER, peer->cipher))
 			goto err;
 
 #ifndef OMIT_ENDPOINTS
@@ -639,6 +641,12 @@ static int set_peer(struct uwg_device *uwg, struct nlattr **attrs)
 			goto out;
 	}
 
+	if (attrs[UWGPEER_A_CIPHER] &&
+	    nla_get_u32(attrs[UWGPEER_A_CIPHER]) > UWG_CIPHER_AES256GCM) {
+		ret = -EINVAL;
+		goto out;
+	}
+
 	peer = uwg_pubkey_hashtable_lookup(uwg->peer_hashtable,
 					  nla_data(attrs[UWGPEER_A_PUBLIC_KEY]));
 	ret = 0;
@@ -681,6 +689,9 @@ static int set_peer(struct uwg_device *uwg, struct nlattr **attrs)
 		uwg_peer_remove(peer);
 		goto out;
 	}
+
+	if (attrs[UWGPEER_A_CIPHER])
+		peer->cipher = nla_get_u32(attrs[UWGPEER_A_CIPHER]);
 
 	if (preshared_key) {
 		down_write(&peer->handshake.lock);

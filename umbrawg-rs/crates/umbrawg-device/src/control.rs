@@ -87,6 +87,7 @@ fn peer_snapshot(device: &Device, peer: &std::sync::Arc<crate::peer::Peer>) -> P
         rx_bytes: peer.rx_bytes(),
         persistent_keepalive_interval,
         advanced_security: peer.advanced_security(),
+        cipher: peer.cipher(),
         allowed_ips,
     }
 }
@@ -263,6 +264,7 @@ fn apply_peer(device: &Device, request: PeerRequest) -> Result<(), UapiError> {
             }
             let mut config = PeerConfig::new(request.public_key);
             config.endpoint = request.endpoint;
+            config.cipher = request.cipher.unwrap_or_default();
             if let Some(key) = request.preshared_key.clone() {
                 config.preshared_key = key;
             }
@@ -287,6 +289,9 @@ fn apply_peer(device: &Device, request: PeerRequest) -> Result<(), UapiError> {
     }
     if let Some(value) = request.advanced_security {
         peer.set_advanced_security(Some(value));
+    }
+    if let Some(cipher) = request.cipher {
+        peer.set_cipher(cipher);
     }
     if request.replace_allowed_ips {
         device.allowed_ips().remove_by_peer(peer.id());

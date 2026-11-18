@@ -49,6 +49,7 @@
  *                    ...
  *                ...
  *            UWGPEER_A_PROTOCOL_VERSION: NLA_U32
+ *            UWGPEER_A_CIPHER: NLA_U32, enum uwg_cipher
  *        0: NLA_NESTED
  *            ...
  *        ...
@@ -118,6 +119,9 @@
  *            UWGPEER_A_ADVANCED_SECURITY: flag indicating that advanced security
  *                                       techniques provided by UmbraWG should
  *                                       be used.
+ *            UWGPEER_A_CIPHER: NLA_U32, enum uwg_cipher, the data cipher of
+ *                              the peer; UWG_CIPHER_CHACHA20POLY1305 when
+ *                              unset.
  *        0: NLA_NESTED
  *            ...
  *        ...
@@ -228,7 +232,6 @@ enum uwg_cipher {
 	UWG_CIPHER_CHACHA20POLY1305 = 0,
 	UWG_CIPHER_AES256GCM = 1,
 };
-
 enum uwgpeer_attribute {
 	UWGPEER_A_UNSPEC,
 	UWGPEER_A_PUBLIC_KEY,
@@ -242,7 +245,7 @@ enum uwgpeer_attribute {
 	UWGPEER_A_ALLOWEDIPS,
 	UWGPEER_A_PROTOCOL_VERSION,
 	UWGPEER_A_ADVANCED_SECURITY,
-	UWGPEER_A_CIPHER,
+	UWGPEER_A_CIPHER = 12,
 	__UWGPEER_A_LAST
 };
 #define UWGPEER_A_MAX (__UWGPEER_A_LAST - 1)

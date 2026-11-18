@@ -11,7 +11,7 @@ use pretty_assertions::assert_eq;
 
 use crate::{
     UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
-    UmbrawgAttribute, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
     UmbrawgPeerAttribute, UmbrawgTimeSpec,
 };
 
@@ -670,6 +670,55 @@ fn test_peer_advanced_security_false_is_not_emitted() {
     let mut expected = vec![0; without_flag.buffer_len()];
     without_flag.emit(&mut expected);
     assert_eq!(buffer, expected);
+}
+
+#[test]
+fn test_peer_cipher_roundtrip() {
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![UmbrawgAttribute::Peers(vec![UmbrawgPeer(vec![
+            UmbrawgPeerAttribute::PublicKey([9u8; 32]),
+            UmbrawgPeerAttribute::Cipher(UmbrawgCipher::Aes256Gcm),
+        ])])],
+    };
+
+    assert_eq!(msg, roundtrip_msg(msg.clone()));
+}
+
+#[test]
+fn test_peer_cipher_wire_format() {
+    use netlink_packet_core::NlaBuffer;
+
+    let attr = UmbrawgPeerAttribute::Cipher(UmbrawgCipher::Aes256Gcm);
+    let mut buf = vec![0xff; attr.buffer_len()];
+    attr.emit(&mut buf);
+    // NLA_U32: four-byte header, kind 12, little-endian payload 1.
+    assert_eq!(buf, vec![0x08, 0x00, 0x0c, 0x00, 0x01, 0x00, 0x00, 0x00]);
+
+    let parsed = UmbrawgPeerAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(parsed, attr);
+}
+
+#[test]
+fn test_peer_cipher_rejects_unknown_value() {
+    use netlink_packet_core::NlaBuffer;
+
+    let raw = vec![0x08, 0x00, 0x0c, 0x00, 0x02, 0x00, 0x00, 0x00];
+    assert!(UmbrawgPeerAttribute::parse(&NlaBuffer::new(&raw)).is_err());
+}
+
+#[test]
+fn test_cipher_constants() {
+    assert_eq!(UmbrawgCipher::ChaCha20Poly1305.as_u32(), 0);
+    assert_eq!(UmbrawgCipher::Aes256Gcm.as_u32(), 1);
+    assert_eq!(
+        UmbrawgCipher::from_u32(0),
+        Some(UmbrawgCipher::ChaCha20Poly1305)
+    );
+    assert_eq!(UmbrawgCipher::from_u32(1), Some(UmbrawgCipher::Aes256Gcm));
+    assert_eq!(UmbrawgCipher::from_u32(2), None);
+    assert_eq!(UmbrawgCipher::default(), UmbrawgCipher::ChaCha20Poly1305);
+    assert_eq!(UmbrawgCipher::Aes256Gcm.to_string(), "aes-256-gcm");
 }
 
 #[test]

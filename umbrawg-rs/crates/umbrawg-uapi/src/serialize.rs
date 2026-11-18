@@ -7,7 +7,7 @@
 
 use std::fmt::{self, Write as _};
 
-use crate::types::{DeviceSnapshot, PeerSnapshot};
+use crate::types::{Cipher, DeviceSnapshot, PeerSnapshot};
 
 const ZERO_KEY: [u8; 32] = [0u8; 32];
 
@@ -131,6 +131,9 @@ fn write_peer(output: &mut String, peer: &PeerSnapshot) {
     if let Some(value) = peer.advanced_security {
         write_bool(output, "advanced_security", value);
     }
+    if peer.cipher != Cipher::ChaCha20Poly1305 {
+        write_field(output, "cipher", peer.cipher);
+    }
 
     if let Some(endpoint) = peer.endpoint {
         write_field(output, "endpoint", endpoint);
@@ -220,6 +223,7 @@ disable_cookies=0
 public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 preshared_key=606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f
 protocol_version=1
+cipher=aes-256-gcm
 endpoint=192.0.2.1:51820
 last_handshake_time_sec=1700000000
 last_handshake_time_nsec=123
@@ -259,6 +263,25 @@ errno=0
         };
         let response = format_get_response(&snapshot);
         assert!(response.contains(&format!("preshared_key={}\n", "00".repeat(32))));
+    }
+
+    #[test]
+    fn prints_cipher_only_when_not_default() {
+        let peer = |cipher| PeerSnapshot {
+            public_key: PublicKey::from_hex(PEER_KEY).expect("valid"),
+            cipher,
+            ..PeerSnapshot::default()
+        };
+        let response = |cipher| {
+            format_get_response(&DeviceSnapshot {
+                peers: vec![peer(cipher)],
+                ..DeviceSnapshot::default()
+            })
+        };
+
+        assert!(response(Cipher::Aes256Gcm).contains("cipher=aes-256-gcm\n"));
+        assert!(!response(Cipher::ChaCha20Poly1305).contains("cipher="));
+        assert!(!response(Cipher::ChaCha20Poly1305).contains("Cipher="));
     }
 
     #[test]
@@ -337,6 +360,7 @@ errno=0
                 rx_bytes: 2000,
                 persistent_keepalive_interval: U16Range::single(25),
                 advanced_security: None,
+                cipher: Cipher::Aes256Gcm,
                 allowed_ips: vec![
                     "10.0.0.0/8".parse::<AllowedIp>().expect("valid"),
                     "fd00::/64".parse::<AllowedIp>().expect("valid"),
