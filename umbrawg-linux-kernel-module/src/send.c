@@ -13,6 +13,7 @@
 #include "messages.h"
 #include "cookie.h"
 #include "type.h"
+#include "aead.h"
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
 
@@ -301,6 +302,11 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 
 	if (uwg_header_protection_init(&state, peer->device, crypto))
 		chacha20_crypt(&state, (u8*)header, (u8*)header, sizeof(*header));
+
+	if (keypair->sending_aead)
+		return uwg_aead_encrypt(keypair->sending_aead, skb,
+					sizeof(struct message_data) + padding,
+					plaintext_len, PACKET_CB(skb)->nonce);
 
 	/* Now we can encrypt the scattergather segments */
 	sg_init_table(sg, num_frags);

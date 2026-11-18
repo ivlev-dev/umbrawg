@@ -12,6 +12,7 @@
 #include "cookie.h"
 #include "socket.h"
 #include "type.h"
+#include "aead.h"
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
 
@@ -358,6 +359,14 @@ static bool decrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	skb_pull(skb, offset);
 	if (unlikely(num_frags < 0 || num_frags > ARRAY_SIZE(sg)))
 		return false;
+
+	if (keypair->receiving_aead) {
+		if (unlikely(skb->len < NOISE_AUTHTAG_LEN))
+			return false;
+		return uwg_aead_decrypt(keypair->receiving_aead, skb,
+					skb->len - NOISE_AUTHTAG_LEN,
+					PACKET_CB(skb)->nonce);
+	}
 
 	sg_init_table(sg, num_frags);
 	if (skb_to_sgvec(skb, sg, 0, skb->len) <= 0)

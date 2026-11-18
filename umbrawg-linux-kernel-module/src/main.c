@@ -12,6 +12,7 @@
 
 #include "version.h"
 #include "device.h"
+#include "aead.h"
 #include "noise.h"
 #include "queueing.h"
 #include "ratelimiter.h"
@@ -55,6 +56,12 @@ static int __init uwg_mod_init(void)
 	pr_info("Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.\n");
 	pr_info("Copyright (C) 2024-2025 AmneziaVPN <admin@amnezia.org>. All Rights Reserved.\n");
 
+	ret = uwg_aead_init();
+	if (ret) {
+		uwg_genetlink_uninit();
+		goto err_device;
+	}
+
 	return 0;
 
 err_netlink:
@@ -71,6 +78,7 @@ static void __exit uwg_mod_exit(void)
 {
 	uwg_genetlink_uninit();
 	uwg_device_uninit();
+	uwg_aead_uninit();
 	uwg_peer_uninit();
 	uwg_allowedips_slab_uninit();
 }

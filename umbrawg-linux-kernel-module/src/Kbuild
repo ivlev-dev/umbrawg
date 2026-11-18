@@ -8,6 +8,6 @@ ccflags-$(CONFIG_UMBRAWG_DEBUG) += -DDEBUG -g
 ccflags-$(if $(UMBRAWG_VERSION),y,) += -D'UMBRAWG_VERSION="$(UMBRAWG_VERSION)"'
 ccflags-$(if $(OMIT_ENDPOINTS),y,) += -D'OMIT_ENDPOINTS="$(OMIT_ENDPOINTS)"'
 
-umbrawg-y := main.o noise.o device.o peer.o timers.o queueing.o send.o receive.o socket.o peerlookup.o allowedips.o ratelimiter.o cookie.o netlink.o junk.o header_protection.o
+umbrawg-y := main.o aead.o noise.o device.o peer.o timers.o queueing.o send.o receive.o socket.o peerlookup.o allowedips.o ratelimiter.o cookie.o netlink.o junk.o header_protection.o
 
 obj-$(if $(KBUILD_EXTMOD),m,$(CONFIG_UMBRAWG)) := umbrawg.o

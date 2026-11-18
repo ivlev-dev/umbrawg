@@ -4,6 +4,7 @@
  */
 
 #include "noise.h"
+#include "aead.h"
 #include "device.h"
 #include "peer.h"
 #include "messages.h"
@@ -111,9 +112,28 @@ static struct noise_keypair *keypair_create(struct uwg_peer *peer)
 	return keypair;
 }
 
+static void keypair_destroy(struct noise_keypair *keypair)
+{
+	uwg_aead_free(keypair->sending_aead);
+	uwg_aead_free(keypair->receiving_aead);
+	kfree_sensitive(keypair);
+}
+
+static void keypair_free_work(struct work_struct *work)
+{
+	struct noise_keypair *keypair =
+		container_of(work, struct noise_keypair, free_work);
+
+	keypair_destroy(keypair);
+}
+
 static void keypair_free_rcu(struct rcu_head *rcu)
 {
-	kfree_sensitive(container_of(rcu, struct noise_keypair, rcu));
+	struct noise_keypair *keypair =
+		container_of(rcu, struct noise_keypair, rcu);
+
+	INIT_WORK(&keypair->free_work, keypair_free_work);
+	uwg_aead_queue_free(&keypair->free_work);
 }
 
 static void keypair_free_kref(struct kref *kref)
@@ -851,15 +871,28 @@ bool uwg_noise_handshake_begin_session(struct noise_handshake *handshake,
 			    handshake->chaining_key);
 
 	new_keypair->cipher = handshake->entry.peer->cipher;
-	if (new_keypair->cipher == UWG_CIPHER_AES256GCM &&
-	    (aes_gcm_preparekey(&new_keypair->sending_aes,
-				new_keypair->sending.key,
-				NOISE_SYMMETRIC_KEY_LEN, NOISE_AUTHTAG_LEN) ||
-	     aes_gcm_preparekey(&new_keypair->receiving_aes,
-				new_keypair->receiving.key,
-				NOISE_SYMMETRIC_KEY_LEN, NOISE_AUTHTAG_LEN))) {
-		kfree_sensitive(new_keypair);
-		goto out;
+	if (new_keypair->cipher == UWG_CIPHER_AES256GCM) {
+		new_keypair->sending_aead = uwg_aead_alloc(new_keypair->sending.key);
+		new_keypair->receiving_aead =
+			uwg_aead_alloc(new_keypair->receiving.key);
+		if (IS_ERR_OR_NULL(new_keypair->sending_aead) ||
+		    IS_ERR_OR_NULL(new_keypair->receiving_aead)) {
+			uwg_aead_free(new_keypair->sending_aead);
+			uwg_aead_free(new_keypair->receiving_aead);
+			new_keypair->sending_aead = NULL;
+			new_keypair->receiving_aead = NULL;
+			if (aes_gcm_preparekey(&new_keypair->sending_aes,
+					       new_keypair->sending.key,
+					       NOISE_SYMMETRIC_KEY_LEN,
+					       NOISE_AUTHTAG_LEN) ||
+			    aes_gcm_preparekey(&new_keypair->receiving_aes,
+					       new_keypair->receiving.key,
+					       NOISE_SYMMETRIC_KEY_LEN,
+					       NOISE_AUTHTAG_LEN)) {
+				keypair_destroy(new_keypair);
+				goto out;
+			}
+		}
 	}
 
 	handshake_zero(handshake);
@@ -875,7 +908,7 @@ bool uwg_noise_handshake_begin_session(struct noise_handshake *handshake,
 			handshake->entry.peer->device->index_hashtable,
 			&handshake->entry, &new_keypair->entry);
 	} else {
-		kfree_sensitive(new_keypair);
+		keypair_destroy(new_keypair);
 	}
 	rcu_read_unlock_bh();
 

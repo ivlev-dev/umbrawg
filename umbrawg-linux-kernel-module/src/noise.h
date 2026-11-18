@@ -16,6 +16,9 @@
 #include <linux/rwsem.h>
 #include <linux/mutex.h>
 #include <linux/kref.h>
+#include <linux/workqueue.h>
+
+struct uwg_aead;
 
 struct noise_replay_counter {
 	u64 counter;
@@ -37,6 +40,9 @@ struct noise_keypair {
 	struct noise_replay_counter receiving_counter;
 	struct aes_gcm_key sending_aes;
 	struct aes_gcm_key receiving_aes;
+	struct uwg_aead *sending_aead;
+	struct uwg_aead *receiving_aead;
+	struct work_struct free_work;
 	enum uwg_cipher cipher;
 	__le32 remote_index;
 	bool i_am_the_initiator;
