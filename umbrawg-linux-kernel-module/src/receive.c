@@ -378,10 +378,11 @@ static bool decrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 		aes_gcm_init(&ctx, aes_nonce, &keypair->receiving_aes);
 		for (part = sg; part && left; part = sg_next(part)) {
 			unsigned int len = min_t(unsigned int, left, part->length);
-			u8 *addr = kmap_local_page(sg_page(part)) + part->offset;
+			u8 *base = kmap_local_page(sg_page(part));
+			u8 *addr = base + part->offset;
 
 			aes_gcm_decrypt_update(&ctx, addr, addr, len);
-			kunmap_local(addr);
+			kunmap_local(base);
 			left -= len;
 		}
 		if (aes_gcm_decrypt_final(&ctx, tag))
