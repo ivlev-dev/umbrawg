@@ -6,6 +6,9 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+aes-ring = ["umbrawg-crypto/aes-ring"]
+
 [dependencies]
 umbrawg-crypto.workspace = true
 umbrawg-proto.workspace = true

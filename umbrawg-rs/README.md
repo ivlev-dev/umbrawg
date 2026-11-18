@@ -556,6 +556,13 @@ Cipher = aes-256-gcm
 Шифр должен совпадать на обеих сторонах, иначе handshake проходит, а
 transport-пакеты отбрасываются.
 
+AES-256-GCM в демоне по умолчанию считается через `ring` (feature
+`aes-ring`, включён в `umbrawg`): на стенде это дало ~6.0 Гбит/с против
+~4.1 Гбит/с у RustCrypto `aes-gcm`. `ring` использует AES-NI/VAES на x86 и
+ARMv8 Crypto Extensions на aarch64 и требует C-ассемблер при сборке.
+Сборка без него — `cargo build -p umbrawg --no-default-features` — оставляет
+RustCrypto. ChaCha20-Poly1305 в обоих случаях остаётся на RustCrypto.
+
 ## systemd
 
 Юнит-шаблон `systemd/umbrawg@.service` запускает демон для интерфейса `%i`:

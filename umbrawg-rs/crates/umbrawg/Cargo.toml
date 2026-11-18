@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "UmbraWG userspace daemon"
 
+[features]
+default = ["aes-ring"]
+aes-ring = ["umbrawg-device/aes-ring"]
+
 [[bin]]
 name = "umbrawg"
 path = "src/main.rs"
