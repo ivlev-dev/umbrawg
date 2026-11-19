@@ -13,6 +13,7 @@
 #include "version.h"
 #include "device.h"
 #include "aead.h"
+#include "fec.h"
 #include "noise.h"
 #include "queueing.h"
 #include "ratelimiter.h"
@@ -31,6 +32,16 @@ static int __init uwg_mod_init(void)
 	ret = uwg_allowedips_slab_init();
 	if (ret < 0)
 		goto err_allowedips;
+
+	ret = uwg_fec_init();
+	if (ret < 0)
+		goto err_allowedips;
+
+	ret = uwg_fec_selftest();
+	if (ret < 0) {
+		pr_err("FEC self-test failed: %d\n", ret);
+		goto err_allowedips;
+	}
 
 #ifdef DEBUG
 	ret = -ENOTRECOVERABLE;

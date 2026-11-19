@@ -67,6 +67,10 @@
 - Модуль пока анонсирует **только ACK** (не BBR/FEC), чтобы userspace
   пир не включал FEC/BBR, которые kernel data-plane ещё не умеет.
   Netlink-настройки bbr/fec сохраняются и видны.
+- Добавлен kernel FEC-кодек `fec.c/h`: GF(256) 0x11d, систематический
+  RS до 32+16, encode/decode без kmalloc, матрица 1:1 с Rust
+  (проверено сравнением), selftest при загрузке модуля. Data-path пока
+  не использует кодек.
 - Проверен интероп kernel↔Rust при kernel `bbr on, fec 2:1`: ping 0%,
   TCP 2791 Мбит/с, UDP 400/0.
 - Порт в ядро не начат.
