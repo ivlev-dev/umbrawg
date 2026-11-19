@@ -455,10 +455,10 @@ static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
 	bool is_keepalive = PACKET_CB(skb)->is_keepalive;
 	u8 ds = PACKET_CB(skb)->ds;
 
-	/* FEC shards are generated from the pre-FEC stream: the encoder already
-	 * expanded k packets into k+m datagrams, so pacing every shard applies
-	 * the token bucket to the expansion and collapses the rate. The pacer
-	 * still accounts the original send in uwg_bbr_on_send().
+	/* FEC shards are an expansion of the pre-FEC stream: pacing every shard
+	 * applies the token bucket to k+m packets instead of k and collapses
+	 * the rate. Pacing for FEC traffic is therefore skipped until the BBR
+	 * delivery-rate sampler stops charging the pacing delay to the sample.
 	 */
 	if (!is_keepalive && !PACKET_CB(skb)->is_fec)
 		uwg_packet_pace(peer, skb->len);
