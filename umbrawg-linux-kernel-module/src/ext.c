@@ -140,10 +140,8 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 	    uwg->fec_mode != UWG_FEC_MODE_OFF)
 		flags |= UWG_EXT_CAP_ACK;
 
-	/* FEC data-plane is implemented and tested kernel<->kernel, but the
-	 * mixed kernel<->userspace path is not validated yet. Keep advertising
-	 * ACK only until that interop is fixed, otherwise a userspace peer
-	 * starts sending FEC shards that the module must not receive yet.
+	/* Mixed kernel<->userspace FEC is not validated yet; advertise ACK
+	 * only so a userspace peer keeps using the legacy data path.
 	 */
 	(void)k;
 	(void)m;
@@ -245,6 +243,20 @@ int uwg_ext_build_fec_shard_header(u8 *buf, size_t len,
 	put_unaligned_le16(shard->shard_len, buf + 16);
 	put_unaligned_le16(shard->reserved, buf + 18);
 	return UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN;
+}
+
+void uwg_ext_caps_changed(struct uwg_device *uwg)
+{
+	struct uwg_peer *peer;
+
+	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
+		spin_lock_bh(&peer->caps.lock);
+		peer->caps.resend = true;
+		peer->caps.send_attempts = 0;
+		peer->caps.next_send = 0;
+		spin_unlock_bh(&peer->caps.lock);
+		uwg_ext_maybe_send_caps(peer);
+	}
 }
 
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer)

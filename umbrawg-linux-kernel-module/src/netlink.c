@@ -908,6 +908,7 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			net_dbg_ratelimited(
 				"%s: Could not allocate FEC state for every peer\n",
 				uwg->dev->name);
+		uwg_ext_caps_changed(uwg);
 	}
 
 	if (info->attrs[UWGDEVICE_A_JC] ||
