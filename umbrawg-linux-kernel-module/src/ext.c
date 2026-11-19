@@ -140,8 +140,8 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 	    uwg->fec_mode != UWG_FEC_MODE_OFF)
 		flags |= UWG_EXT_CAP_ACK;
 
-	/* Mixed kernel<->userspace FEC is not validated yet; advertise ACK
-	 * only so a userspace peer keeps using the legacy data path.
+	/* Mixed kernel<->userspace FEC bulk path is still under debug;
+	 * advertise ACK only to keep mixed deployments on the legacy path.
 	 */
 	(void)k;
 	(void)m;

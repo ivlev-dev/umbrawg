@@ -1,6 +1,7 @@
 //! Peer-level protocol extension: capabilities, ACK feedback, BBRv3 and FEC.
 
 use std::collections::VecDeque;
+
 use std::time::{Duration, Instant};
 
 use umbrawg_cc::{Ack as BbrAck, Bbr, BbrConfig};
@@ -524,7 +525,7 @@ impl PeerExtension {
     }
 
     pub(crate) fn request_caps(&mut self, now: Instant) {
-        if self.local_caps.bits() == 0 || self.peer_caps.bits() != 0 || self.caps_attempts >= 3 {
+        if self.local_caps.bits() == 0 || self.caps_attempts >= 3 {
             return;
         }
         if self.caps_next.is_some_and(|next| now < next) {
