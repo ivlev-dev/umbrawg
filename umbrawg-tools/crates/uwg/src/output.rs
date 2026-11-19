@@ -646,7 +646,7 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
 
 pub fn showconf(device: &Device) -> String {
     let mut config = device.to_config();
-    config.device.extra_ports = device.extra_ports;
+    config.device.extra_ports = device.extra_ports.filter(|ports| *ports != 0);
     config.to_ini(false)
 }
 
@@ -965,7 +965,7 @@ mod tests {
     fn showconf_prints_extra_ports() {
         let mut device = sample_device();
         device.extra_ports = Some(0);
-        assert!(showconf(&device).contains("ExtraPorts = 0\n"));
+        assert!(!showconf(&device).contains("ExtraPorts"));
         device.extra_ports = Some(8);
         assert!(showconf(&device).contains("ExtraPorts = 8\n"));
     }
