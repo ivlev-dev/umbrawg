@@ -21,6 +21,7 @@
 #include <net/dst_cache.h>
 
 struct uwg_device;
+struct uwg_bbr;
 
 struct endpoint {
 	union {
@@ -75,11 +76,18 @@ struct uwg_peer {
 	struct uwg_peer_caps caps;
 	struct uwg_peer_ack_tracker ack_tracker;
 	struct uwg_peer_ack_state ack_state;
+	struct uwg_bbr __rcu *bbr;
+	spinlock_t bbr_lock;
 };
 
 struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
 			       const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN]);
+
+struct uwg_bbr *uwg_peer_bbr_lookup(struct uwg_peer *peer);
+void uwg_peer_bbr_release(struct uwg_peer *peer);
+int uwg_peer_bbr_sync(struct uwg_peer *peer);
+int uwg_peer_bbr_sync_device(struct uwg_device *uwg);
 
 struct uwg_peer *__must_check uwg_peer_get_maybe_zero(struct uwg_peer *peer);
 static inline struct uwg_peer *uwg_peer_get(struct uwg_peer *peer)

@@ -887,7 +887,11 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			ret = -EINVAL;
 			goto out;
 		}
-		uwg->bbr_mode = val8;
+		WRITE_ONCE(uwg->bbr_mode, val8);
+		if (uwg_peer_bbr_sync_device(uwg))
+			net_dbg_ratelimited(
+				"%s: Could not allocate BBR state for every peer\n",
+				uwg->dev->name);
 	}
 
 	if (info->attrs[UWGDEVICE_A_FEC]) {

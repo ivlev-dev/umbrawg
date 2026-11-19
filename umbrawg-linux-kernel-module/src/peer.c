@@ -9,14 +9,80 @@
 #include "timers.h"
 #include "peerlookup.h"
 #include "noise.h"
+#include "bbr.h"
 
 #include <linux/kref.h>
 #include <linux/lockdep.h>
 #include <linux/rcupdate.h>
 #include <linux/list.h>
+#include <linux/slab.h>
 
 static struct kmem_cache *peer_cache;
 static atomic64_t peer_counter = ATOMIC64_INIT(0);
+
+/*
+ * The controller instance is owned by the peer and swapped under
+ * device_update_lock. Readers only dereference it inside an RCU read-side
+ * critical section, so a mode change can drop the old instance after
+ * synchronize_net() without racing the send or the ACK path.
+ */
+struct uwg_bbr *uwg_peer_bbr_lookup(struct uwg_peer *peer)
+{
+	return rcu_dereference(peer->bbr);
+}
+
+static struct uwg_bbr *uwg_peer_bbr_alloc(void)
+{
+	struct uwg_bbr *bbr = kzalloc(sizeof(*bbr), GFP_KERNEL);
+
+	if (unlikely(!bbr))
+		return NULL;
+	uwg_bbr_init(bbr, 0, UWG_BBR_DEFAULT_RTT_US);
+	return bbr;
+}
+
+void uwg_peer_bbr_release(struct uwg_peer *peer)
+{
+	struct uwg_bbr *bbr = rcu_dereference_protected(peer->bbr, 1);
+
+	if (!bbr)
+		return;
+	RCU_INIT_POINTER(peer->bbr, NULL);
+	synchronize_net();
+	kfree(bbr);
+}
+
+int uwg_peer_bbr_sync(struct uwg_peer *peer)
+{
+	struct uwg_bbr *bbr;
+
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF) {
+		uwg_peer_bbr_release(peer);
+		return 0;
+	}
+	if (rcu_access_pointer(peer->bbr))
+		return 0;
+
+	bbr = uwg_peer_bbr_alloc();
+	if (unlikely(!bbr))
+		return -ENOMEM;
+	rcu_assign_pointer(peer->bbr, bbr);
+	return 0;
+}
+
+int uwg_peer_bbr_sync_device(struct uwg_device *uwg)
+{
+	struct uwg_peer *peer;
+	int ret = 0;
+
+	lockdep_assert_held(&uwg->device_update_lock);
+
+	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
+		if (unlikely(uwg_peer_bbr_sync(peer)))
+			ret = -ENOMEM;
+	}
+	return ret;
+}
 
 struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
@@ -38,6 +104,9 @@ struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 	WRITE_ONCE(peer->udp_window, DEFAULT_UDP_WINDOW);
 
 	peer->device = uwg;
+	spin_lock_init(&peer->bbr_lock);
+	if (unlikely(uwg_peer_bbr_sync(peer)))
+		goto err_dst;
 	uwg_ext_peer_init(peer);
 	peer->cipher = UWG_CIPHER_CHACHA20POLY1305;
 	uwg_noise_handshake_init(&peer->handshake, &uwg->static_identity,
@@ -66,6 +135,8 @@ struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 	pr_debug("%s: Peer %llu created\n", uwg->dev->name, peer->internal_id);
 	return peer;
 
+err_dst:
+	dst_cache_destroy(&peer->endpoint_cache);
 err:
 	kmem_cache_free(peer_cache, peer);
 	return ERR_PTR(ret);
@@ -149,6 +220,7 @@ static void peer_remove_after_dead(struct uwg_peer *peer)
 	 */
 
 	--peer->device->num_peers;
+	uwg_peer_bbr_release(peer);
 	uwg_peer_put(peer);
 }
 
@@ -192,6 +264,11 @@ static void rcu_release(struct rcu_head *rcu)
 
 	dst_cache_destroy(&peer->endpoint_cache);
 	WARN_ON(uwg_prev_queue_peek(&peer->tx_queue) || uwg_prev_queue_peek(&peer->rx_queue));
+
+	/* The peer is normally released before the last reference is put;
+	 * this covers a peer created but never fully removed.
+	 */
+	kfree(rcu_dereference_protected(peer->bbr, 1));
 
 	/* The final zeroing takes care of clearing any remaining handshake key
 	 * material and other potentially sensitive information.

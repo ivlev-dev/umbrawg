@@ -73,7 +73,12 @@
 - Добавлен kernel BBR-контроллер `bbr.c/h`: BtlBw/RTprop,
   Startup/ProbeBw/ProbeRtt, pacing/cwnd/inflight, ring 2048×24 Б
   (~48 КиБ), selftest в `uwg_mod_init` (99.9% полосы на синтетике).
-  Data-path пока не использует ни FEC-кодек, ни BBR.
+- BBR-пейсинг включён в kernel data-plane: per-peer `uwg_bbr` под RCU,
+  `on_send` на transport-пакетах, `on_ack` в обработчике ACK, задержка
+  token bucket в tx workqueue (только bbr=on, пакеты ≥512 Б, вне
+  atomic/softirq). На tbf 100 Мбит: 89.5 против 92.5 Мбит/с без BBR —
+  регрессии нет. CAPS по-прежнему анонсируют только ACK.
+- FEC-кодек в ядре готов, но send/receive обвязка FEC ещё не включена.
 - Проверен интероп kernel↔Rust при kernel `bbr on, fec 2:1`: ping 0%,
   TCP 2791 Мбит/с, UDP 400/0.
 - Порт в ядро не начат.

@@ -15,6 +15,7 @@
 #include "type.h"
 #include "aead.h"
 #include "ext.h"
+#include "bbr.h"
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
 
@@ -22,6 +23,7 @@
 #include <linux/inetdevice.h>
 #include <linux/socket.h>
 #include <linux/random.h>
+#include <linux/preempt.h>
 #include <net/ip_tunnels.h>
 #include <net/udp.h>
 #include <net/sock.h>
@@ -30,6 +32,12 @@
 #define UWG_TX_MAX_SKBS 128
 #define UWG_GSO_SEGS_MAX 44
 #define UWG_GSO_MAX_BYTES 65000
+
+/* Datagrams below this size are never delayed: pacing them would only add
+ * latency to ACKs, keepalives and interactive traffic.
+ */
+#define UWG_TX_PACE_MIN_BYTES 512
+#define UWG_TX_PACE_MAX_NS (2ULL * NSEC_PER_MSEC)
 
 static void uwg_packet_send_handshake_initiation(struct uwg_peer *peer)
 {
@@ -370,11 +378,84 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 	uwg_packet_send_staged_packets(peer);
 }
 
+static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
+				   struct sk_buff_head *packets)
+{
+	struct uwg_bbr *bbr;
+	struct sk_buff *skb;
+	u64 now_ns;
+
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+		return;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (unlikely(!bbr)) {
+		rcu_read_unlock();
+		return;
+	}
+
+	now_ns = ktime_get_ns();
+	spin_lock_bh(&peer->bbr_lock);
+	skb_queue_walk(packets, skb) {
+		if (PACKET_CB(skb)->is_keepalive)
+			continue;
+		uwg_bbr_on_send(bbr, PACKET_CB(skb)->nonce, skb->len, now_ns);
+	}
+	spin_unlock_bh(&peer->bbr_lock);
+	rcu_read_unlock();
+}
+
+static u64 uwg_packet_pace_delay_ns(struct uwg_peer *peer, unsigned int len)
+{
+	struct uwg_bbr *bbr;
+	u64 delay_ns = 0;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (bbr) {
+		spin_lock_bh(&peer->bbr_lock);
+		delay_ns = uwg_bbr_next_delay_ns(bbr, len, ktime_get_ns());
+		spin_unlock_bh(&peer->bbr_lock);
+	}
+	rcu_read_unlock();
+	return delay_ns;
+}
+
+/*
+ * Spreads bulk datagrams over time at the BBR pacing rate. Only called from
+ * the tx worker, i.e. process context: if that ever changes and the caller
+ * sits in softirq or holds a spinlock, pacing is skipped rather than allowed
+ * to sleep.
+ */
+static void uwg_packet_pace(struct uwg_peer *peer, unsigned int len)
+{
+	u64 delay_ns;
+	u32 delay_us;
+
+	if (len < UWG_TX_PACE_MIN_BYTES)
+		return;
+	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_ON)
+		return;
+	if (!preemptible())
+		return;
+
+	delay_ns = uwg_packet_pace_delay_ns(peer, len);
+	if (delay_ns < NSEC_PER_USEC)
+		return;
+	delay_ns = min(delay_ns, UWG_TX_PACE_MAX_NS);
+	delay_us = (u32)div_u64(delay_ns + NSEC_PER_USEC - 1, NSEC_PER_USEC);
+	usleep_range(delay_us, delay_us + delay_us / 4 + 1);
+}
+
 static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
 				bool *data_sent)
 {
 	bool is_keepalive = PACKET_CB(skb)->is_keepalive;
 	u8 ds = PACKET_CB(skb)->ds;
+
+	if (!is_keepalive)
+		uwg_packet_pace(peer, skb->len);
 
 	if (likely(!uwg_socket_send_skb_to_peer(peer, skb, ds) && !is_keepalive))
 		*data_sent = true;
@@ -430,6 +511,9 @@ static bool uwg_packet_send_gso(struct uwg_peer *peer, struct sk_buff **pkts,
 		keepalive |= PACKET_CB(pkts[i])->is_keepalive;
 		kfree_skb(pkts[i]);
 	}
+
+	if (!keepalive)
+		uwg_packet_pace(peer, count * len);
 
 	if (likely(!uwg_socket_send_skb_to_peer(peer, agg, ds) && !keepalive))
 		*data_sent = true;
@@ -686,6 +770,8 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 		if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES))
 			goto out_invalid;
 	}
+
+	uwg_packet_bbr_on_send(peer, &packets);
 
 	packets.prev->next = NULL;
 	uwg_peer_get(keypair->entry.peer);

@@ -4,6 +4,7 @@
 #include "peer.h"
 #include "device.h"
 #include "queueing.h"
+#include "bbr.h"
 
 #include <linux/errno.h>
 #include <linux/jiffies.h>
@@ -405,6 +406,25 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	spin_unlock_bh(&peer->caps.lock);
 }
 
+static void uwg_ext_bbr_on_ack(struct uwg_peer *peer, u64 largest, u64 bitmap,
+			       u32 ack_delay_us)
+{
+	struct uwg_bbr *bbr;
+
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+		return;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (bbr) {
+		spin_lock_bh(&peer->bbr_lock);
+		uwg_bbr_on_ack(bbr, largest, bitmap, ack_delay_us,
+			       ktime_get_ns());
+		spin_unlock_bh(&peer->bbr_lock);
+	}
+	rcu_read_unlock();
+}
+
 static void uwg_ext_handle_ack(struct uwg_peer *peer, const u8 *payload,
 			       size_t len)
 {
@@ -424,6 +444,8 @@ static void uwg_ext_handle_ack(struct uwg_peer *peer, const u8 *payload,
 	peer->ack_tracker.received++;
 	peer->ack_tracker.last_ack_jiffies = jiffies;
 	peer->ack_tracker.last_ack_ktime = ktime_get();
+
+	uwg_ext_bbr_on_ack(peer, ack.largest, bitmap, ack.ack_delay_us);
 }
 
 static enum uwg_ext_rx_result uwg_ext_handle_fec_shard(const u8 *payload,

@@ -23,6 +23,7 @@
 
 /* Defaults for uwg_bbr_init() when the caller passes zeroes. */
 #define UWG_BBR_DEFAULT_MSS 1400
+#define UWG_BBR_DEFAULT_RTT_US 20000
 #define UWG_BBR_MIN_CWND_PACKETS 4
 
 enum uwg_bbr_mode {
@@ -133,6 +134,7 @@ void uwg_bbr_init(struct uwg_bbr *b, u32 mss, u32 initial_rtt_us);
 void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns);
 void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
 		    u32 ack_delay_us, u64 now_ns);
+u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns);
 u64 uwg_bbr_pacing_rate(const struct uwg_bbr *b);
 u64 uwg_bbr_cwnd(const struct uwg_bbr *b);
 u64 uwg_bbr_inflight(const struct uwg_bbr *b);

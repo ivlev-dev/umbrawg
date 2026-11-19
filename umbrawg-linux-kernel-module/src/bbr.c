@@ -201,6 +201,38 @@ static void uwg_pacer_refill(struct uwg_bbr *b, u64 now_ns)
 		p->allowance = (s64)p->burst;
 }
 
+/*
+ * Same credit computation as uwg_pacer_refill(), without touching the
+ * bucket. Used to answer "how long until len bytes fit?" without changing
+ * the state the sender will see on the next on_send/on_ack.
+ */
+static s64 uwg_pacer_projected_allowance(const struct uwg_bbr_pacer *p,
+					 u64 now_ns)
+{
+	s64 allowance = p->allowance;
+	u64 elapsed;
+	u64 whole;
+
+	if (!p->started)
+		return allowance;
+	elapsed = uwg_ns_sub(now_ns, p->last_ns);
+	if (!elapsed)
+		return allowance;
+
+	if (p->rate && elapsed > (U64_MAX - p->remainder) / p->rate) {
+		whole = p->burst;
+	} else {
+		u64 credit = p->rate * elapsed + p->remainder;
+
+		whole = div64_u64(credit, UWG_BBR_NSEC_PER_SEC);
+	}
+
+	allowance += (s64)min(whole, p->burst);
+	if (allowance > (s64)p->burst)
+		allowance = (s64)p->burst;
+	return allowance;
+}
+
 static u64 uwg_pacer_burst(u64 rate, u64 mss)
 {
 	u64 by_time = div64_u64(rate, 1000);
@@ -850,6 +882,37 @@ void uwg_bbr_on_loss(struct uwg_bbr *b, u64 counter, u64 now_ns)
 	uwg_bbr_update_pacing(b, now_ns);
 }
 
+/*
+ * Token-bucket pacing query: how long the caller should wait before handing
+ * len bytes to the device so that the burst does not exceed the pacing rate.
+ * The projection is read-only: credit for len bytes is charged when the
+ * datagram is registered through uwg_bbr_on_send(), so querying twice for
+ * the same datagram yields the same delay and never starves the bucket.
+ */
+u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns)
+{
+	const struct uwg_bbr_pacer *p = &b->pacer;
+	s64 allowance;
+	u64 deficit;
+	u64 rate;
+
+	if (!len)
+		return 0;
+	if (len > UWG_BBR_MAX_DATAGRAM)
+		len = UWG_BBR_MAX_DATAGRAM;
+
+	allowance = uwg_pacer_projected_allowance(p, now_ns);
+	if (allowance >= (s64)len)
+		return 0;
+	if (allowance >= 0)
+		deficit = (u64)len - (u64)allowance;
+	else
+		deficit = uwg_sat_add((u64)len, (u64)(-allowance));
+
+	rate = max(p->rate, 1ULL);
+	return uwg_mul_div(deficit, UWG_BBR_NSEC_PER_SEC, rate);
+}
+
 u64 uwg_bbr_pacing_rate(const struct uwg_bbr *b)
 {
 	return b->pacing_rate;
@@ -1201,6 +1264,7 @@ static int uwg_bbr_selftest_edges(void)
 {
 	struct uwg_bbr *b;
 	u64 i;
+	u64 delay;
 
 	b = kzalloc(sizeof(*b), GFP_KERNEL);
 	if (!b)
@@ -1271,6 +1335,33 @@ static int uwg_bbr_selftest_edges(void)
 	    uwg_min_rtt_value(b) > 20000000) {
 		pr_err("BBR self-test: ACK delay clamped wrongly (%llu)\n",
 		       uwg_min_rtt_value(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/*
+	 * The pacer projection must report the deficit left by on_send()
+	 * (1400 bytes already charged out of a 2800-byte burst) without
+	 * consuming anything itself.
+	 */
+	uwg_bbr_init(b, 1400, 20000);
+	uwg_bbr_on_send(b, 0, 1400, 1000);
+	delay = uwg_bbr_next_delay_ns(b, 2800, 1000);
+	if (delay != 5000000ULL) {
+		pr_err("BBR self-test: pacing projection %llu, expected 5000000\n",
+		       delay);
+		kfree(b);
+		return -EINVAL;
+	}
+	if (uwg_bbr_next_delay_ns(b, 2800, 1000) != delay ||
+	    uwg_bbr_next_delay_ns(b, 0, 1000) != 0 ||
+	    uwg_bbr_inflight(b) != 1400) {
+		pr_err("BBR self-test: pacing projection is not read-only\n");
+		kfree(b);
+		return -EINVAL;
+	}
+	if (uwg_bbr_next_delay_ns(b, 2800, 1001000) >= delay) {
+		pr_err("BBR self-test: pacing projection ignores refills\n");
 		kfree(b);
 		return -EINVAL;
 	}
