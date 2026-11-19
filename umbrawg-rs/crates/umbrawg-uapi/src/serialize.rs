@@ -54,6 +54,8 @@ fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
         write_field(output, "fwmark", snapshot.fwmark);
     }
     write_field(output, "extra_ports", snapshot.extra_ports);
+    write_field(output, "bbr", &snapshot.bbr);
+    write_field(output, "fec", &snapshot.fec);
 
     let obfuscation = &snapshot.obfuscation;
     for (name, value) in [
@@ -201,6 +203,8 @@ private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 fwmark=4660
 extra_ports=0
+bbr=off
+fec=off
 jc=4
 jmin=40
 jmax=70
@@ -261,7 +265,7 @@ errno=0
         let response = format_get_response(&DeviceSnapshot::default());
         assert_eq!(
             response,
-            "extra_ports=0\nh1=1\nh2=2\nh3=3\nh4=4\nrandom_trailers=0\ndisable_cookies=0\nerrno=0\n\n"
+            "extra_ports=0\nbbr=off\nfec=off\nh1=1\nh2=2\nh3=3\nh4=4\nrandom_trailers=0\ndisable_cookies=0\nerrno=0\n\n"
         );
     }
 
@@ -336,6 +340,8 @@ errno=0
             listen_port: 51820,
             fwmark: 4660,
             extra_ports: 0,
+            bbr: "off".to_owned(),
+            fec: "off".to_owned(),
             obfuscation: ObfuscationSnapshot {
                 jc: 4,
                 jmin: 40,

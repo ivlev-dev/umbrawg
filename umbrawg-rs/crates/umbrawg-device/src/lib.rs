@@ -7,6 +7,7 @@ pub mod buffer;
 mod control;
 pub mod device;
 pub mod error;
+mod ext;
 pub mod gso;
 pub mod index;
 pub mod io;
@@ -25,6 +26,7 @@ pub use device::{
     SentBatch, TimerEvent,
 };
 pub use error::{DeviceError, Result};
+pub use ext::{BbrMode, ExtConfig, FecMode};
 pub use gso::{BatchLayout, GroSegments, GsoGroup, MAX_GSO_GROUPS, MAX_GSO_SEGMENTS};
 pub use index::{IndexEntry, IndexTable};
 pub use io::{

@@ -7,7 +7,8 @@ use crate::{FecConfig, FecError};
 pub struct EncodedBlock {
     /// Identifier of the block; increases by one for every emitted block.
     pub block_id: u32,
-    /// Number of data shards `k` of the configuration.
+    /// Number of data shards `k`; for a partial flush it is the number of
+    /// packets actually present (so a receiver can deliver immediately).
     pub k: u8,
     /// Number of parity shards in `shards`; `0` for a partial block from [`FecEncoder::flush`].
     pub m: u8,
@@ -136,9 +137,14 @@ impl FecEncoder {
                 shards.push(parity);
             }
         }
+        let data_count = u8::try_from(self.pending.len()).unwrap_or(u8::MAX);
         let block = EncodedBlock {
             block_id: self.block_id,
-            k: self.config.data_shards,
+            k: if with_parity {
+                self.config.data_shards
+            } else {
+                data_count
+            },
             m: if with_parity {
                 self.config.parity_shards
             } else {
@@ -205,7 +211,7 @@ mod tests {
         assert_eq!(encoder.push(&[2u8; 30]).unwrap(), None);
         let block = encoder.flush().expect("partial block");
         assert_eq!(block.m, 0);
-        assert_eq!(block.k, 4);
+        assert_eq!(block.k, 2);
         assert_eq!(block.shards.len(), 2);
         assert_eq!(block.shard_len, 32);
         assert_eq!(encoder.flush(), None);

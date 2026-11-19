@@ -22,6 +22,8 @@ impl DeviceControl for Device {
             listen_port: self.listen_port(),
             fwmark: self.fwmark(),
             extra_ports: self.extra_ports(),
+            bbr: self.ext_config().bbr.as_str().to_owned(),
+            fec: self.ext_config().fec.as_string(),
             obfuscation: obfuscation_snapshot(&params),
             timings: timings_snapshot(&self.timings()),
             peers: self
@@ -35,6 +37,26 @@ impl DeviceControl for Device {
     fn apply(&self, request: SetRequest) -> Result<(), UapiError> {
         let obfuscation = build_obfuscation(self, request.obfuscation)?;
         let timings = build_timings(self, request.timings)?;
+        let mut ext = self.ext_config();
+        if let Some(value) = request.bbr.as_deref() {
+            ext.bbr = crate::BbrMode::parse(value).ok_or_else(|| UapiError::InvalidValue {
+                key: "bbr".to_owned(),
+                value: value.to_owned(),
+            })?;
+        }
+        if let Some(value) = request.fec.as_deref() {
+            let fec = crate::FecMode::parse(value).ok_or_else(|| UapiError::InvalidValue {
+                key: "fec".to_owned(),
+                value: value.to_owned(),
+            })?;
+            if fec.config().is_none() {
+                return Err(UapiError::InvalidValue {
+                    key: "fec".to_owned(),
+                    value: value.to_owned(),
+                });
+            }
+            ext.fec = fec;
+        }
 
         if let Some(key) = request.private_key {
             let key = if key.is_zero() { None } else { Some(key) };
@@ -51,6 +73,7 @@ impl DeviceControl for Device {
         }
         self.set_obfuscation(obfuscation).map_err(internal)?;
         self.set_timings(timings).map_err(internal)?;
+        self.set_ext_config(ext);
         if request.replace_peers {
             self.remove_all_peers();
         }

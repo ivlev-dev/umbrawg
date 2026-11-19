@@ -529,7 +529,7 @@ impl Default for PeerSnapshot {
 }
 
 /// Complete device state returned by [`DeviceControl::snapshot`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceSnapshot {
     /// Device private key; `None` means no key is configured.
     pub private_key: Option<Key>,
@@ -539,12 +539,32 @@ pub struct DeviceSnapshot {
     pub fwmark: u32,
     /// Number of additional external UDP ports.
     pub extra_ports: u8,
+    /// BBRv3 mode: `off`, `monitor` or `on`.
+    pub bbr: String,
+    /// FEC mode: `off`, `adaptive` or `K:M`.
+    pub fec: String,
     /// Obfuscation 3.1 parameters.
     pub obfuscation: ObfuscationSnapshot,
     /// Handshake timing parameters.
     pub timings: TimingSnapshot,
     /// Configured peers.
     pub peers: Vec<PeerSnapshot>,
+}
+
+impl Default for DeviceSnapshot {
+    fn default() -> Self {
+        Self {
+            private_key: None,
+            listen_port: 0,
+            fwmark: 0,
+            extra_ports: 0,
+            bbr: "off".to_owned(),
+            fec: "off".to_owned(),
+            obfuscation: ObfuscationSnapshot::default(),
+            timings: TimingSnapshot::default(),
+            peers: Vec::new(),
+        }
+    }
 }
 
 /// Update for one of the `i1..i5` special-packet templates.
@@ -747,6 +767,10 @@ pub struct SetRequest {
     pub fwmark: Option<u32>,
     /// New number of additional external UDP ports, `0..=8`.
     pub extra_ports: Option<u8>,
+    /// New BBRv3 mode: `off`, `monitor` or `on`.
+    pub bbr: Option<String>,
+    /// New FEC mode: `off`, `adaptive` or `K:M`.
+    pub fec: Option<String>,
     /// Remove all peers before processing [`Self::peers`].
     pub replace_peers: bool,
     /// Obfuscation 3.1 parameters.

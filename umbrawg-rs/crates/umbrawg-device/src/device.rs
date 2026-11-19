@@ -10,7 +10,9 @@ use rand_core::{OsRng, RngCore};
 
 use umbrawg_crypto::tai64n::Tai64N;
 use umbrawg_crypto::{aead, Key, PrivateKey, PublicKey};
+use umbrawg_fec::{EncodedBlock, FecShard};
 use umbrawg_noise::{CookieChecker, StaticIdentity};
+use umbrawg_proto::control::{Ack, Caps, ControlKind, FecShardHeader};
 use umbrawg_proto::messages::limits::{
     DEFAULT_UDP_WINDOW, INITIATIONS_PER_SECOND, MAX_PEERS_PER_DEVICE,
 };
@@ -94,6 +96,7 @@ pub struct DeviceConfig {
     pub obfuscation: ObfParams,
     pub timings: Timings,
     pub staged_pool_capacity: usize,
+    pub ext: crate::ExtConfig,
 }
 
 impl Default for DeviceConfig {
@@ -107,6 +110,7 @@ impl Default for DeviceConfig {
             obfuscation: ObfParams::default(),
             timings: Timings::new(),
             staged_pool_capacity: 128,
+            ext: crate::ExtConfig::default(),
         }
     }
 }
@@ -161,6 +165,7 @@ pub struct Device {
     next_peer_id: AtomicU32,
     staging_pool: Arc<BufferPool>,
     incoming_drops: IncomingDropCounters,
+    ext_config: RwLock<crate::ExtConfig>,
 }
 
 impl Device {
@@ -205,6 +210,7 @@ impl Device {
                 DEFAULT_BUFFER_SIZE,
             )),
             incoming_drops: IncomingDropCounters::default(),
+            ext_config: RwLock::new(config.ext),
         })
     }
 
@@ -330,6 +336,21 @@ impl Device {
     }
 
     #[must_use]
+    pub fn fec_enabled(&self) -> bool {
+        self.ext_config.read().fec != crate::FecMode::Off
+    }
+
+    pub fn ext_config(&self) -> crate::ExtConfig {
+        *self.ext_config.read()
+    }
+
+    pub fn set_ext_config(&self, config: crate::ExtConfig) {
+        *self.ext_config.write() = config;
+        for peer in self.peers.load().values() {
+            peer.configure_extension(config);
+        }
+    }
+
     pub fn listen_port(&self) -> u16 {
         self.listen_port.load(Ordering::Relaxed)
     }
@@ -436,6 +457,7 @@ impl Device {
         let id = self.allocate_peer_id();
         let identity = self.identity.read();
         let peer = Arc::new(Peer::new(id, config, identity.as_ref()));
+        peer.configure_extension(self.ext_config());
         drop(identity);
         let mut by_key = (**self.peers.load()).clone();
         by_key.insert(key, Arc::clone(&peer));
@@ -791,6 +813,100 @@ impl Device {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn send_fec_block_direct<R: RngCore, S: DatagramSink>(
+        &self,
+        peer: &Arc<Peer>,
+        block: &EncodedBlock,
+        ctx: &mut IoContext<'_, R, S>,
+    ) -> Result<usize> {
+        let Some(endpoint) = peer.endpoint() else {
+            return Err(DeviceError::NoEndpoint);
+        };
+        let mut frame = [0u8; 4096];
+        let mut dst = [0u8; 4096];
+        let mut sent = 0usize;
+        for (index, shard) in block.shards.iter().enumerate() {
+            let header = umbrawg_proto::control::FecShardHeader {
+                block_id: block.block_id,
+                index: u8::try_from(index).map_err(|_| DeviceError::PacketTooLarge)?,
+                k: block.k,
+                m: block.m,
+                parity: index >= usize::from(block.k),
+                shard_len: block.shard_len,
+            };
+            let header_len = header
+                .encode(&mut frame)
+                .map_err(|_| DeviceError::PacketTooLarge)?;
+            let end = header_len + shard.len();
+            if end > frame.len() {
+                return Err(DeviceError::PacketTooLarge);
+            }
+            frame[header_len..end].copy_from_slice(shard);
+            let length = self.encrypt_packet(peer, &frame[..end], &mut dst, ctx.rng, ctx.now)?;
+            ctx.io
+                .send_datagram(endpoint, Some(peer), &dst[..length], None);
+            peer.add_tx(length as u64);
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_fec_block<R: RngCore>(
+        &self,
+        peer: &Arc<Peer>,
+        keypair: &Keypair,
+        params: &ObfParams,
+        timings: &Timings,
+        block: &EncodedBlock,
+        dst: &mut [u8],
+        mut offset: usize,
+        rng: &mut R,
+        now: Instant,
+        layout: &mut BatchLayout,
+    ) -> Result<usize> {
+        let mut frame = [0u8; 2048];
+        for (index, shard) in block.shards.iter().enumerate() {
+            let header = umbrawg_proto::control::FecShardHeader {
+                block_id: block.block_id,
+                index: u8::try_from(index).map_err(|_| DeviceError::PacketTooLarge)?,
+                k: block.k,
+                m: block.m,
+                parity: index >= usize::from(block.k),
+                shard_len: block.shard_len,
+            };
+            let header_len = header
+                .encode(&mut frame)
+                .map_err(|_| DeviceError::PacketTooLarge)?;
+            let end = header_len + shard.len();
+            if end > frame.len() {
+                return Err(DeviceError::PacketTooLarge);
+            }
+            frame[header_len..end].copy_from_slice(shard);
+            if offset >= dst.len() {
+                return Err(DeviceError::BufferTooSmall {
+                    required: offset + 1,
+                    available: dst.len(),
+                });
+            }
+            let length = self.encrypt_with_keypair_ctx(
+                peer,
+                keypair,
+                params,
+                timings,
+                &frame[..end],
+                &mut dst[offset..],
+                rng,
+                now,
+            )?;
+            if !layout.push(offset, length) {
+                return Err(DeviceError::PacketTooLarge);
+            }
+            offset += length;
+        }
+        Ok(offset)
+    }
+
     fn encrypt_with_keypair<R: RngCore>(
         &self,
         peer: &Peer,
@@ -861,6 +977,9 @@ impl Device {
             .seal_in_place(nonce, &mut dst[header_end..total])
             .ok_or(DeviceError::PacketTooLarge)?;
         peer.observe_udp_window(total as u32);
+        if plaintext.first().is_some_and(|byte| *byte != 0) {
+            peer.extension().on_send(nonce, total, now);
+        }
         Ok(total)
     }
 
@@ -917,7 +1036,7 @@ impl Device {
         }
     }
 
-    pub fn flush_staged<R: RngCore, S: DatagramSink>(
+    pub fn flush_staged<R: RngCore, S: PacketIo>(
         &self,
         peer: &Arc<Peer>,
         ctx: &mut IoContext<'_, R, S>,
@@ -951,6 +1070,44 @@ impl Device {
             self.timers_any_authenticated_packet_traversal(peer, ctx.rng, ctx.now);
             self.timers_any_authenticated_packet_sent(peer);
             self.timers_data_sent(peer, &timings, ctx.rng, ctx.now);
+        }
+        let packets = peer.extension().fec_poll(ctx.now);
+        for packet in packets {
+            let Some((length, address)) = ip_packet_info(&packet) else {
+                continue;
+            };
+            if self.allowed_ips.lookup(address) != Some(peer.id()) {
+                self.incoming_drops.note_allowed_ips();
+                continue;
+            }
+            ctx.io.deliver(peer, &packet[..length]);
+        }
+        if let Some(block) = peer.extension().fec_flush_due(ctx.now) {
+            let _ = self.send_fec_block_direct(peer, &block, ctx);
+        }
+        if peer.current_keypair().is_some() {
+            let frames = peer.extension().pending_control(ctx.now);
+            for frame in frames {
+                let mut dst = [0u8; 1024];
+                match self.encrypt_packet(peer, &frame, &mut dst, ctx.rng, ctx.now) {
+                    Ok(length) => {
+                        let Some(endpoint) = peer.endpoint() else {
+                            peer.extension().push_control(frame);
+                            break;
+                        };
+                        ctx.io
+                            .send_datagram(endpoint, Some(peer), &dst[..length], None);
+                        peer.add_tx(length as u64);
+                        peer.extension().note_caps_sent(ctx.now);
+                        sent += 1;
+                    }
+                    Err(DeviceError::NoKeypair | DeviceError::KeypairExpired) => {
+                        peer.extension().push_control(frame);
+                        break;
+                    }
+                    Err(_) => {}
+                }
+            }
         }
         Ok(sent)
     }
@@ -1029,6 +1186,58 @@ impl Device {
                 endpoint,
             });
         };
+        if peer.extension().fec_tx_active() {
+            let mut offset = 0usize;
+            for plaintext in plaintexts {
+                match peer.extension().fec_push(plaintext, ctx.now) {
+                    Ok(Some(block)) => {
+                        offset = self.encode_fec_block(
+                            peer,
+                            &keypair,
+                            &params,
+                            &timings,
+                            &block,
+                            dst,
+                            offset,
+                            ctx.rng,
+                            ctx.now,
+                            &mut layout,
+                        )?;
+                    }
+                    Ok(None) => {}
+                    Err(_) => {
+                        if offset >= dst.len() {
+                            return Err(DeviceError::BufferTooSmall {
+                                required: offset + 1,
+                                available: dst.len(),
+                            });
+                        }
+                        let length = self.encrypt_with_keypair_ctx(
+                            peer,
+                            &keypair,
+                            &params,
+                            &timings,
+                            plaintext,
+                            &mut dst[offset..],
+                            ctx.rng,
+                            ctx.now,
+                        )?;
+                        if !layout.push(offset, length) {
+                            return Err(DeviceError::PacketTooLarge);
+                        }
+                        offset += length;
+                    }
+                }
+            }
+            peer.add_tx(offset as u64);
+            return Ok(SentBatch {
+                layout,
+                staged: 0,
+                sent: plaintexts.len(),
+                needs_handshake: false,
+                endpoint,
+            });
+        }
         let mut offset = 0;
         let mut total = 0;
         for plaintext in plaintexts {
@@ -1062,6 +1271,16 @@ impl Device {
             needs_handshake: false,
             endpoint,
         })
+    }
+
+    #[must_use]
+    pub fn pacing_delay(&self, peer: &Peer, bytes: usize, now: Instant) -> Duration {
+        peer.extension().pacing_delay(bytes, now)
+    }
+
+    #[must_use]
+    pub fn fec_packet_limit(&self, peer: &Peer) -> Option<usize> {
+        peer.extension().fec_packet_limit()
     }
 
     pub fn after_batch_sent<R: RngCore, S: DatagramSink>(
@@ -1250,6 +1469,10 @@ impl Device {
         if !peer.running() {
             return Ok(IncomingOutcome::Dropped);
         }
+        if let Some(kind) = umbrawg_proto::control::extension_kind(plaintext) {
+            return self.handle_extension(&peer, kind, counter, plaintext, ctx);
+        }
+        peer.extension().observe_received(counter, ctx.now);
         let plaintext_len = plaintext.len();
         peer.observe_udp_window((header_end + plaintext_len) as u32);
         peer.add_rx((plaintext_len + MESSAGE_MINIMUM_LENGTH) as u64);
@@ -1264,6 +1487,7 @@ impl Device {
             false
         };
         if promoted {
+            peer.extension().reset_feedback();
             self.flush_staged(&peer, ctx)?;
         }
         self.timers_any_authenticated_packet_traversal(&peer, ctx.rng, ctx.now);
@@ -1282,6 +1506,67 @@ impl Device {
         self.timers_data_received(&peer, timings, ctx.rng, ctx.now);
         ctx.io.deliver(&peer, &plaintext[..length]);
         Ok(IncomingOutcome::Delivered(length))
+    }
+
+    fn handle_extension<R: RngCore, S: PacketIo>(
+        &self,
+        peer: &Arc<Peer>,
+        kind: ControlKind,
+        counter: u64,
+        plaintext: &[u8],
+        ctx: &mut IoContext<'_, R, S>,
+    ) -> Result<IncomingOutcome> {
+        match kind {
+            ControlKind::Caps => {
+                let Ok(caps) = Caps::decode(plaintext) else {
+                    return Ok(IncomingOutcome::Dropped);
+                };
+                peer.extension().handle_caps(caps);
+                Ok(IncomingOutcome::Keepalive)
+            }
+            ControlKind::Ack => {
+                let Ok(ack) = Ack::decode(plaintext) else {
+                    return Ok(IncomingOutcome::Dropped);
+                };
+                peer.extension().on_ack(&ack, ctx.now);
+                Ok(IncomingOutcome::Keepalive)
+            }
+            ControlKind::FecShard => {
+                peer.extension().observe_received(counter, ctx.now);
+                let Ok((header, payload)) = FecShardHeader::decode(plaintext) else {
+                    return Ok(IncomingOutcome::Dropped);
+                };
+                if header.validate().is_err() {
+                    return Ok(IncomingOutcome::Dropped);
+                }
+                let shard = FecShard {
+                    block_id: header.block_id,
+                    index: header.index,
+                    k: header.k,
+                    m: header.m,
+                    shard_len: header.shard_len,
+                    payload,
+                };
+                let packets = peer.extension().fec_decode(shard, ctx.now);
+                let mut delivered = 0usize;
+                for packet in packets {
+                    let Some((length, address)) = ip_packet_info(&packet) else {
+                        continue;
+                    };
+                    if self.allowed_ips.lookup(address) != Some(peer.id()) {
+                        self.incoming_drops.note_allowed_ips();
+                        continue;
+                    }
+                    ctx.io.deliver(peer, &packet[..length]);
+                    delivered = delivered.saturating_add(length);
+                }
+                if delivered > 0 {
+                    Ok(IncomingOutcome::Delivered(delivered))
+                } else {
+                    Ok(IncomingOutcome::Keepalive)
+                }
+            }
+        }
     }
 
     fn handle_initiation<R: RngCore, S: PacketIo>(

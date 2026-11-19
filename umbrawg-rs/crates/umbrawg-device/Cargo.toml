@@ -11,8 +11,11 @@ aes-ring = ["umbrawg-crypto/aes-ring"]
 ring-chacha = ["umbrawg-crypto/ring-chacha"]
 
 [dependencies]
+log.workspace = true
 umbrawg-crypto.workspace = true
 umbrawg-proto.workspace = true
+umbrawg-cc.workspace = true
+umbrawg-fec.workspace = true
 umbrawg-noise.workspace = true
 umbrawg-uapi.workspace = true
 thiserror.workspace = true

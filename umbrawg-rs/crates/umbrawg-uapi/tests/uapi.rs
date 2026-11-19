@@ -167,6 +167,8 @@ impl DeviceControl for MockControl {
             listen_port: state.listen_port,
             fwmark: state.fwmark,
             extra_ports: state.extra_ports,
+            bbr: "off".to_owned(),
+            fec: "off".to_owned(),
             obfuscation: state.obfuscation.clone(),
             timings: state.timings,
             peers: state
@@ -724,6 +726,8 @@ allowed_ip=::/0
         "listen_port=65535\n",
         "fwmark=4294967295\n",
         "extra_ports=8\n",
+        "bbr=off\n",
+        "fec=off\n",
         "jc=65535\n",
         "jmin=65535\n",
         "jmax=65535\n",

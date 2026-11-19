@@ -1095,10 +1095,13 @@ name = "umbrawg-device"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "log",
  "parking_lot",
  "rand_core",
  "thiserror",
+ "umbrawg-cc",
  "umbrawg-crypto",
+ "umbrawg-fec",
  "umbrawg-noise",
  "umbrawg-proto",
  "umbrawg-uapi",

@@ -111,10 +111,9 @@ impl FecDecoder {
         now: Instant,
     ) -> Result<Vec<DecodedBlock>, FecError> {
         self.validate(&shard)?;
-        let k = match &self.code {
-            Ok(code) => code.k(),
-            Err(error) => return Err(*error),
-        };
+        if let Err(error) = &self.code {
+            return Err(*error);
+        }
         let Some(seq) = self.clock.extend(shard.block_id) else {
             return Ok(Vec::new());
         };
@@ -156,8 +155,11 @@ impl FecDecoder {
             block.present += 1;
         }
         block.shards[index] = Some(shard.payload.to_vec());
-        if block.packets.is_none() && block.present >= k {
-            if let Ok(code) = &self.code {
+        let data_shards = usize::from(shard.k);
+        if block.packets.is_none() && block.present >= data_shards {
+            if block.m == 0 {
+                block.packets = Some(extract_packets(&block.shards, data_shards));
+            } else if let Ok(code) = &self.code {
                 block.packets = decode_block(code, &mut block.shards);
             }
         }
@@ -175,9 +177,9 @@ impl FecDecoder {
     }
 
     fn validate(&self, shard: &FecShard<'_>) -> Result<(), FecError> {
-        if shard.k != self.config.data_shards
-            || (shard.m != self.config.parity_shards && shard.m != 0)
-        {
+        let k_matches = shard.k == self.config.data_shards
+            || (shard.m == 0 && shard.k >= 1 && shard.k <= self.config.data_shards);
+        if !k_matches || (shard.m != self.config.parity_shards && shard.m != 0) {
             return Err(FecError::ConfigMismatch {
                 expected_k: self.config.data_shards,
                 expected_m: self.config.parity_shards,

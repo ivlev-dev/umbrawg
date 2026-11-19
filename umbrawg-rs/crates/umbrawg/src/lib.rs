@@ -12,8 +12,8 @@ use std::time::{Duration, Instant};
 
 use umbrawg_crypto::random::BufferedRng;
 use umbrawg_device::{
-    DatagramSink, Device, DeviceConfig, DeviceError, IncomingMeta, IoContext, PacketIo, Peer,
-    DEFAULT_UNDER_LOAD_PPS,
+    BbrMode, DatagramSink, Device, DeviceConfig, DeviceError, ExtConfig, FecMode, IncomingMeta,
+    IoContext, PacketIo, Peer, DEFAULT_UNDER_LOAD_PPS,
 };
 use umbrawg_transport::{
     AddressFamily, Endpoint, GsoLimits, GsoSize, OpenOptions, RecvQueue, Socket, SocketSet,
@@ -343,6 +343,7 @@ fn open_socket_set(
     fwmark: u32,
     buffer: usize,
     limits: GsoLimits,
+    disable_gso: bool,
 ) -> io::Result<SocketSet> {
     let mut sockets = Vec::with_capacity(extra + 1);
     let primary = open_socket(port, fwmark, buffer, limits)?;
@@ -364,7 +365,13 @@ fn open_socket_set(
             }
         }
     }
-    SocketSet::new(sockets).map_err(|error| io::Error::other(error.to_string()))
+    let set = SocketSet::new(sockets).map_err(|error| io::Error::other(error.to_string()))?;
+    if disable_gso {
+        for socket in set.all() {
+            socket.disable_gso();
+        }
+    }
+    Ok(set)
 }
 
 /// Проверяет, нужно ли пересоздать набор сокетов.
@@ -415,6 +422,67 @@ fn batch_flush_needed(used: usize, packets: usize, record: usize, capacity: usiz
 
 #[allow(clippy::too_many_arguments)]
 fn send_run<R: rand_core::RngCore>(
+    device: &Device,
+    socket: &dyn SocketSource,
+    tun: &Tun,
+    rng: &mut R,
+    now: Instant,
+    scratch: &mut [u8],
+    fallback: &mut [u8],
+    batch_buffer: &mut [u8],
+    batch: &mut TxBatch,
+    peer: &Arc<Peer>,
+    plaintexts: &[&[u8]],
+    rekey: &mut Vec<Arc<Peer>>,
+    rx: &mut RxBatch,
+) {
+    if plaintexts.is_empty() {
+        return;
+    }
+    let bytes: usize = plaintexts.iter().map(|packet| packet.len()).sum();
+    let delay = device.pacing_delay(peer, bytes, now);
+    if delay > Duration::ZERO {
+        thread::sleep(delay.min(Duration::from_millis(1)));
+    }
+    if let Some(limit) = device.fec_packet_limit(peer) {
+        for chunk in plaintexts.chunks(limit.max(1)) {
+            send_run_inner(
+                device,
+                socket,
+                tun,
+                rng,
+                now,
+                scratch,
+                fallback,
+                batch_buffer,
+                batch,
+                peer,
+                chunk,
+                rekey,
+                rx,
+            );
+        }
+        return;
+    }
+    send_run_inner(
+        device,
+        socket,
+        tun,
+        rng,
+        now,
+        scratch,
+        fallback,
+        batch_buffer,
+        batch,
+        peer,
+        plaintexts,
+        rekey,
+        rx,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
+fn send_run_inner<R: rand_core::RngCore>(
     device: &Device,
     socket: &dyn SocketSource,
     tun: &Tun,
@@ -683,6 +751,7 @@ fn worker_loop(
                 want_mark,
                 socket_buffer,
                 underlay.gso_limits(),
+                device.fec_enabled(),
             ) {
                 Ok(new_socket) => {
                     bound_extra = Some(want_extra);
@@ -877,7 +946,18 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         .map(|value| value.get())
         .unwrap_or(1);
 
-    let device = Arc::new(Device::new(DeviceConfig::default())?);
+    let ext = ext_config_from_env().map_err(io::Error::other)?;
+    log::info!(
+        "extension: bbr={} fec={} shard={} ack_interval={}",
+        ext.bbr.as_str(),
+        ext.fec.as_string(),
+        ext.max_shard_len,
+        ext.ack_interval
+    );
+    let device = Arc::new(Device::new(DeviceConfig {
+        ext,
+        ..DeviceConfig::default()
+    })?);
     apply_under_load_config(&device);
     log::info!("{underlay}");
     let guard = Arc::new(MtuGuard::new(underlay));
@@ -902,7 +982,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
 
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
-        .with_offload(true)
+        .with_offload(device.ext_config().fec == FecMode::Off)
         .with_vnet_hdr_size(VirtioNetHdr::LEN)
         .with_nonblocking(true)
         .with_mtu(u32::from(device.mtu()));
@@ -951,6 +1031,38 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
     Ok(())
 }
 
+fn ext_config_from_env() -> Result<ExtConfig, String> {
+    let mut config = ExtConfig::default();
+    if let Ok(value) = env::var("UMBRAWG_BBR") {
+        config.bbr = BbrMode::parse(&value)
+            .ok_or_else(|| format!("UMBRAWG_BBR: неизвестный режим {value:?}"))?;
+    }
+    if let Ok(value) = env::var("UMBRAWG_FEC") {
+        config.fec = FecMode::parse(&value)
+            .ok_or_else(|| format!("UMBRAWG_FEC: неизвестный режим {value:?}"))?;
+        if config.fec != FecMode::Off && config.fec.config().is_none() {
+            return Err(format!("UMBRAWG_FEC: недопустимые параметры {value:?}"));
+        }
+    }
+    if let Ok(value) = env::var("UMBRAWG_FEC_SHARD") {
+        config.max_shard_len = value
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|len| (64..=1900).contains(len))
+            .ok_or_else(|| format!("UMBRAWG_FEC_SHARD: некорректно {value:?}"))?;
+    }
+    if let Ok(value) = env::var("UMBRAWG_ACK_INTERVAL") {
+        config.ack_interval = value
+            .trim()
+            .parse::<u16>()
+            .ok()
+            .filter(|interval| *interval > 0)
+            .ok_or_else(|| format!("UMBRAWG_ACK_INTERVAL: некорректно {value:?}"))?;
+    }
+    Ok(config)
+}
+
 fn wait_for_shutdown(server: ServerHandle) -> Result<(), Box<dyn std::error::Error>> {
     while !shutdown_requested() {
         thread::sleep(Duration::from_millis(100));
@@ -970,7 +1082,7 @@ fn run_parallel(
     let workers = parallel.workers;
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
-        .with_offload(true)
+        .with_offload(device.ext_config().fec == FecMode::Off)
         .with_vnet_hdr_size(VirtioNetHdr::LEN)
         .with_nonblocking(true)
         .with_mtu(u32::from(device.mtu()));

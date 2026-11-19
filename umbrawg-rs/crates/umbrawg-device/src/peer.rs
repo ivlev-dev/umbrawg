@@ -15,6 +15,7 @@ use umbrawg_uapi::Cipher;
 use crate::allowedips::{AllowedIp, PeerId};
 use crate::buffer::Buffer;
 use crate::error::{DeviceError, Result};
+use crate::ext::{ExtConfig, PeerExtension};
 use crate::keypair::{Keypair, Keypairs, RemovedIndexes};
 use crate::timers::Timers;
 
@@ -144,6 +145,7 @@ pub struct Peer {
     pub(crate) handshake: Mutex<PeerHandshake>,
     pub(crate) keypairs: RwLock<Keypairs>,
     pub(crate) cookie_generator: Mutex<CookieGenerator>,
+    pub(crate) extension: Mutex<PeerExtension>,
     pub(crate) timers: Mutex<Timers>,
     next_deadline: AtomicU64,
     pub(crate) staged: Mutex<StagedQueue>,
@@ -182,6 +184,7 @@ impl Peer {
             }),
             keypairs: RwLock::new(Keypairs::new()),
             cookie_generator: Mutex::new(CookieGenerator::new(public_key)),
+            extension: Mutex::new(PeerExtension::default()),
             timers: Mutex::new(Timers::new()),
             next_deadline: AtomicU64::new(NO_DEADLINE),
             staged: Mutex::new(StagedQueue::new(MAX_STAGED_PACKETS)),
@@ -207,7 +210,14 @@ impl Peer {
         *self.preshared_key.write() = key;
     }
 
-    #[must_use]
+    pub(crate) fn configure_extension(&self, config: ExtConfig) {
+        self.extension.lock().configure(config);
+    }
+
+    pub(crate) fn extension(&self) -> parking_lot::MutexGuard<'_, PeerExtension> {
+        self.extension.lock()
+    }
+
     pub fn running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }

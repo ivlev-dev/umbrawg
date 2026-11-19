@@ -243,7 +243,7 @@ fn partial_flush_produces_data_only_block() {
     assert!(encoder.push(&[2u8; 10]).unwrap().is_none());
     let block = encoder.flush().expect("partial block");
     assert_eq!(block.block_id, 0);
-    assert_eq!(block.k, 4);
+    assert_eq!(block.k, 2);
     assert_eq!(block.m, 0);
     assert_eq!(block.shard_len, 32);
     assert_eq!(block.shards.len(), 2);
@@ -256,10 +256,9 @@ fn partial_flush_produces_data_only_block() {
     for shard in shards_of(&block) {
         output.extend(decoder.push_at(shard, now).expect("valid shard"));
     }
-    assert!(output.is_empty());
-    assert!(decoder.poll(now + BLOCK_TIMEOUT / 2).is_empty());
-    output.extend(decoder.poll(now + BLOCK_TIMEOUT * 2));
     assert_eq!(output.len(), 1);
+    assert_eq!(output[0].packets, vec![vec![1u8; 30], vec![2u8; 10]]);
+    let _ = BLOCK_TIMEOUT;
     assert_eq!(output[0].packets, vec![vec![1u8; 30], vec![2u8; 10]]);
 }
 

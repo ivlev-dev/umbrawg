@@ -197,9 +197,7 @@ impl Ack {
         let mut bitmap = [0u8; 8];
         bitmap[..bitmap_len].copy_from_slice(&body[ACK_HEADER_LEN..ACK_HEADER_LEN + bitmap_len]);
         Ok(Self {
-            largest_counter: u64::from_le_bytes(
-                body[0..8].try_into().expect("checked length"),
-            ),
+            largest_counter: u64::from_le_bytes(body[0..8].try_into().expect("checked length")),
             ack_delay_us: u32::from_le_bytes(body[8..12].try_into().expect("checked length")),
             ecn_ce: body[12] & 1 != 0,
             received: u64::from_le_bytes(bitmap),
@@ -248,7 +246,7 @@ impl FecShardHeader {
         output[15] = u8::from(self.parity);
         output[16..18].copy_from_slice(&self.shard_len.to_le_bytes());
         output[18..20].copy_from_slice(&0u16.to_le_bytes());
-        Ok(total)
+        Ok(EXTENSION_HEADER_LEN + FEC_HEADER_LEN)
     }
 
     /// Decodes the header and returns it with the shard payload.
@@ -283,7 +281,7 @@ impl FecShardHeader {
 
     /// Validates the shard index against `k` and `m`.
     pub fn validate(&self) -> Result<()> {
-        if self.k == 0 || self.m == 0 || u16::from(self.k) + u16::from(self.m) > 255 {
+        if self.k == 0 || u16::from(self.k) + u16::from(self.m) > 255 {
             return Err(ProtoError::InvalidValue {
                 name: "fec_shards".to_owned(),
                 value: format!("{}+{}", self.k, self.m),
@@ -431,7 +429,7 @@ mod tests {
         header.validate().unwrap();
         let mut buffer = [0u8; 20 + 1200];
         let written = header.encode(&mut buffer).unwrap();
-        assert_eq!(written, 20 + 1200);
+        assert_eq!(written, 20);
         buffer[20..].fill(0xaa);
         let (parsed, payload) = FecShardHeader::decode(&buffer).unwrap();
         assert_eq!(parsed, header);

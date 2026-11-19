@@ -114,6 +114,8 @@ fn apply_device_line(request: &mut SetRequest, key: &str, value: &str) -> Result
         "listen_port" => request.listen_port = Some(parse_u16(key, value)?),
         "fwmark" => request.fwmark = Some(parse_u32(key, value)?),
         "extra_ports" => request.extra_ports = Some(parse_extra_ports(key, value)?),
+        "bbr" => request.bbr = Some(value.trim().to_owned()),
+        "fec" => request.fec = Some(value.trim().to_owned()),
         "replace_peers" => {
             require_true(key, value)?;
             request.replace_peers = true;
