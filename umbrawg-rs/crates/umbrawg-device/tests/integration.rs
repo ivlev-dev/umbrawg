@@ -8,7 +8,7 @@ use umbrawg_crypto::{Key, PrivateKey, PublicKey};
 use umbrawg_device::{
     AllowedIp, DatagramSink, Device, DeviceConfig, DeviceControl, DeviceError, IncomingMeta,
     IncomingOutcome, IoContext, PacketIo, Peer, PeerConfig, PeerState, PreparedIncoming,
-    SendOutcome, Timings,
+    SendOutcome, Timings, DEFAULT_EXTRA_PORTS,
 };
 use umbrawg_proto::special::SpecialPacket;
 use umbrawg_proto::ObfParams;
@@ -864,6 +864,7 @@ fn uapi_snapshot_and_apply_patch_the_device() {
     );
     assert!(snapshot.peers[0].last_handshake_time_sec > 0);
     assert_eq!(snapshot.peers[0].advanced_security, None);
+    assert_eq!(snapshot.extra_ports, DEFAULT_EXTRA_PORTS);
 
     let mut advanced = PeerRequest::new(pair.b.public_key().unwrap());
     advanced.advanced_security = Some(true);
@@ -915,6 +916,22 @@ fn uapi_snapshot_and_apply_patch_the_device() {
     assert!(snapshot.obfuscation.random_trailers);
     assert_eq!(snapshot.timings.keepalive_timeout.lo(), 4);
     assert_eq!(snapshot.timings.keepalive_timeout.hi(), 6);
+
+    let request = SetRequest {
+        extra_ports: Some(2),
+        ..SetRequest::default()
+    };
+    pair.a.apply(request).unwrap();
+    assert_eq!(pair.a.extra_ports(), 2);
+    assert_eq!(pair.a.snapshot().extra_ports, 2);
+
+    let request = SetRequest {
+        extra_ports: Some(9),
+        ..SetRequest::default()
+    };
+    pair.a.apply(request).unwrap();
+    assert_eq!(pair.a.extra_ports(), 8);
+    assert_eq!(pair.a.snapshot().extra_ports, 8);
 }
 
 #[test]

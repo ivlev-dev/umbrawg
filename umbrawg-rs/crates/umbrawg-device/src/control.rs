@@ -21,6 +21,7 @@ impl DeviceControl for Device {
             private_key: self.private_key(),
             listen_port: self.listen_port(),
             fwmark: self.fwmark(),
+            extra_ports: self.extra_ports(),
             obfuscation: obfuscation_snapshot(&params),
             timings: timings_snapshot(&self.timings()),
             peers: self
@@ -41,6 +42,9 @@ impl DeviceControl for Device {
         }
         if let Some(mark) = request.fwmark {
             self.set_fwmark(mark);
+        }
+        if let Some(extra_ports) = request.extra_ports {
+            self.set_extra_ports(extra_ports);
         }
         if request.replace_peers {
             self.remove_all_peers();

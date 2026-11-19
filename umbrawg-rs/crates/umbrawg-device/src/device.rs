@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -36,6 +36,7 @@ use crate::peer::{Peer, PeerConfig, PeerState};
 use crate::ratelimiter::RateLimiter;
 use crate::timers::{Range16, TimerKind, Timings};
 use crate::underload::{UnderLoadDetector, DEFAULT_UNDER_LOAD_PPS};
+use crate::{DEFAULT_EXTRA_PORTS, MAX_EXTRA_PORTS};
 
 const TRANSPORT_FLOOD_INTERVAL: Duration = Duration::from_millis(1000 / INITIATIONS_PER_SECOND);
 
@@ -88,6 +89,7 @@ pub struct DeviceConfig {
     pub private_key: Option<Key>,
     pub listen_port: u16,
     pub fwmark: u32,
+    pub extra_ports: u8,
     pub mtu: u16,
     pub obfuscation: ObfParams,
     pub timings: Timings,
@@ -100,6 +102,7 @@ impl Default for DeviceConfig {
             private_key: None,
             listen_port: 0,
             fwmark: 0,
+            extra_ports: DEFAULT_EXTRA_PORTS,
             mtu: 1420,
             obfuscation: ObfParams::default(),
             timings: Timings::new(),
@@ -153,6 +156,7 @@ pub struct Device {
     under_load_detector: UnderLoadDetector,
     listen_port: AtomicU16,
     fwmark: AtomicU32,
+    extra_ports: AtomicU8,
     mtu: AtomicU16,
     next_peer_id: AtomicU32,
     staging_pool: Arc<BufferPool>,
@@ -193,6 +197,7 @@ impl Device {
             under_load_detector: UnderLoadDetector::new(DEFAULT_UNDER_LOAD_PPS),
             listen_port: AtomicU16::new(config.listen_port),
             fwmark: AtomicU32::new(config.fwmark),
+            extra_ports: AtomicU8::new(config.extra_ports.min(MAX_EXTRA_PORTS)),
             mtu: AtomicU16::new(config.mtu),
             next_peer_id: AtomicU32::new(1),
             staging_pool: Arc::new(BufferPool::new(
@@ -340,6 +345,20 @@ impl Device {
 
     pub fn set_fwmark(&self, mark: u32) {
         self.fwmark.store(mark, Ordering::Relaxed);
+    }
+
+    /// Возвращает число дополнительных внешних UDP-портов.
+    #[must_use]
+    pub fn extra_ports(&self) -> u8 {
+        self.extra_ports.load(Ordering::Relaxed)
+    }
+
+    /// Устанавливает число дополнительных внешних UDP-портов.
+    ///
+    /// Значение ограничивается [`MAX_EXTRA_PORTS`].
+    pub fn set_extra_ports(&self, extra_ports: u8) {
+        self.extra_ports
+            .store(extra_ports.min(MAX_EXTRA_PORTS), Ordering::Relaxed);
     }
 
     #[must_use]

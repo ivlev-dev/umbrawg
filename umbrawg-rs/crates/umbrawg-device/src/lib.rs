@@ -43,3 +43,9 @@ pub use umbrawg_uapi::{
 pub use underload::{UnderLoadDetector, DEFAULT_UNDER_LOAD_PPS, MIN_UNDER_LOAD_PPS};
 
 pub const DEFAULT_MTU: u16 = 1420;
+
+/// Число дополнительных внешних UDP-портов по умолчанию.
+pub const DEFAULT_EXTRA_PORTS: u8 = 4;
+
+/// Максимальное число дополнительных внешних UDP-портов.
+pub const MAX_EXTRA_PORTS: u8 = 8;

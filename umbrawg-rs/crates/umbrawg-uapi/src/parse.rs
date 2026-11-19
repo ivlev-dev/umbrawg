@@ -113,6 +113,7 @@ fn apply_device_line(request: &mut SetRequest, key: &str, value: &str) -> Result
         "private_key" => request.private_key = Some(parse_key(key, value)?),
         "listen_port" => request.listen_port = Some(parse_u16(key, value)?),
         "fwmark" => request.fwmark = Some(parse_u32(key, value)?),
+        "extra_ports" => request.extra_ports = Some(parse_extra_ports(key, value)?),
         "replace_peers" => {
             require_true(key, value)?;
             request.replace_peers = true;
@@ -248,6 +249,22 @@ fn parse_u32(key: &str, value: &str) -> Result<u32, UapiError> {
     value.parse::<u32>().map_err(|_| invalid_value(key, value))
 }
 
+/// Верхняя граница `extra_ports`; совпадает с `MAX_EXTRA_PORTS` устройства.
+const MAX_EXTRA_PORTS: u8 = 8;
+
+fn parse_extra_ports(key: &str, value: &str) -> Result<u8, UapiError> {
+    if !is_decimal(value) {
+        return Err(invalid_value(key, value));
+    }
+    let count = value.parse::<u8>().map_err(|_| invalid_value(key, value))?;
+    if count > MAX_EXTRA_PORTS {
+        return Err(UapiError::InvalidConfiguration(format!(
+            "`{key}` must be 0..={MAX_EXTRA_PORTS}, got {count}"
+        )));
+    }
+    Ok(count)
+}
+
 fn parse_u16_range(key: &str, value: &str) -> Result<U16Range, UapiError> {
     value
         .parse::<U16Range>()
@@ -297,6 +314,7 @@ mod tests {
 private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 fwmark=4660
+extra_ports=6
 replace_peers=true
 jc=4
 jmin=40
@@ -341,6 +359,7 @@ allowed_ip=fd00::/64
         assert!(request.private_key.is_some());
         assert_eq!(request.listen_port, Some(51820));
         assert_eq!(request.fwmark, Some(4660));
+        assert_eq!(request.extra_ports, Some(6));
         assert!(request.replace_peers);
 
         let obfuscation = &request.obfuscation;
@@ -482,6 +501,32 @@ allowed_ip=fd00::/64
         ];
         for case in cases {
             assert!(parse(case).is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn parses_extra_ports() {
+        for (value, expected) in [("0", 0), ("4", 4), ("8", 8)] {
+            let request = parse(&format!("extra_ports={value}\n\n")).expect("valid extra_ports");
+            assert_eq!(request.extra_ports, Some(expected), "{value}");
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_extra_ports() {
+        let error = parse("extra_ports=9\n\n").expect_err("out of range");
+        assert!(
+            matches!(&error, UapiError::InvalidConfiguration(_)),
+            "{error}"
+        );
+        assert_eq!(error.code(), -22);
+        assert!(error.to_string().contains("0..=8"), "{error}");
+
+        for value in ["", "-1", "+1", "abc", "4.0", "999", "0x4", " 4"] {
+            assert!(
+                parse(&format!("extra_ports={value}\n\n")).is_err(),
+                "{value}"
+            );
         }
     }
 

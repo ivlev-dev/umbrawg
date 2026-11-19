@@ -36,8 +36,8 @@ use crate::ring::SpscRing;
 use crate::rx::RxBatch;
 use crate::tx::TxBatch;
 use crate::{
-    is_socket_would_block, open_socket_set, pump_tun_tx, shutdown_requested, IDLE_TIMEOUT_MS,
-    MAX_PACKET, RECV_BATCH, TUN_BATCH, TUN_PACKET_MARGIN,
+    is_socket_would_block, open_socket_set, pump_tun_tx, rebind_needed, shutdown_requested,
+    IDLE_TIMEOUT_MS, MAX_PACKET, RECV_BATCH, TUN_BATCH, TUN_PACKET_MARGIN,
 };
 
 /// Максимальное число сегментов в одном задании.
@@ -648,7 +648,6 @@ pub(crate) fn rx_loop(
     device: Arc<Device>,
     shared: Arc<SharedRx>,
     socket_buffer: usize,
-    extra_ports: usize,
     underlay: crate::mtu::Underlay,
 ) -> io::Result<()> {
     let mut rng = BufferedRng::new(OsRng);
@@ -661,6 +660,7 @@ pub(crate) fn rx_loop(
         .map(|buffer| buffer.as_mut_slice())
         .collect();
     let mut socket: Option<Arc<SocketSet>> = None;
+    let mut bound_extra: Option<usize> = None;
     let mut cursor = 0usize;
     let mut stats_at = Instant::now();
     let mut housekeeping_at = Instant::now();
@@ -668,14 +668,11 @@ pub(crate) fn rx_loop(
 
     while !shutdown_requested() {
         let want_port = device.listen_port();
-        let rebind = match socket.as_ref() {
-            None => true,
-            Some(current) => want_port != 0 && current.primary().local_addr().port() != want_port,
-        };
-        if rebind {
+        let want_extra = usize::from(device.extra_ports());
+        if rebind_needed(socket.as_deref(), bound_extra, want_port, want_extra) {
             match open_socket_set(
                 want_port,
-                extra_ports,
+                want_extra,
                 device.fwmark(),
                 socket_buffer,
                 underlay.gso_limits(),
@@ -688,6 +685,7 @@ pub(crate) fn rx_loop(
                     );
                     let new_socket = Arc::new(new_socket);
                     shared.set_socket(Some(Arc::clone(&new_socket)));
+                    bound_extra = Some(want_extra);
                     socket = Some(new_socket);
                 }
                 Err(error) => {

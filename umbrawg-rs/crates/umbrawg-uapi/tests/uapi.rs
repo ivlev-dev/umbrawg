@@ -24,6 +24,7 @@ set=1
 private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 fwmark=4660
+extra_ports=6
 replace_peers=true
 jc=4
 jmin=40
@@ -122,14 +123,28 @@ impl MockPeer {
     }
 }
 
-#[derive(Default)]
 struct MockState {
     private_key: Option<Key>,
     listen_port: u16,
     fwmark: u32,
+    extra_ports: u8,
     obfuscation: ObfuscationSnapshot,
     timings: TimingSnapshot,
     peers: Vec<MockPeer>,
+}
+
+impl Default for MockState {
+    fn default() -> Self {
+        Self {
+            private_key: None,
+            listen_port: 0,
+            fwmark: 0,
+            extra_ports: 4,
+            obfuscation: ObfuscationSnapshot::default(),
+            timings: TimingSnapshot::default(),
+            peers: Vec::new(),
+        }
+    }
 }
 
 struct MockControl {
@@ -151,6 +166,7 @@ impl DeviceControl for MockControl {
             private_key: state.private_key.clone(),
             listen_port: state.listen_port,
             fwmark: state.fwmark,
+            extra_ports: state.extra_ports,
             obfuscation: state.obfuscation.clone(),
             timings: state.timings,
             peers: state
@@ -184,6 +200,9 @@ impl DeviceControl for MockControl {
         }
         if let Some(mark) = request.fwmark {
             state.fwmark = mark;
+        }
+        if let Some(extra_ports) = request.extra_ports {
+            state.extra_ports = extra_ports;
         }
         if request.replace_peers {
             state.peers.clear();
@@ -421,6 +440,7 @@ fn round_trips_every_31_field() {
         "private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n",
         "listen_port=51820\n",
         "fwmark=4660\n",
+        "extra_ports=6\n",
         "jc=4\n",
         "jmin=40\n",
         "jmax=70\n",
@@ -662,6 +682,7 @@ set=1
 private_key=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 listen_port=65535
 fwmark=4294967295
+extra_ports=8
 replace_peers=true
 jc=65535
 jmin=65535
@@ -702,6 +723,7 @@ allowed_ip=::/0
         "private_key=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff\n",
         "listen_port=65535\n",
         "fwmark=4294967295\n",
+        "extra_ports=8\n",
         "jc=65535\n",
         "jmin=65535\n",
         "jmax=65535\n",

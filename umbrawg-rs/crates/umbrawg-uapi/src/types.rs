@@ -529,7 +529,7 @@ impl Default for PeerSnapshot {
 }
 
 /// Complete device state returned by [`DeviceControl::snapshot`].
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceSnapshot {
     /// Device private key; `None` means no key is configured.
     pub private_key: Option<Key>,
@@ -537,12 +537,28 @@ pub struct DeviceSnapshot {
     pub listen_port: u16,
     /// Firewall mark; zero means "not configured".
     pub fwmark: u32,
+    /// Number of additional external UDP ports.
+    pub extra_ports: u8,
     /// Obfuscation 3.1 parameters.
     pub obfuscation: ObfuscationSnapshot,
     /// Handshake timing parameters.
     pub timings: TimingSnapshot,
     /// Configured peers.
     pub peers: Vec<PeerSnapshot>,
+}
+
+impl Default for DeviceSnapshot {
+    fn default() -> Self {
+        Self {
+            private_key: None,
+            listen_port: 0,
+            fwmark: 0,
+            extra_ports: 4,
+            obfuscation: ObfuscationSnapshot::default(),
+            timings: TimingSnapshot::default(),
+            peers: Vec::new(),
+        }
+    }
 }
 
 /// Update for one of the `i1..i5` special-packet templates.
@@ -743,6 +759,8 @@ pub struct SetRequest {
     pub listen_port: Option<u16>,
     /// New firewall mark.
     pub fwmark: Option<u32>,
+    /// New number of additional external UDP ports, `0..=8`.
+    pub extra_ports: Option<u8>,
     /// Remove all peers before processing [`Self::peers`].
     pub replace_peers: bool,
     /// Obfuscation 3.1 parameters.
@@ -898,6 +916,12 @@ mod tests {
                 .to_string(),
             "0.0.0.0/0"
         );
+    }
+
+    #[test]
+    fn default_snapshot_uses_default_extra_ports() {
+        assert_eq!(DeviceSnapshot::default().extra_ports, 4);
+        assert_eq!(SetRequest::default().extra_ports, None);
     }
 
     #[test]

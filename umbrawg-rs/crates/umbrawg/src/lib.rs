@@ -43,7 +43,6 @@ const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const SOCKET_BUFFER_MIN_BYTES: usize = 212 * 1024;
 const SOCKET_BUFFER_MAX_BYTES: usize = 64 * 1024 * 1024;
 const SOCKET_BUFFER_TOLERANCE_BYTES: usize = 4096;
-const EXTRA_PORTS_MAX: usize = 8;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -239,25 +238,6 @@ fn socket_buffer_bytes(value: Option<&str>) -> Result<usize, String> {
     Ok(size)
 }
 
-fn extra_ports(value: Option<&str>) -> Result<usize, String> {
-    let Some(raw) = value else {
-        return Ok(0);
-    };
-    let text = raw.trim();
-    if text.is_empty() {
-        return Ok(0);
-    }
-    let count = text
-        .parse::<usize>()
-        .map_err(|_| format!("UMBRAWG_EXTRA_PORTS: ожидается целое число, получено {text:?}"))?;
-    if count > EXTRA_PORTS_MAX {
-        return Err(format!(
-            "UMBRAWG_EXTRA_PORTS: {count} вне диапазона 0..={EXTRA_PORTS_MAX}"
-        ));
-    }
-    Ok(count)
-}
-
 fn effective_socket_buffer(actual: usize) -> usize {
     actual / 2
 }
@@ -371,6 +351,24 @@ fn open_socket_set(
         }
     }
     SocketSet::new(sockets).map_err(|error| io::Error::other(error.to_string()))
+}
+
+/// Проверяет, нужно ли пересоздать набор сокетов.
+///
+/// `bound_extra` — число дополнительных портов, запрошенное при последней
+/// успешной привязке: при частичном сбое набор может содержать меньше сокетов,
+/// и повторная привязка каждый цикл только вредила бы.
+fn rebind_needed(
+    current: Option<&SocketSet>,
+    bound_extra: Option<usize>,
+    want_port: u16,
+    want_extra: usize,
+) -> bool {
+    let Some(current) = current else {
+        return true;
+    };
+    let port_matches = want_port == 0 || current.primary().local_addr().port() == want_port;
+    !port_matches || bound_extra != Some(want_extra)
 }
 
 fn poll_inputs(source: &dyn SocketSource, tun: &Tun, fds: &mut Vec<libc::pollfd>) {
@@ -621,7 +619,6 @@ fn worker_loop(
     device: Arc<Device>,
     mut tun: Tun,
     socket_buffer: usize,
-    extra_ports: usize,
     underlay: Underlay,
 ) -> io::Result<()> {
     let mut rng = BufferedRng::new(rand_core::OsRng);
@@ -647,24 +644,25 @@ fn worker_loop(
     let mut rx = RxBatch::new(slot);
     let mut rekey: Vec<Arc<Peer>> = Vec::with_capacity(TUN_BATCH);
     let mut socket: Option<SocketSet> = None;
+    let mut bound_extra: Option<usize> = None;
 
     while !shutdown_requested() {
         let now = Instant::now();
         device.refresh_under_load(now);
         let want_port = device.listen_port();
-        let rebind = match socket.as_ref() {
-            None => true,
-            Some(current) => want_port != 0 && current.primary().local_addr().port() != want_port,
-        };
-        if rebind {
+        let want_extra = usize::from(device.extra_ports());
+        if rebind_needed(socket.as_ref(), bound_extra, want_port, want_extra) {
             match open_socket_set(
                 want_port,
-                extra_ports,
+                want_extra,
                 device.fwmark(),
                 socket_buffer,
                 underlay.gso_limits(),
             ) {
-                Ok(new_socket) => socket = Some(new_socket),
+                Ok(new_socket) => {
+                    bound_extra = Some(want_extra);
+                    socket = Some(new_socket);
+                }
                 Err(error) => {
                     log::error!("cannot bind UDP socket: {error}");
                     thread::sleep(Duration::from_millis(200));
@@ -831,8 +829,6 @@ fn daemonize() -> io::Result<()> {
 pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Error>> {
     let socket_buffer = socket_buffer_bytes(env::var("UMBRAWG_SOCKET_BUFFER").ok().as_deref())
         .map_err(io::Error::other)?;
-    let extra_ports =
-        extra_ports(env::var("UMBRAWG_EXTRA_PORTS").ok().as_deref()).map_err(io::Error::other)?;
     let underlay = Underlay::from_env().map_err(io::Error::other)?;
 
     if let Ok(value) = env::var("UMBRAWG_RUNTIME_DIR") {
@@ -866,15 +862,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
             parallel.queue_depth,
             parallel::queue_bytes(parallel.queue_depth).div_ceil(1024 * 1024)
         );
-        return run_parallel(
-            device,
-            ifname,
-            parallel,
-            socket_buffer,
-            extra_ports,
-            underlay,
-            guard,
-        );
+        return run_parallel(device, ifname, parallel, socket_buffer, underlay, guard);
     }
 
     let requested = env::var("UMBRAWG_THREADS").ok();
@@ -907,7 +895,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         let handle = thread::Builder::new()
             .name("umbrawg-worker".to_owned())
             .spawn(move || {
-                if let Err(error) = worker_loop(device, tun, socket_buffer, extra_ports, underlay) {
+                if let Err(error) = worker_loop(device, tun, socket_buffer, underlay) {
                     log::error!("worker stopped: {error}");
                 }
             })?;
@@ -936,7 +924,6 @@ fn run_parallel(
     ifname: &str,
     parallel: parallel::ParallelConfig,
     socket_buffer: usize,
-    extra_ports: usize,
     underlay: Underlay,
     guard: Arc<MtuGuard>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -973,9 +960,7 @@ fn run_parallel(
     let rx_handle = thread::Builder::new()
         .name("umbrawg-rx".to_owned())
         .spawn(move || {
-            if let Err(error) =
-                parallel::rx_loop(rx_device, rx_shared, socket_buffer, extra_ports, underlay)
-            {
+            if let Err(error) = parallel::rx_loop(rx_device, rx_shared, socket_buffer, underlay) {
                 rx_failure.register_failure(format!("rx thread stopped: {error}"));
             }
         })?;
@@ -1160,20 +1145,20 @@ mod tests {
     }
 
     #[test]
-    fn extra_ports_defaults_to_zero_and_parses_boundaries() {
-        assert_eq!(extra_ports(None), Ok(0));
-        assert_eq!(extra_ports(Some("")), Ok(0));
-        assert_eq!(extra_ports(Some(" 0 ")), Ok(0));
-        assert_eq!(extra_ports(Some("8")), Ok(EXTRA_PORTS_MAX));
-        assert_eq!(
-            extra_ports(Some("9")),
-            Err("UMBRAWG_EXTRA_PORTS: 9 вне диапазона 0..=8".to_owned())
-        );
-        assert!(extra_ports(Some("-1")).is_err());
-        assert!(extra_ports(Some("abc")).is_err());
-        assert!(extra_ports(Some("abc"))
-            .unwrap_err()
-            .starts_with("UMBRAWG_EXTRA_PORTS:"));
+    fn rebind_tracks_port_and_extra_count() {
+        let limits = Underlay::new(1500, 1).unwrap().gso_limits();
+        let first = open_socket(0, 0, SOCKET_BUFFER_BYTES, limits).expect("first socket");
+        let second = open_socket(0, 0, SOCKET_BUFFER_BYTES, limits).expect("second socket");
+        let port = first.local_addr().port();
+        let set = SocketSet::new(vec![first, second]).expect("socket set");
+
+        assert!(rebind_needed(None, None, 0, 1));
+        assert!(!rebind_needed(Some(&set), Some(1), 0, 1));
+        assert!(!rebind_needed(Some(&set), Some(1), port, 1));
+        assert!(rebind_needed(Some(&set), Some(1), 0, 2));
+        assert!(rebind_needed(Some(&set), None, 0, 1));
+        let other_port = if port == 1 { 2 } else { 1 };
+        assert!(rebind_needed(Some(&set), Some(1), other_port, 1));
     }
 
     #[test]
