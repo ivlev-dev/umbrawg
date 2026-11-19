@@ -407,7 +407,7 @@ impl DeviceBuilder {
                     self.device.public_key = Some(Key::from_bytes(*value));
                 }
                 UmbrawgAttribute::ListenPort(value) => self.device.listen_port = *value,
-                UmbrawgAttribute::ExtraPorts(value) => self.device.extra_ports = *value,
+                UmbrawgAttribute::ExtraPorts(value) => self.device.extra_ports = Some(*value),
                 UmbrawgAttribute::Fwmark(value) => self.device.fwmark = *value,
                 UmbrawgAttribute::JC(value) => self.device.obfuscation.jc = Some(*value),
                 UmbrawgAttribute::Jmin(value) => self.device.obfuscation.jmin = Some(*value),
@@ -880,7 +880,7 @@ mod tests {
         let device = builder.finish();
         assert_eq!(device.ifindex, Some(7));
         assert_eq!(device.listen_port, 51820);
-        assert_eq!(device.extra_ports, 7);
+        assert_eq!(device.extra_ports, Some(7));
         assert_eq!(device.fwmark, 0x12);
         assert_eq!(device.obfuscation.jc, Some(4));
         assert_eq!(device.obfuscation.h1, Some(U32Range::new(10, 20)));

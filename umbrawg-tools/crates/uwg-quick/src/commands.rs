@@ -779,10 +779,14 @@ fn write_config_file(path: &Path, data: &[u8]) -> QuickResult<()> {
 }
 
 fn write_temporary(path: &Path, data: &[u8]) -> QuickResult<()> {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::OpenOptionsExt;
     let write_error = || QuickError::die("Could not write configuration file");
-    let mut file = fs::File::create(path).map_err(|_| write_error())?;
-    file.set_permissions(fs::Permissions::from_mode(0o600))
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
         .map_err(|_| write_error())?;
     file.write_all(data).map_err(|_| write_error())?;
     file.sync_all().map_err(|_| write_error())?;

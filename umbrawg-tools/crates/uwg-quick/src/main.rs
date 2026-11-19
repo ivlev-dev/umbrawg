@@ -7,7 +7,7 @@ use uwg_quick::error::QuickError;
 use uwg_quick::usage;
 
 fn main() {
-    prepend_executable_directory();
+    append_executable_directory();
     let mut arguments = std::env::args_os();
     let argv0 = arguments
         .next()
@@ -60,16 +60,18 @@ fn program_name(argv0: &OsStr) -> String {
         .unwrap_or_else(|| "uwg-quick".to_string())
 }
 
-fn prepend_executable_directory() {
+fn append_executable_directory() {
     let Ok(executable) = std::env::current_exe() else {
         return;
     };
     let Some(directory) = executable.parent() else {
         return;
     };
-    let mut entries = vec![directory.to_path_buf()];
-    if let Some(path) = std::env::var_os("PATH") {
-        entries.extend(std::env::split_paths(&path));
+    let mut entries: Vec<std::path::PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    if !entries.iter().any(|entry| entry == directory) {
+        entries.push(directory.to_path_buf());
     }
     if let Ok(path) = std::env::join_paths(entries) {
         std::env::set_var("PATH", path);
@@ -86,8 +88,14 @@ fn auto_su(program: &str, argv0: &OsStr, rest: &[OsString]) {
     }
     use std::os::unix::process::CommandExt;
 
-    let executable =
-        std::fs::canonicalize(Path::new(argv0)).unwrap_or_else(|_| Path::new(argv0).to_path_buf());
+    let _ = argv0;
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            eprintln!("{program}: cannot resolve own executable: {error}");
+            std::process::exit(127);
+        }
+    };
     let prompt =
         format!("{program} must be run as root. Please enter the password for %u to continue: ");
     let error = Command::new("sudo")

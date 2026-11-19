@@ -22,7 +22,7 @@ netlink-packet-generic = "0.4"
 netlink-packet-core = "0.8"
 netlink-proto = "0.12"
 genetlink = "0.2"
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
 futures = "0.3"
 clap = { version = "4", features = ["derive"] }
 thiserror = "2"

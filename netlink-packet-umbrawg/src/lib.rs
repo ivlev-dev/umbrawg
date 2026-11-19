@@ -132,8 +132,8 @@ pub use self::{
     attribute::UmbrawgAttribute,
     cipher::UmbrawgCipher,
     device::{
-        UmbrawgDeviceConfig, UmbrawgMagicHeader, HEADER_PROTECTION_NONCE_LEN,
-        INTERMEDIATE_SPEC_MAX_LEN,
+        UmbrawgDeviceConfig, UmbrawgMagicHeader, EXTRA_PORTS_MAX,
+        HEADER_PROTECTION_NONCE_LEN, INTERMEDIATE_SPEC_MAX_LEN,
     },
     error::{UmbrawgConfigError, UmbrawgConfigResult},
     message::{UmbrawgCmd, UmbrawgMessage},

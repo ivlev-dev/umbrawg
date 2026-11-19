@@ -4,9 +4,6 @@ use umbrawg_config::{
     AllowedIp, Cipher, Config, DeviceConfig, Key, ObfuscationConfig, PeerConfig, U16Range,
 };
 
-/// Number of additional external UDP ports the kernel uses by default.
-pub const DEFAULT_EXTRA_PORTS: u8 = 4;
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TimeSpec {
     pub seconds: i64,
@@ -68,7 +65,7 @@ pub struct Device {
     pub private_key: Option<Key>,
     pub public_key: Option<Key>,
     pub listen_port: u16,
-    pub extra_ports: u8,
+    pub extra_ports: Option<u8>,
     pub fwmark: u32,
     pub obfuscation: ObfuscationConfig,
     pub peers: Vec<Peer>,
@@ -82,7 +79,7 @@ impl Device {
             private_key: None,
             public_key: None,
             listen_port: 0,
-            extra_ports: DEFAULT_EXTRA_PORTS,
+            extra_ports: None,
             fwmark: 0,
             obfuscation: ObfuscationConfig::default(),
             peers: Vec::new(),
@@ -115,7 +112,7 @@ impl Device {
             device: DeviceConfig {
                 private_key: self.private_key.clone().filter(|key| !key.is_zero()),
                 listen_port: (self.listen_port != 0).then_some(self.listen_port),
-                extra_ports: Some(self.extra_ports),
+                extra_ports: self.extra_ports,
                 fwmark: (self.fwmark != 0).then_some(self.fwmark),
                 obfuscation: self.obfuscation.clone(),
                 quick: Default::default(),
@@ -269,7 +266,7 @@ mod tests {
         device.peers.push(peer());
         let config = device.to_config();
         assert_eq!(config.device.listen_port, Some(51820));
-        assert_eq!(config.device.extra_ports, Some(4));
+        assert_eq!(config.device.extra_ports, None);
         assert_eq!(config.device.fwmark, Some(0x42));
         assert_eq!(config.device.private_key, Some(Key::from_bytes([4u8; 32])));
         assert_eq!(config.peers.len(), 1);
@@ -302,19 +299,16 @@ mod tests {
     }
 
     #[test]
-    fn defaults_extra_ports_to_four() {
-        assert_eq!(Device::new("uwg0").extra_ports, DEFAULT_EXTRA_PORTS);
-        assert_eq!(DEFAULT_EXTRA_PORTS, 4);
-        assert!(Device::new("uwg0")
-            .to_config()
-            .to_ini(false)
-            .contains("ExtraPorts = 4\n"));
+    fn unreported_extra_ports_are_omitted() {
+        let device = Device::new("uwg0");
+        assert_eq!(device.extra_ports, None);
+        assert!(!device.to_config().to_ini(false).contains("ExtraPorts"));
     }
 
     #[test]
     fn keeps_configured_extra_ports() {
         let mut device = Device::new("uwg0");
-        device.extra_ports = 8;
+        device.extra_ports = Some(8);
         assert_eq!(device.to_config().device.extra_ports, Some(8));
         assert!(device
             .to_config()

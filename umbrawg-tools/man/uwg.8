@@ -64,8 +64,9 @@ Changes the configuration. Device arguments:
 UDP listen port; 0 or omission selects a random port.
 .TP
 \fBextra-ports\fP \fI<count>\fP
-Number of additional external UDP ports, from 0 to 8; the server default is 4.
-Additional ports are ephemeral and spread one peer across several 4-tuples.
+Number of additional external UDP ports, from 0 to 8; the server default is 0.
+Additional ports are ephemeral and spread one peer across several 4-tuples;
+enable them only on networks without port-restricted NAT.
 .TP
 \fBfwmark\fP \fI<mark>\fP
 Firewall mark as a decimal value or \fB0x\fP-prefixed hexadecimal value.

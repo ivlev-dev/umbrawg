@@ -112,6 +112,9 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
     if device.fwmark != 0 {
         let _ = writeln!(output, "  {}: 0x{:x}", style.bold("fwmark"), device.fwmark);
     }
+    if let Some(extra_ports) = device.extra_ports.filter(|ports| *ports != 0) {
+        let _ = writeln!(output, "  {}: {extra_ports}", style.bold("extra udp ports"));
+    }
     let obfuscation = &device.obfuscation;
     for (name, value) in [
         ("jc", obfuscation.jc),
@@ -287,12 +290,7 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
         }
         if let Some(cipher) = peer.cipher {
             if cipher != umbrawg_config::Cipher::ChaCha20Poly1305 {
-                let _ = writeln!(
-                    output,
-                    "  {}: {}",
-                    style.bold("cipher"),
-                    cipher
-                );
+                let _ = writeln!(output, "  {}: {}", style.bold("cipher"), cipher);
             }
         }
         let _ = writeln!(
@@ -410,7 +408,7 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
             let _ = writeln!(output, "{prefix}{}", device.listen_port);
         }
         "extra-ports" => {
-            let _ = writeln!(output, "{prefix}{}", device.extra_ports);
+            let _ = writeln!(output, "{prefix}{}", device.extra_ports.unwrap_or(0));
         }
         "fwmark" => {
             if device.fwmark != 0 {
@@ -648,7 +646,7 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
 
 pub fn showconf(device: &Device) -> String {
     let mut config = device.to_config();
-    config.device.extra_ports = Some(device.extra_ports);
+    config.device.extra_ports = device.extra_ports;
     config.to_ini(false)
 }
 
@@ -805,7 +803,7 @@ mod tests {
         device.private_key = Some(Key::from_hex(&"11".repeat(32)).expect("valid"));
         device.public_key = Some(Key::from_hex(&"22".repeat(32)).expect("valid"));
         device.listen_port = 51820;
-        device.extra_ports = 4;
+        device.extra_ports = Some(4);
         device.fwmark = 0x1234;
         device.obfuscation.jc = Some(4);
         device.obfuscation.jmin = Some(40);
@@ -966,9 +964,9 @@ mod tests {
     #[test]
     fn showconf_prints_extra_ports() {
         let mut device = sample_device();
-        device.extra_ports = 0;
+        device.extra_ports = Some(0);
         assert!(showconf(&device).contains("ExtraPorts = 0\n"));
-        device.extra_ports = 8;
+        device.extra_ports = Some(8);
         assert!(showconf(&device).contains("ExtraPorts = 8\n"));
     }
 

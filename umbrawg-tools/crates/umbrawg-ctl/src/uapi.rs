@@ -291,7 +291,7 @@ fn apply_device_line(device: &mut Device, key: &str, value: &str) -> Result<(), 
             device.private_key = Some(key);
         }
         "listen_port" => device.listen_port = parse_u16(key, value)?,
-        "extra_ports" => device.extra_ports = parse_extra_ports(key, value)?,
+        "extra_ports" => device.extra_ports = Some(parse_extra_ports(key, value)?),
         "fwmark" => device.fwmark = parse_u32(key, value)?,
         "jc" => device.obfuscation.jc = Some(parse_u16(key, value)?),
         "jmin" => device.obfuscation.jmin = Some(parse_u16(key, value)?),
@@ -375,7 +375,20 @@ fn apply_peer_line(peer: &mut Peer, key: &str, value: &str) -> Result<(), Error>
     Ok(())
 }
 
+const UAPI_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const UAPI_MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+
 async fn exchange(path: &Path, request: &str) -> Result<String, Error> {
+    match tokio::time::timeout(UAPI_TIMEOUT, exchange_inner(path, request)).await {
+        Ok(result) => result,
+        Err(_) => Err(Error::Protocol(format!(
+            "UAPI exchange with {path:?} timed out after {}s",
+            UAPI_TIMEOUT.as_secs()
+        ))),
+    }
+}
+
+async fn exchange_inner(path: &Path, request: &str) -> Result<String, Error> {
     let mut stream = UnixStream::connect(path).await?;
     stream.write_all(request.as_bytes()).await?;
     stream.flush().await?;
@@ -386,6 +399,11 @@ async fn exchange(path: &Path, request: &str) -> Result<String, Error> {
         line.clear();
         if reader.read_line(&mut line).await? == 0 {
             break;
+        }
+        if response.len() + line.len() > UAPI_MAX_RESPONSE_BYTES {
+            return Err(Error::Protocol(format!(
+                "UAPI response from {path:?} exceeds {UAPI_MAX_RESPONSE_BYTES} bytes"
+            )));
         }
         response.push_str(&line);
         if line == "\n" {
@@ -595,7 +613,7 @@ errno=0
         let device = parse_get_response(GET_RESPONSE, "test0").expect("valid response");
         assert_eq!(device.name, "test0");
         assert_eq!(device.listen_port, 51820);
-        assert_eq!(device.extra_ports, 4);
+        assert_eq!(device.extra_ports, Some(4));
         assert_eq!(device.fwmark, 4660);
         assert_eq!(device.obfuscation.jc, Some(4));
         assert_eq!(
@@ -747,13 +765,13 @@ errno=0
             .expect("valid response");
             assert_eq!(
                 device.extra_ports,
-                value.parse::<u8>().expect("valid"),
+                Some(value.parse::<u8>().expect("valid")),
                 "{value}"
             );
         }
         let device =
             parse_get_response("listen_port=51820\nerrno=0\n\n", "test0").expect("valid response");
-        assert_eq!(device.extra_ports, 4);
+        assert_eq!(device.extra_ports, None);
         for value in ["9", "255", "-1", "abc", ""] {
             assert!(
                 parse_get_response(&format!("extra_ports={value}\nerrno=0\n\n"), "test0").is_err(),
