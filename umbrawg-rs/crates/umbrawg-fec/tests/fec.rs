@@ -2,6 +2,7 @@ use std::time::{Duration, Instant};
 
 use umbrawg_fec::{
     DecodedBlock, EncodedBlock, FecConfig, FecDecoder, FecEncoder, FecError, FecShard,
+    MAX_PENDING_BLOCKS, MAX_SHARD_LEN,
 };
 
 const BLOCK_TIMEOUT: Duration = Duration::from_millis(5);
@@ -643,6 +644,153 @@ fn fuzz_like_random_scenarios_are_consistent() {
         assert_eq!(output.len(), 1, "iteration {iteration}");
         assert_eq!(output[0].packets, packets, "iteration {iteration}");
     }
+}
+
+#[test]
+fn conflicting_k_within_one_block_is_rejected() {
+    let config = config(4, 2);
+    let mut decoder = FecDecoder::new(config);
+    let now = Instant::now();
+
+    let head_payload = [1u8, 0, 7, 0, 0, 0, 0, 0];
+    let head = FecShard {
+        block_id: 0,
+        index: 0,
+        k: 4,
+        m: 2,
+        shard_len: 8,
+        payload: &head_payload,
+    };
+    assert!(decoder.push_at(head, now).expect("valid shard").is_empty());
+
+    let first_payload = [4u8, 0, 1, 2, 3, 0, 0, 0];
+    let first = FecShard {
+        block_id: 7,
+        index: 0,
+        k: 2,
+        m: 0,
+        shard_len: 8,
+        payload: &first_payload,
+    };
+    assert!(decoder.push_at(first, now).expect("valid shard").is_empty());
+
+    let conflicting_payload = [1u8, 0, 9, 0, 0, 0, 0, 0];
+    let conflicting = FecShard {
+        block_id: 7,
+        index: 3,
+        k: 4,
+        m: 0,
+        shard_len: 8,
+        payload: &conflicting_payload,
+    };
+    assert_eq!(
+        decoder.push_at(conflicting, now),
+        Err(FecError::ConfigMismatch {
+            expected_k: 2,
+            expected_m: 0,
+            actual_k: 4,
+            actual_m: 0,
+        })
+    );
+    assert_eq!(decoder.pending_blocks(), 2);
+
+    let second_payload = [1u8, 0, 5, 0, 0, 0, 0, 0];
+    let second = FecShard {
+        block_id: 7,
+        index: 1,
+        k: 2,
+        m: 0,
+        shard_len: 8,
+        payload: &second_payload,
+    };
+    assert!(decoder
+        .push_at(second, now)
+        .expect("valid shard")
+        .is_empty());
+
+    let released = decoder.poll(now + BLOCK_TIMEOUT * 2);
+    assert_eq!(released.len(), 2);
+    assert_eq!(released[0].block_id, 0);
+    assert_eq!(released[0].packets, vec![vec![7]]);
+    assert_eq!(released[1].block_id, 7);
+    assert_eq!(released[1].packets, vec![vec![1, 2, 3, 0], vec![5]]);
+    assert_eq!(decoder.pending_blocks(), 0);
+}
+
+#[test]
+fn shard_len_above_limit_is_rejected() {
+    let config = config(2, 1);
+    let mut decoder = FecDecoder::new(config);
+    let now = Instant::now();
+
+    let oversized = vec![0u8; usize::from(MAX_SHARD_LEN) + 1];
+    let shard = FecShard {
+        block_id: 0,
+        index: 0,
+        k: 2,
+        m: 1,
+        shard_len: MAX_SHARD_LEN + 1,
+        payload: &oversized,
+    };
+    assert_eq!(
+        decoder.push_at(shard, now),
+        Err(FecError::ShardLenTooLarge {
+            shard_len: MAX_SHARD_LEN + 1,
+            max_shard_len: MAX_SHARD_LEN,
+        })
+    );
+    assert_eq!(decoder.pending_blocks(), 0);
+
+    let boundary = vec![0u8; usize::from(MAX_SHARD_LEN)];
+    let accepted = FecShard {
+        block_id: 0,
+        index: 0,
+        k: 2,
+        m: 1,
+        shard_len: MAX_SHARD_LEN,
+        payload: &boundary,
+    };
+    assert!(decoder
+        .push_at(accepted, now)
+        .expect("boundary length is accepted")
+        .is_empty());
+    assert_eq!(decoder.pending_blocks(), 1);
+}
+
+#[test]
+fn pending_blocks_are_bounded_and_oldest_is_evicted() {
+    let config = config(4, 2);
+    let mut decoder = FecDecoder::new(config);
+    let now = Instant::now();
+    let payload = [0u8, 0, 0xaa, 0, 0, 0, 0, 0];
+    let overflow = 8u32;
+    let total = MAX_PENDING_BLOCKS as u32 + overflow;
+    let mut output = Vec::new();
+
+    for block_id in 0..total {
+        let shard = FecShard {
+            block_id,
+            index: 0,
+            k: 4,
+            m: 2,
+            shard_len: 8,
+            payload: &payload,
+        };
+        output.extend(decoder.push_at(shard, now).expect("valid shard"));
+        assert!(
+            decoder.pending_blocks() <= MAX_PENDING_BLOCKS,
+            "block {block_id} grew the decoder past the cap"
+        );
+    }
+
+    let evicted: Vec<u32> = output.iter().map(|block| block.block_id).collect();
+    assert_eq!(evicted, (0..overflow).collect::<Vec<_>>());
+    assert_eq!(decoder.pending_blocks(), MAX_PENDING_BLOCKS);
+
+    output.extend(decoder.poll(now + BLOCK_TIMEOUT * 2));
+    assert_eq!(decoder.pending_blocks(), 0);
+    let ids: Vec<u32> = output.iter().map(|block| block.block_id).collect();
+    assert_eq!(ids, (0..total).collect::<Vec<_>>());
 }
 
 #[test]

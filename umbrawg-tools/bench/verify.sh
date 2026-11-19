@@ -58,7 +58,7 @@ P1=$(printf '%s' "$K1" | "$UWG" pubkey)
 
 OBFBLOCK=""
 if [ "$OBF_ON" = "1" ]; then
-    OBFBLOCK=$(grep -vE '^(PrivateKey|ListenPort|PublicKey|AllowedIPs|\[Peer\]|\[Interface\])' "$OBF" || true)
+    OBFBLOCK=$(obf_block_from_conf "$OBF" "$UWG" genkey)
 fi
 
 CONF0=$(mktemp)

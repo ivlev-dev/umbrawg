@@ -30,13 +30,15 @@ static void update_rx_stats(struct uwg_peer *peer, size_t len)
 	atomic64_add(len, &peer->rx_bytes);
 }
 
-static inline __le32 uwg_decoded_type(u8 data[4], u8 hash[4]) {
+static inline u32 uwg_decoded_type(const u8 data[4], const u8 hash[4])
+{
 	u8 buf[4];
+
 	buf[0] = data[0] ^ hash[0];
 	buf[1] = data[1] ^ hash[1];
 	buf[2] = data[2] ^ hash[2];
 	buf[3] = data[3] ^ hash[3];
-	return ((struct message_header*)buf)->type;
+	return get_unaligned_le32(buf);
 }
 
 static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
@@ -53,7 +55,7 @@ static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
 		u32_range_contains(uwg->init_header,
-			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
+			uwg_decoded_type(ptr, hash))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_HANDSHAKE_INITIATION;
 		return sizeof(struct message_handshake_initiation);
@@ -64,7 +66,7 @@ static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
 		u32_range_contains(uwg->resp_header,
-			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
+			uwg_decoded_type(ptr, hash))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_HANDSHAKE_RESPONSE;
 		return sizeof(struct message_handshake_response);
@@ -75,7 +77,7 @@ static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
 		u32_range_contains(uwg->cookie_header, 
-			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
+			uwg_decoded_type(ptr, hash))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_HANDSHAKE_COOKIE;
 		return sizeof(struct message_handshake_cookie);
@@ -86,7 +88,7 @@ static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 	if (skb->len >= expected_len &&
 		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
 		u32_range_contains(uwg->transport_header,
-			le32_to_cpu(uwg_decoded_type(ptr, hash)))) {
+			uwg_decoded_type(ptr, hash))) {
 		*res_padding = padding;
 		*res_type = MESSAGE_DATA;
 		return sizeof(struct message_data);
@@ -186,10 +188,14 @@ static void uwg_receive_handshake_packet(struct uwg_device *uwg,
 	bool under_load;
 	
 	if (PACKET_CB(skb)->type == MESSAGE_HANDSHAKE_COOKIE) {
+		struct message_handshake_cookie message;
+
 		net_dbg_skb_ratelimited("%s: Receiving cookie response from %pISpfsc\n",
 					uwg->dev->name, skb);
-		uwg_cookie_message_consume(
-			(struct message_handshake_cookie *)skb->data, uwg);
+		if (unlikely(skb->len < sizeof(message)))
+			return;
+		memcpy(&message, skb->data, sizeof(message));
+		uwg_cookie_message_consume(&message, uwg);
 		return;
 	}
 
@@ -217,15 +223,17 @@ static void uwg_receive_handshake_packet(struct uwg_device *uwg,
 
 	switch (PACKET_CB(skb)->type) {
 	case MESSAGE_HANDSHAKE_INITIATION: {
-		struct message_handshake_initiation *message =
-			(struct message_handshake_initiation *)skb->data;
+		struct message_handshake_initiation message;
 
+		if (unlikely(skb->len < sizeof(message)))
+			return;
+		memcpy(&message, skb->data, sizeof(message));
 		if (packet_needs_cookie) {
 			uwg_packet_send_handshake_cookie(uwg, skb,
-							message->sender_index);
+							message.sender_index);
 			return;
 		}
-		peer = uwg_noise_handshake_consume_initiation(message, uwg, skb);
+		peer = uwg_noise_handshake_consume_initiation(&message, uwg, skb);
 		if (unlikely(!peer)) {
 			net_dbg_skb_ratelimited("%s: Invalid handshake initiation from %pISpfsc\n",
 						uwg->dev->name, skb);
@@ -239,15 +247,17 @@ static void uwg_receive_handshake_packet(struct uwg_device *uwg,
 		break;
 	}
 	case MESSAGE_HANDSHAKE_RESPONSE: {
-		struct message_handshake_response *message =
-			(struct message_handshake_response *)skb->data;
+		struct message_handshake_response message;
 
+		if (unlikely(skb->len < sizeof(message)))
+			return;
+		memcpy(&message, skb->data, sizeof(message));
 		if (packet_needs_cookie) {
 			uwg_packet_send_handshake_cookie(uwg, skb,
-							message->sender_index);
+							message.sender_index);
 			return;
 		}
-		peer = uwg_noise_handshake_consume_response(message, uwg);
+		peer = uwg_noise_handshake_consume_response(&message, uwg);
 		if (unlikely(!peer)) {
 			net_dbg_skb_ratelimited("%s: Invalid handshake response from %pISpfsc\n",
 						uwg->dev->name, skb);
@@ -348,8 +358,8 @@ static bool decrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 		return false;
 	}
 
-	PACKET_CB(skb)->nonce =
-		le64_to_cpu(((struct message_data *)skb->data)->counter);
+	PACKET_CB(skb)->nonce = get_unaligned_le64(
+		skb->data + offsetof(struct message_data, counter));
 
 	/* We ensure that the network header is part of the packet before we
 	 * call skb_cow_data, so that there's no chance that data is removed
@@ -687,7 +697,8 @@ void uwg_packet_decrypt_worker(struct work_struct *work)
 
 static void uwg_packet_consume_data(struct uwg_device *uwg, struct sk_buff *skb)
 {
-	__le32 idx = ((struct message_data *)skb->data)->key_idx;
+	__le32 idx = cpu_to_le32(get_unaligned_le32(
+		skb->data + offsetof(struct message_data, key_idx)));
 	struct uwg_peer *peer = NULL;
 	int ret;
 

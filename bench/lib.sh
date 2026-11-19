@@ -33,7 +33,9 @@ impl_kind() {
 }
 
 obf_block() {
-	cat <<'EOF'
+	local hp
+	hp=$(new_key)
+	cat <<'EOF' | sed "s|^HeaderProtectionKey[[:space:]]*=.*|HeaderProtectionKey = $hp|"
 H1 = 712026294-712074283
 H2 = 1504260570-1504277407
 H3 = 2938347170-2938351405
@@ -50,7 +52,7 @@ I2 = <b 0xe300000001127362d0c517f5aae98388afaf2809110ccc5610ed5923abbcbd29ac5c31
 I3 = <b 0xc30000000111bf75ad99b7b31b0d887c05054897ecd7d001911a53c4c9ab0067c318d6d5bf6519134da966559268219aca1fba4644b219ba2c84><rc 41><r 1000><r 153><t>
 I4 = <b 0xe100000001093adb1b6b0cde0531700ea127f7f956bc499a0ab59bd6b0dc44c43085><rc 38><r 1000><r 176><t>
 I5 = <b 0xe2000000010973760ff2b80f2c78420a91d8a812337b91c48c2844d7b63a2d><rc 40><r 1000><r 192><t>
-HeaderProtectionKey = hj875O8KOzPqqrKI3FnA768294uWGdMDPh7ts49SzLU=
+HeaderProtectionKey = <HEADER_PROTECTION_KEY>
 ContentPaddingAddition = 51-197
 RekeyAfterTime = 104-149
 RekeyTimeout = 5-8

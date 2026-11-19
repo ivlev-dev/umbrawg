@@ -1,6 +1,8 @@
 #!/bin/bash
 set -uo pipefail
 
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
+
 RUSTDIR=/root/umbrawg/rust
 MODDIR=/root/umbrawg/module/src
 UWG=/root/umbrawg/tools/target/release/uwg
@@ -45,7 +47,7 @@ ip -n "$NS1" link set "$IF1" mtu 1420 up
 
 K0=$("$UWG" genkey); K1=$("$UWG" genkey)
 P0=$(printf '%s' "$K0" | "$UWG" pubkey); P1=$(printf '%s' "$K1" | "$UWG" pubkey)
-OBFBLOCK=$(grep -vE '^(PrivateKey|ListenPort|PublicKey|AllowedIPs|\[Peer\]|\[Interface\])' "$OBF" || true)
+OBFBLOCK=$(obf_block_from_conf "$OBF" "$UWG" genkey)
 CONF0=$(mktemp); CONF1=$(mktemp)
 printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.2:%s\nPersistentKeepalive = 5\n' "$K0" "$PORT0" "$OBFBLOCK" "$P1" "$PORT1" > "$CONF0"
 printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.1:%s\nPersistentKeepalive = 5\n' "$K1" "$PORT1" "$OBFBLOCK" "$P0" "$PORT0" > "$CONF1"

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use crate::gf;
 use crate::matrix::{invert, RSCode};
-use crate::{FecConfig, FecError, DEFAULT_BLOCK_TIMEOUT};
+use crate::{FecConfig, FecError, DEFAULT_BLOCK_TIMEOUT, MAX_PENDING_BLOCKS, MAX_SHARD_LEN};
 
 /// A single received shard passed to [`FecDecoder::push`].
 #[derive(Clone, Copy, Debug)]
@@ -35,7 +35,9 @@ pub struct DecodedBlock {
 ///
 /// Blocks are held until `k` shards are available or until the block timeout
 /// expires, and are released in ascending block order. A block following a
-/// missing `block_id` waits for the timeout at most.
+/// missing `block_id` waits for the timeout at most. At most
+/// [`MAX_PENDING_BLOCKS`] blocks are held at once; when the limit is exceeded
+/// the oldest block is released early with the data shards received so far.
 pub struct FecDecoder {
     config: FecConfig,
     code: Result<RSCode, FecError>,
@@ -124,6 +126,14 @@ impl FecDecoder {
             self.next_seq = Some(seq);
         }
         if let Some(existing) = self.blocks.get(&seq) {
+            if existing.k != shard.k || existing.m != shard.m {
+                return Err(FecError::ConfigMismatch {
+                    expected_k: existing.k,
+                    expected_m: existing.m,
+                    actual_k: shard.k,
+                    actual_m: shard.m,
+                });
+            }
             if existing.shard_len != shard.shard_len {
                 return Err(FecError::ShardLenMismatch {
                     block_id: shard.block_id,
@@ -131,18 +141,11 @@ impl FecDecoder {
                     actual: shard.shard_len,
                 });
             }
-            if existing.m != shard.m {
-                return Err(FecError::ConfigMismatch {
-                    expected_k: self.config.data_shards,
-                    expected_m: existing.m,
-                    actual_k: shard.k,
-                    actual_m: shard.m,
-                });
-            }
         }
         let total = usize::from(shard.k) + usize::from(shard.m);
         let block = self.blocks.entry(seq).or_insert_with(|| Block {
             block_id: shard.block_id,
+            k: shard.k,
             m: shard.m,
             shard_len: shard.shard_len,
             deadline: now + self.timeout,
@@ -151,11 +154,18 @@ impl FecDecoder {
             packets: None,
         });
         let index = usize::from(shard.index);
-        if block.shards[index].is_none() {
+        let Some(slot) = block.shards.get_mut(index) else {
+            return Err(FecError::InvalidIndex {
+                index: shard.index,
+                k: block.k,
+                m: block.m,
+            });
+        };
+        if slot.is_none() {
             block.present += 1;
         }
-        block.shards[index] = Some(shard.payload.to_vec());
-        let data_shards = usize::from(shard.k);
+        *slot = Some(shard.payload.to_vec());
+        let data_shards = usize::from(block.k);
         if block.packets.is_none() && block.present >= data_shards {
             if block.m == 0 {
                 block.packets = Some(extract_packets(&block.shards, data_shards));
@@ -163,7 +173,9 @@ impl FecDecoder {
                 block.packets = decode_block(code, &mut block.shards);
             }
         }
-        Ok(self.drain(now))
+        let mut output = self.evict_over_capacity();
+        output.extend(self.drain(now));
+        Ok(output)
     }
 
     /// Releases blocks that are ready or whose timeout has expired.
@@ -200,6 +212,12 @@ impl FecDecoder {
                 shard_len: shard.shard_len,
             });
         }
+        if shard.shard_len > MAX_SHARD_LEN {
+            return Err(FecError::ShardLenTooLarge {
+                shard_len: shard.shard_len,
+                max_shard_len: MAX_SHARD_LEN,
+            });
+        }
         if shard.payload.len() != usize::from(shard.shard_len) {
             return Err(FecError::PayloadLenMismatch {
                 expected: shard.shard_len,
@@ -219,10 +237,9 @@ impl FecDecoder {
     }
 
     fn finalize_expired(&mut self, now: Instant) {
-        let Ok(code) = &self.code else {
+        if self.code.is_err() {
             return;
-        };
-        let k = code.k();
+        }
         let expired: Vec<u64> = self
             .blocks
             .iter()
@@ -231,9 +248,36 @@ impl FecDecoder {
             .collect();
         for seq in expired {
             if let Some(block) = self.blocks.get_mut(&seq) {
-                block.packets = Some(extract_packets(&block.shards, k));
+                let data_shards = usize::from(block.k);
+                block.packets = Some(extract_packets(&block.shards, data_shards));
             }
         }
+    }
+
+    fn evict_over_capacity(&mut self) -> Vec<DecodedBlock> {
+        let mut output = Vec::new();
+        while self.blocks.len() > MAX_PENDING_BLOCKS {
+            let Some(seq) = self.blocks.keys().next().copied() else {
+                break;
+            };
+            let Some(mut block) = self.blocks.remove(&seq) else {
+                break;
+            };
+            if self.next_seq.is_some_and(|next| next <= seq) {
+                self.next_seq = Some(seq.saturating_add(1));
+            }
+            let packets = block
+                .packets
+                .take()
+                .unwrap_or_else(|| extract_packets(&block.shards, usize::from(block.k)));
+            if !packets.is_empty() {
+                output.push(DecodedBlock {
+                    block_id: block.block_id,
+                    packets,
+                });
+            }
+        }
+        output
     }
 
     fn drain(&mut self, now: Instant) -> Vec<DecodedBlock> {
@@ -254,7 +298,7 @@ impl FecDecoder {
                         });
                     }
                 }
-                self.next_seq = Some(seq + 1);
+                self.next_seq = Some(seq.saturating_add(1));
                 continue;
             }
             if self.blocks.contains_key(&seq) {
@@ -280,6 +324,7 @@ impl FecDecoder {
 
 struct Block {
     block_id: u32,
+    k: u8,
     m: u8,
     shard_len: u16,
     deadline: Instant,

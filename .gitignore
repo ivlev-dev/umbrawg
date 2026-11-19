@@ -14,6 +14,11 @@ modules.order
 
 # Бенчмарк-стенд: результаты, кэши и секреты остаются на сервере.
 bench/keys.env
+bench/.t/
+bench/.conf-*
+bench/.obf-lines.txt
+bench/matrix/conf-*
+bench/matrix/keys.env
 bench/results/
 bench/tmp/
 bench/zed/

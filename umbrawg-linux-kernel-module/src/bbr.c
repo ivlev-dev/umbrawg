@@ -26,6 +26,7 @@
 #include <linux/overflow.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/time64.h>
 
 #include "bbr.h"
 
@@ -777,6 +778,7 @@ void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns)
 	else if (len > UWG_BBR_MAX_DATAGRAM)
 		len = UWG_BBR_MAX_DATAGRAM;
 
+	b->max_sent = max(b->max_sent, counter);
 	uwg_pacer_refill(b, now_ns);
 
 	evicted = uwg_ring_insert(b, counter, len, now_ns);
@@ -787,6 +789,16 @@ void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns)
 	b->inflight = uwg_sat_add(b->inflight, len);
 	b->round_max_inflight = max(b->round_max_inflight, b->inflight);
 	uwg_pacer_consume(b, len);
+}
+
+/*
+ * Registers a wire counter that consumes nonce space without being tracked
+ * in the send ring (control frames, keepalives). It only raises max_sent so
+ * their ACKs pass the validation in uwg_bbr_on_ack().
+ */
+void uwg_bbr_note_sent(struct uwg_bbr *b, u64 counter)
+{
+	b->max_sent = max(b->max_sent, counter);
 }
 
 void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
@@ -803,6 +815,18 @@ void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
 	u64 rate = 0;
 	bool have_rate = false;
 	bool starts_round;
+
+	/* A peer cannot acknowledge a counter we never put on the wire: such an
+	 * ACK would drag largest_acked past the ring, release every in-flight
+	 * record and zero inflight. Reject it before touching any state.
+	 */
+	if (unlikely(largest > b->max_sent))
+		return;
+
+	/* A bogus delay distorts the delivery-rate sample; one second is far
+	 * above any plausible path delay and still bounded.
+	 */
+	ack_delay_us = min_t(u32, ack_delay_us, NSEC_PER_SEC / 1000);
 
 	uwg_pacer_refill(b, now_ns);
 	b->largest_acked = max(b->largest_acked, largest);

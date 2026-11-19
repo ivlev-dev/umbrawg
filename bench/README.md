@@ -15,6 +15,24 @@ PROTO_LIST=udp UDP_RATE_LIST="1G 0" CONNS_LIST="1 10" bash bench.sh
 python3 bench-report.py results-20261116-120000.csv --md report.md --agg agg.csv
 ```
 
+## Ключи и секреты
+
+В репозитории нет рабочих ключей: `obf-params.conf` — шаблон, в котором
+`PrivateKey = <PRIVATE_KEY>` и `HeaderProtectionKey = <HEADER_PROTECTION_KEY>`.
+Скрипты подставляют их во время прогона через `obf_block_from_conf`
+(`bench-lib.sh`), вызывая `uwg genkey`; для ручных конфигов:
+
+```bash
+uwg genkey > priv.key                 # приватный ключ
+uwg pubkey < priv.key                 # публичный ключ
+```
+
+`HeaderProtectionKey` должен совпадать на обеих сторонах туннеля.
+**Публично известный HP-ключ убивает обфускацию заголовков**: трафик
+опознаётся по неизменному префиксу, поэтому ключ нельзя коммитить, публиковать
+в отчётах или переиспользовать между стендами. Локальные файлы стенда
+(`keys.env`, `.t/*.conf`, `.conf-*`) перечислены в `.gitignore`.
+
 ## Переменные
 
 Существующий интерфейс сохранён: `IMPL_LIST`, `MODE_LIST`, `PROTO_LIST`,

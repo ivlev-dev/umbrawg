@@ -400,8 +400,13 @@ static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
 	now_ns = ktime_get_ns();
 	spin_lock_bh(&peer->bbr_lock);
 	skb_queue_walk(packets, skb) {
-		if (PACKET_CB(skb)->is_keepalive)
+		if (PACKET_CB(skb)->is_keepalive) {
+			/* Keepalives are not tracked in the ring, but their
+			 * counters appear in ACK.largest.
+			 */
+			uwg_bbr_note_sent(bbr, PACKET_CB(skb)->nonce);
 			continue;
+		}
 		uwg_bbr_on_send(bbr, PACKET_CB(skb)->nonce, skb->len, now_ns);
 	}
 	spin_unlock_bh(&peer->bbr_lock);
@@ -746,6 +751,21 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 		uwg_noise_keypair_put(keypair, false);
 		kfree_skb(skb);
 		return -EOVERFLOW;
+	}
+	/* Control frames consume wire counters too: record the nonce so the
+	 * peer's ACKs for them are not rejected by the BBR validator.
+	 */
+	if (READ_ONCE(uwg->bbr_mode) == UWG_BBR_MODE_ON) {
+		struct uwg_bbr *bbr;
+
+		rcu_read_lock();
+		bbr = uwg_peer_bbr_lookup(peer);
+		if (bbr) {
+			spin_lock_bh(&peer->bbr_lock);
+			uwg_bbr_note_sent(bbr, PACKET_CB(skb)->nonce);
+			spin_unlock_bh(&peer->bbr_lock);
+		}
+		rcu_read_unlock();
 	}
 	PACKET_CB(skb)->keypair = keypair;
 	uwg_peer_get(peer);

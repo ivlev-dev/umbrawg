@@ -1,10 +1,12 @@
 #!/bin/bash
 set -u
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
 W=/root/umbrawg
 T=/root/umbrawg/bench/.t
 mkdir -p $T
 UWGBIN=$W/tools/target/release/uwg
 CONF=$W/bench/obf-params.conf
+OBF_LINES=$(obf_block_from_conf "$CONF" "$UWGBIN" genkey)
 
 cleanup() {
   ip netns del bcli 2>/dev/null
@@ -18,9 +20,7 @@ gen_conf() {
     echo "[Interface]"
     echo "PrivateKey = $priv"
     echo "ListenPort = $listen"
-    sed -n '/^\[Interface\]/,/^\[Peer\]/p' "$CONF" \
-      | grep -Ev '^(PrivateKey|ListenPort|\[Interface\]|\[Peer\])' \
-      | sed '/^[[:space:]]*$/d'
+    printf '%s\n' "$OBF_LINES"
     echo
     echo "[Peer]"
     echo "PublicKey = $pub"

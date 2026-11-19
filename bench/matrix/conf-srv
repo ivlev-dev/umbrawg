@@ -1,9 +1,0 @@
-[Interface]
-PrivateKey = CMBdXzRM28hinJ4ci9/ooSNLuCiCP1YusTO8ZebXDWs=
-ListenPort = 51821
-
-[Peer]
-PublicKey = r/fbWr3xr0A48QK+59N24Rqgacu3IhwNiaLGjCeBEHE=
-Endpoint = 192.168.50.10:51820
-AllowedIPs = 10.9.0.0/24
-PersistentKeepalive = 5

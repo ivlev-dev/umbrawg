@@ -207,7 +207,11 @@ def obf_block(path: str) -> str:
             s = line.strip()
             if not s or s.startswith("["):
                 continue
-            if s.split("=")[0].strip() in skip:
+            key = s.split("=")[0].strip()
+            if key in skip:
+                continue
+            if key == "HeaderProtectionKey":
+                out.append("HeaderProtectionKey = %s" % genkey())
                 continue
             out.append(s)
     return "\n".join(out)

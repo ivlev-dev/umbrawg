@@ -1,5 +1,6 @@
 #!/bin/bash
 set -u
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
 W=/root/umbrawg
 T=$W/bench/.t
 UWGBIN=$W/tools/target/release/uwg
@@ -10,8 +11,7 @@ cleanup
 
 K1=$($UWGBIN genkey); P1=$(echo "$K1" | $UWGBIN pubkey)
 K2=$($UWGBIN genkey); P2=$(echo "$K2" | $UWGBIN pubkey)
-sed -n '/^\[Interface\]/,/^\[Peer\]/p' $W/bench/obf-params.conf \
-  | grep -Ev '^(PrivateKey|ListenPort|\[Interface\]|\[Peer\])' | sed '/^[[:space:]]*$/d' > $T/obf-lines.txt
+obf_block_from_conf $W/bench/obf-params.conf "$UWGBIN" genkey > $T/obf-lines.txt
 
 mkconf() {
   local priv=$1 listen=$2 pub=$3 ep=$4 out=$5

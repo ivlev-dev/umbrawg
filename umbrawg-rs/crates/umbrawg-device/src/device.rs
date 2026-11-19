@@ -993,9 +993,8 @@ impl Device {
             .seal_in_place(nonce, &mut dst[header_end..total])
             .ok_or(DeviceError::PacketTooLarge)?;
         peer.observe_udp_window(total as u32);
-        if plaintext.first().is_some_and(|byte| *byte != 0) {
-            peer.extension().on_send(nonce, total, now);
-        }
+        let is_data = plaintext.first().is_some_and(|byte| *byte != 0);
+        peer.extension().on_packet_sent(nonce, total, is_data, now);
         Ok(total)
     }
 
@@ -1098,7 +1097,10 @@ impl Device {
             }
             ctx.io.deliver(peer, &packet[..length]);
         }
-        if let Some(block) = peer.extension().fec_flush_due(ctx.now) {
+        // The guard must be released before sending: encrypting a shard takes
+        // the same per-peer lock inside on_packet_sent.
+        let due_block = peer.extension().fec_flush_due(ctx.now);
+        if let Some(block) = due_block {
             let _ = self.send_fec_block_direct(peer, &block, ctx);
         }
         sent += self.flush_control(peer, ctx);
@@ -1118,7 +1120,7 @@ impl Device {
         let frames = peer.extension().pending_control(ctx.now);
         for frame in frames {
             let mut dst = [0u8; 1024];
-            match self.encrypt_packet(peer, &frame, &mut dst, ctx.rng, ctx.now) {
+            match self.encrypt_packet(peer, frame.bytes(), &mut dst, ctx.rng, ctx.now) {
                 Ok(length) => {
                     let Some(endpoint) = peer.endpoint() else {
                         peer.extension().push_control(frame);
@@ -1127,7 +1129,7 @@ impl Device {
                     ctx.io
                         .send_datagram(endpoint, Some(peer), &dst[..length], None);
                     peer.add_tx(length as u64);
-                    peer.extension().note_caps_sent(ctx.now);
+                    peer.extension().note_frame_sent(frame.kind(), ctx.now);
                     sent += 1;
                 }
                 Err(DeviceError::NoKeypair | DeviceError::KeypairExpired) => {
@@ -1217,7 +1219,10 @@ impl Device {
         if peer.extension().fec_tx_active() {
             let mut offset = 0usize;
             for plaintext in plaintexts {
-                match peer.extension().fec_push(plaintext, ctx.now) {
+                // Drop the extension guard before the match body: FEC shard
+                // encryption takes the same per-peer lock via on_packet_sent.
+                let pushed = peer.extension().fec_push(plaintext, ctx.now);
+                match pushed {
                     Ok(Some(block)) => {
                         offset = self.encode_fec_block(
                             peer,
@@ -1564,7 +1569,7 @@ impl Device {
                 let Ok(caps) = Caps::decode(plaintext) else {
                     return Ok(IncomingOutcome::Dropped);
                 };
-                peer.extension().handle_caps(caps);
+                peer.extension().handle_caps(caps, ctx.now);
                 Ok(IncomingOutcome::Keepalive)
             }
             ControlKind::Ack => {

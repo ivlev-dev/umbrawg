@@ -1,5 +1,6 @@
 #!/bin/bash
 set -u
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
 W=/root/umbrawg
 T=$W/bench/.t
 UWGBIN=$W/tools/target/release/uwg
@@ -8,6 +9,7 @@ cleanup() { for n in lcli lsrv; do ip netns del $n 2>/dev/null; done; }
 cleanup
 K1=$($UWGBIN genkey); P1=$(echo "$K1" | $UWGBIN pubkey)
 K2=$($UWGBIN genkey); P2=$(echo "$K2" | $UWGBIN pubkey)
+obf_block_from_conf $W/bench/obf-params.conf "$UWGBIN" genkey > $T/obf-lines.txt
 mkconf() { local priv=$1 listen=$2 pub=$3 ep=$4 out=$5
   { echo "[Interface]"; echo "PrivateKey = $priv"; echo "ListenPort = $listen"; cat $T/obf-lines.txt
     echo; echo "[Peer]"; echo "PublicKey = $pub"; echo "Endpoint = $ep"; echo "AllowedIPs = 10.9.0.0/24"; echo "PersistentKeepalive = 5"; } > "$out"; }

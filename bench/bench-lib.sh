@@ -272,3 +272,28 @@ bench_busy_reasons() {
     printf '%s\n' "${reasons[@]}"
     return 1
 }
+
+obf_block_from_conf() {
+    local conf=$1
+    shift
+    local hp line key
+    [ -f "$conf" ] || return 0
+    hp=$("$@") || return 1
+    if [ -z "$hp" ]; then
+        echo "obf_block_from_conf: не удалось сгенерировать HeaderProtectionKey" >&2
+        return 1
+    fi
+    while IFS= read -r line; do
+        line=${line#"${line%%[![:space:]]*}"}
+        case "$line" in
+            ""|\#*|\[*\]) continue ;;
+        esac
+        key=${line%%=*}
+        key=${key//[[:space:]]/}
+        case "$key" in
+            PrivateKey|ListenPort|PublicKey|AllowedIPs|Endpoint|PersistentKeepalive) continue ;;
+            HeaderProtectionKey) printf 'HeaderProtectionKey = %s\n' "$hp"; continue ;;
+        esac
+        printf '%s\n' "$line"
+    done < "$conf"
+}

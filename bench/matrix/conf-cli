@@ -1,9 +1,0 @@
-[Interface]
-PrivateKey = ECqIzakq9yOy9R7uxXRXDmjtG9wHcBY3aXSDx//vSGg=
-ListenPort = 51820
-
-[Peer]
-PublicKey = NH/U8BSFlhNgO/Ai8WqmhHv8VB4LfK+UzWNG7xFxTH4=
-Endpoint = 192.168.50.20:51821
-AllowedIPs = 10.9.0.0/24
-PersistentKeepalive = 5

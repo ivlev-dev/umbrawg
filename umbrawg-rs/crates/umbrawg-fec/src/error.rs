@@ -36,6 +36,13 @@ pub enum FecError {
         /// Rejected shard length.
         shard_len: u16,
     },
+    /// A shard length exceeds the decoder limit.
+    ShardLenTooLarge {
+        /// Rejected shard length.
+        shard_len: u16,
+        /// Largest shard length accepted by the decoder.
+        max_shard_len: u16,
+    },
     /// The payload length does not match the advertised shard length.
     PayloadLenMismatch {
         /// Advertised shard length.
@@ -101,6 +108,13 @@ impl fmt::Display for FecError {
             Self::InvalidShardLen { shard_len } => {
                 write!(formatter, "shard length {shard_len} is smaller than 2")
             }
+            Self::ShardLenTooLarge {
+                shard_len,
+                max_shard_len,
+            } => write!(
+                formatter,
+                "shard length {shard_len} exceeds max_shard_len {max_shard_len}"
+            ),
             Self::PayloadLenMismatch { expected, actual } => {
                 write!(
                     formatter,

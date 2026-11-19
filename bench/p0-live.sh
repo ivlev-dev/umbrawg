@@ -2,6 +2,8 @@
 set -uo pipefail
 export LC_ALL=C
 
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
+
 KO=${KO:-/root/umbrawg/module-master/src/umbrawg.ko}
 UWG=${UWG:-/root/umbrawg/tools/target/release/uwg}
 OBF_FILE=${OBF_FILE:-/root/umbrawg/bench/obf-params.conf}
@@ -89,7 +91,7 @@ K0=$("$UWG" genkey); P0=$(printf %s "$K0" | "$UWG" pubkey)
 K1=$("$UWG" genkey); P1=$(printf %s "$K1" | "$UWG" pubkey)
 obfblock=""
 if [ "$OBF" = "1" ]; then
-    obfblock=$(grep -vE '^(PrivateKey|ListenPort|PublicKey|AllowedIPs|\[Peer\]|\[Interface\])' "$OBF_FILE" || true)
+    obfblock=$(obf_block_from_conf "$OBF_FILE" "$UWG" genkey)
 fi
 printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.2:%s\nPersistentKeepalive = 5\n' \
     "$K0" "$PORT0" "$obfblock" "$P1" "$PORT1" > /tmp/p0-0.conf

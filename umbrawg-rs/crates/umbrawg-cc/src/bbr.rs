@@ -45,9 +45,16 @@ const DRAIN_MAX_NS: u64 = 100_000_000;
 const HI_GROWTH_DIVISOR: u64 = 64;
 /// Bound on rate samples relative to `cwnd / min_rtt`.
 const RATE_SANITY_FACTOR: u64 = 4;
+/// Largest peer-reported ACK delay accepted from the wire.
+const MAX_ACK_DELAY_NS: u64 = NS_PER_SEC;
 
 fn dur_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+/// Clamps a peer-reported ACK delay to a plausible value.
+fn ack_delay_ns(duration: Duration) -> u64 {
+    dur_ns(duration).min(MAX_ACK_DELAY_NS)
 }
 
 /// Subtracts a peer-reported ACK delay from an interval.
@@ -113,6 +120,7 @@ pub struct Bbr {
     inflight: u64,
     delivered: u64,
     largest_acked: u64,
+    max_sent: Option<u64>,
 
     pacer: Pacer,
     ring: SentRing,
@@ -175,6 +183,7 @@ impl Bbr {
             inflight: 0,
             delivered: 0,
             largest_acked: 0,
+            max_sent: None,
             pacer: Pacer::new(mss, initial_rate),
             ring: SentRing::new(),
             bw: BwWindow::new(),
@@ -286,6 +295,15 @@ impl Bbr {
         }
     }
 
+    /// Registers a transmitted wire counter without in-flight accounting.
+    ///
+    /// Control and FEC frames also consume counters, and the peer reports
+    /// them in `largest_counter`. Tracking them keeps a valid ACK from being
+    /// rejected as referring to an unsent datagram.
+    pub fn note_sent_counter(&mut self, counter: u64) {
+        self.max_sent = Some(self.max_sent.map_or(counter, |max| max.max(counter)));
+    }
+
     /// Registers a datagram that has just been transmitted.
     ///
     /// `counter` is the wire counter of the datagram, `len` its payload size
@@ -294,6 +312,8 @@ impl Bbr {
     pub fn on_send(&mut self, counter: u64, len: usize, now: Instant) {
         let now_ns = self.stamp(now);
         self.pacer.refill(now_ns);
+
+        self.note_sent_counter(counter);
 
         let len = u64::try_from(len).unwrap_or(u64::MAX);
         let record_len = u32::try_from(len).unwrap_or(u32::MAX);
@@ -315,7 +335,17 @@ impl Bbr {
     }
 
     /// Processes a cumulative acknowledgement.
+    ///
+    /// An ACK that names a counter we never sent cannot describe our stream:
+    /// it is dropped before it can touch the in-flight accounting or the
+    /// bounds. The reported ACK delay is clamped to one second.
     pub fn on_ack(&mut self, ack: &Ack, now: Instant) {
+        let Some(max_sent) = self.max_sent else {
+            return;
+        };
+        if ack.largest_counter > max_sent {
+            return;
+        }
         let now_ns = self.stamp(now);
         self.pacer.refill(now_ns);
 
@@ -331,7 +361,7 @@ impl Bbr {
             self.orphaned_packets = self.orphaned_packets.saturating_add(unreachable_packets);
         }
 
-        let ack_delay_ns = dur_ns(ack.ack_delay);
+        let ack_delay_ns = ack_delay_ns(ack.ack_delay);
 
         if let Some(packet) = newest {
             let rtt = rtt_sample(now_ns.saturating_sub(packet.sent_at_ns), ack_delay_ns);
@@ -839,5 +869,62 @@ mod tests {
         assert_eq!(compensate_loss(1000, 980, 20), 1020);
         assert_eq!(compensate_loss(1000, 100, 100), 1000);
         assert_eq!(compensate_loss(1000, 0, 100), 1000);
+    }
+
+    #[test]
+    fn ack_delay_is_clamped_to_one_second() {
+        assert_eq!(ack_delay_ns(Duration::ZERO), 0);
+        assert_eq!(ack_delay_ns(Duration::from_millis(5)), 5_000_000);
+        assert_eq!(ack_delay_ns(Duration::from_secs(1)), MAX_ACK_DELAY_NS);
+        assert_eq!(ack_delay_ns(Duration::from_secs(60)), MAX_ACK_DELAY_NS);
+        assert_eq!(
+            ack_delay_ns(Duration::from_secs(u64::MAX)),
+            MAX_ACK_DELAY_NS
+        );
+    }
+
+    #[test]
+    fn ack_beyond_largest_sent_counter_keeps_inflight() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        for counter in 0..4u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        assert_eq!(bbr.inflight(), 4 * 1400);
+
+        let min_rtt_before = bbr.stats().min_rtt;
+        let bogus = Ack::new(u64::MAX, u64::MAX, Duration::from_secs(60), true);
+        bbr.on_ack(&bogus, base + Duration::from_millis(10));
+
+        let stats = bbr.stats();
+        assert_eq!(bbr.inflight(), 4 * 1400);
+        assert_eq!(stats.delivered, 0);
+        assert_eq!(stats.lost_packets, 0);
+        assert_eq!(stats.rounds, 0);
+        assert_eq!(stats.ecn_ce, 0);
+        assert_eq!(stats.min_rtt, min_rtt_before);
+
+        bbr.on_ack(
+            &Ack::new(3, u64::MAX, Duration::ZERO, false),
+            base + Duration::from_millis(20),
+        );
+        assert_eq!(bbr.inflight(), 0);
+        assert_eq!(bbr.stats().delivered, 4 * 1400);
+    }
+
+    #[test]
+    fn ack_naming_a_control_counter_is_accepted() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        bbr.on_send(0, 1400, base);
+        bbr.note_sent_counter(5);
+
+        bbr.on_ack(
+            &Ack::new(5, 1 << 5, Duration::ZERO, false),
+            base + Duration::from_millis(20),
+        );
+
+        assert_eq!(bbr.inflight(), 0);
+        assert_eq!(bbr.stats().delivered, 1400);
     }
 }

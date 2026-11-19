@@ -27,6 +27,7 @@ struct uwg_fec_tx {
 	bool adaptive;
 	bool adaptive_on;
 	bool adaptive_valid;
+	bool disabled;
 	u64 adaptive_largest;
 	u64 adaptive_base;
 	u64 adaptive_received;
@@ -61,6 +62,7 @@ struct uwg_fec_rx {
 	u8 total;
 	u8 slots;
 	bool adaptive;
+	bool disabled;
 	u8 *arena;
 	struct uwg_fec_rx_block blocks[UWG_FEC_DATA_SLOTS];
 	u32 next_id;
@@ -98,18 +100,30 @@ bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive)
 
 static unsigned int uwg_fec_tx_limit(const struct uwg_peer *peer)
 {
-	int limit = READ_ONCE(peer->device->dev->mtu) + 2;
+	int limit = (int)READ_ONCE(peer->device->dev->mtu) + 2 -
+		    (UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN +
+		     MESSAGE_PADDING_MULTIPLE);
 
-	/* The TUN MTU is already derived from the underlay MTU with the tunnel
-	 * overhead subtracted, so a shard carrying one full-size inner packet
-	 * plus the FEC/ext headers still fits an underlay datagram. The extra
-	 * two bytes are the u16 packet length prefix of a shard.
+	/* The shard budget has to cover the two byte packet length prefix,
+	 * the ext and FEC shard headers, the payload, and the encryption
+	 * padding, all of which are sent inside one underlay datagram sized
+	 * by the TUN MTU.
 	 */
 	if (limit > UWG_FEC_DATA_SHARD_CAP)
 		limit = UWG_FEC_DATA_SHARD_CAP;
 	if (limit < 64)
 		limit = 64;
 	return (unsigned int)limit;
+}
+
+static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter)
+{
+	tx->adaptive_largest = counter;
+	tx->adaptive_base = counter;
+	tx->adaptive_received = 1;
+	tx->adaptive_observed = 0;
+	tx->adaptive_loss_q16 = 0;
+	tx->adaptive_clean_since = 0;
 }
 
 void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter)
@@ -124,13 +138,17 @@ void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter)
 	spin_lock_bh(&tx->lock);
 	if (!tx->adaptive_valid) {
 		tx->adaptive_valid = true;
-		tx->adaptive_largest = counter;
-		tx->adaptive_base = counter;
-		tx->adaptive_received = 1;
+		uwg_fec_adaptive_window_reset(tx, counter);
 		goto unlock;
 	}
-	if (counter < tx->adaptive_base)
+	if (counter < tx->adaptive_base) {
+		/* Small backward jumps are reordering, but a huge one means
+		 * the counters restarted after a rekey.
+		 */
+		if (tx->adaptive_base - counter > 1U << 20)
+			uwg_fec_adaptive_window_reset(tx, counter);
 		goto unlock;
+	}
 	if (counter > tx->adaptive_largest)
 		tx->adaptive_largest = counter;
 	tx->adaptive_received++;
@@ -179,7 +197,13 @@ bool uwg_fec_peer_tx_ready(const struct uwg_peer *peer)
 		return false;
 	if (!READ_ONCE(peer->caps.peer_valid))
 		return false;
-	return (READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_FEC) != 0;
+	if (!(READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_FEC))
+		return false;
+	/* A mismatched profile would make the receiver drop every shard. */
+	if (READ_ONCE(peer->caps.peer.fec_k) != k ||
+	    READ_ONCE(peer->caps.peer.fec_m) != m)
+		return false;
+	return true;
 }
 
 static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
@@ -257,7 +281,11 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 		skb_put_data(skb, tx->block + (size_t)i * shard_len,
 			     shard_len);
 		skb->dev = dev;
-		PACKET_CB(skb)->mtu = dev->mtu;
+		/* Zero MTU makes the sender pad to the 16 byte block only
+		 * instead of aligning the shard up to the TUN MTU, which would
+		 * blow the underlay datagram budget.
+		 */
+		PACKET_CB(skb)->mtu = 0;
 		PACKET_CB(skb)->ds = 0;
 		PACKET_CB(skb)->is_keepalive = false;
 		PACKET_CB(skb)->is_fec = true;
@@ -280,7 +308,9 @@ static bool uwg_fec_tx_push_locked(struct uwg_fec_tx *tx,
 	unsigned int limit = uwg_fec_tx_limit(peer);
 	u8 *slot;
 
-	if (plen + 2 > limit || plen + 2 > UWG_FEC_DATA_SHARD_CAP)
+	if (unlikely(tx->disabled))
+		return false;
+	if (plen + 2 > limit)
 		return false;
 	if (tx->count >= tx->k)
 		return false;
@@ -311,7 +341,7 @@ static void uwg_fec_tx_timeout(struct timer_list *timer)
 
 	__skb_queue_head_init(&frames);
 	spin_lock_bh(&tx->lock);
-	if (tx->count)
+	if (!tx->disabled && tx->count)
 		uwg_fec_tx_emit(tx, false, &frames);
 	spin_unlock_bh(&tx->lock);
 	if (!skb_queue_empty(&frames))
@@ -397,6 +427,8 @@ static void uwg_fec_rx_arm(struct uwg_fec_rx *rx)
 	unsigned int i;
 	bool any = false;
 
+	if (unlikely(rx->disabled))
+		return;
 	for (i = 0; i < rx->slots; i++) {
 		struct uwg_fec_rx_block *blk = &rx->blocks[i];
 
@@ -484,7 +516,8 @@ static void uwg_fec_rx_timeout(struct timer_list *timer)
 
 	__skb_queue_head_init(&out);
 	spin_lock_bh(&rx->lock);
-	uwg_fec_rx_drain(rx, &out);
+	if (likely(!rx->disabled))
+		uwg_fec_rx_drain(rx, &out);
 	spin_unlock_bh(&rx->lock);
 	uwg_fec_rx_deliver(peer, &out, false);
 }
@@ -536,6 +569,10 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 
 	__skb_queue_head_init(&out);
 	spin_lock_bh(&rx->lock);
+	if (unlikely(rx->disabled)) {
+		ret = -EINVAL;
+		goto out_unlock;
+	}
 	if (!rx->keypair_valid || rx->keypair_id != keypair_id)
 		uwg_fec_rx_reset_locked(rx, keypair_id);
 	if (!rx->have_next) {
@@ -791,13 +828,25 @@ void uwg_peer_fec_release(struct uwg_peer *peer)
 
 	if (!tx && !rx)
 		return;
+	/* Unpublish first and let every in-flight reader finish: they may
+	 * still arm a timer, and the shard timeout re-arms itself, so the
+	 * timers can only be shut down once readers are gone.
+	 */
 	RCU_INIT_POINTER(peer->fec_tx, NULL);
 	RCU_INIT_POINTER(peer->fec_rx, NULL);
-	if (tx)
-		timer_delete_sync(&tx->timer);
-	if (rx)
-		timer_delete_sync(&rx->timer);
 	synchronize_net();
+	if (tx) {
+		spin_lock_bh(&tx->lock);
+		tx->disabled = true;
+		spin_unlock_bh(&tx->lock);
+		timer_shutdown_sync(&tx->timer);
+	}
+	if (rx) {
+		spin_lock_bh(&rx->lock);
+		rx->disabled = true;
+		spin_unlock_bh(&rx->lock);
+		timer_shutdown_sync(&rx->timer);
+	}
 	uwg_fec_tx_free(tx);
 	uwg_fec_rx_free(rx);
 }
@@ -807,6 +856,9 @@ void uwg_peer_fec_rcu_free(struct uwg_peer *peer)
 	struct uwg_fec_tx *tx = rcu_dereference_protected(peer->fec_tx, 1);
 	struct uwg_fec_rx *rx = rcu_dereference_protected(peer->fec_rx, 1);
 
+	/* Runs from an RCU callback, so no sleeping: release() already shut
+	 * the timers down, and timer_delete is safe in softirq context.
+	 */
 	if (tx) {
 		timer_delete(&tx->timer);
 		uwg_fec_tx_free(tx);

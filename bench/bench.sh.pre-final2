@@ -315,7 +315,7 @@ make_configs() {
     p1=$(printf '%s' "$k1" | "$UWG" pubkey)
     obfblock=""
     if [ "$obf" = "1" ]; then
-        obfblock=$(grep -vE '^(PrivateKey|ListenPort|PublicKey|AllowedIPs|\[Peer\]|\[Interface\])' "$OBF" || true)
+        obfblock=$(obf_block_from_conf "$OBF" "$UWG" genkey)
     fi
     extra0=""
     extra1=""

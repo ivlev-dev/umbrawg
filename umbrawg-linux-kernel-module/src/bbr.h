@@ -94,6 +94,7 @@ struct uwg_bbr {
 	u64 inflight;
 	u64 delivered;
 	u64 largest_acked;
+	u64 max_sent;
 
 	struct uwg_bbr_pacer pacer;
 	struct uwg_bbr_sent ring[UWG_BBR_RING_CAPACITY];
@@ -132,6 +133,7 @@ struct uwg_bbr {
 
 void uwg_bbr_init(struct uwg_bbr *b, u32 mss, u32 initial_rtt_us);
 void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns);
+void uwg_bbr_note_sent(struct uwg_bbr *b, u64 counter);
 void uwg_bbr_on_sent(struct uwg_bbr *b, u64 counter, u64 now_ns);
 void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
 		    u32 ack_delay_us, u64 now_ns);

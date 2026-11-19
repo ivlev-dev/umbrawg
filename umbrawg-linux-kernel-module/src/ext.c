@@ -456,27 +456,70 @@ void uwg_ext_ack_timeout(struct uwg_peer *peer)
 	}
 }
 
+static bool uwg_ext_caps_same(const struct uwg_ext_caps *a,
+			      const struct uwg_ext_caps *b)
+{
+	return a->flags == b->flags &&
+	       a->ack_interval == b->ack_interval &&
+	       a->fec_k == b->fec_k &&
+	       a->fec_m == b->fec_m;
+}
+
+/*
+ * The data plane only implements k <= 8 and m <= 2. A peer advertising a
+ * bigger block is not an error - it must simply never be matched, otherwise
+ * both sides would send a profile the other one drops.
+ */
+static void uwg_ext_sanitize_caps(struct uwg_peer *peer,
+				  struct uwg_ext_caps *caps)
+{
+	if (!(caps->flags & UWG_EXT_CAP_FEC) ||
+	    (caps->fec_k >= 1 && caps->fec_k <= UWG_FEC_DATA_MAX_K &&
+	     caps->fec_m >= 1 && caps->fec_m <= UWG_FEC_DATA_MAX_M))
+		return;
+
+	net_dbg_ratelimited("%s: Peer %llu advertised unsupported FEC %u:%u\n",
+			    peer->device->dev->name, peer->internal_id,
+			    caps->fec_k, caps->fec_m);
+	caps->flags &= ~(UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_ADAPTIVE);
+	caps->fec_k = 0;
+	caps->fec_m = 0;
+}
+
 static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 				size_t len)
 {
 	struct uwg_ext_caps caps;
+	bool changed;
+	bool send = false;
 
 	if (uwg_ext_parse_caps(payload, len, &caps))
 		return;
+	uwg_ext_sanitize_caps(peer, &caps);
 	spin_lock_bh(&peer->caps.lock);
 	uwg_ext_local_caps(peer->device, &peer->caps.local);
+	changed = !peer->caps.last_peer_valid ||
+		  !uwg_ext_caps_same(&peer->caps.last_peer, &caps);
+	peer->caps.last_peer = caps;
+	peer->caps.last_peer_valid = true;
 	peer->caps.peer = caps;
 	peer->caps.peer_valid = true;
 	/* Our own CAPS frame may have been sent before the peer installed the
-	 * new keypair and was lost. Hearing from the peer is a good moment to
-	 * (re)send ours; the attempt counter keeps this bounded.
+	 * new keypair and was lost. Hearing a new profile from the peer is a
+	 * good moment to (re)send ours, but an identical repeat must stay
+	 * silent: two kernels would otherwise answer each other forever.
+	 * send_attempts == 0 means we have not managed to send CAPS at all.
 	 */
-	if (peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
-		peer->caps.send_attempts = UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
-	peer->caps.resend = true;
-	peer->caps.next_send = 0;
+	if (changed || !peer->caps.send_attempts) {
+		if (peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
+			peer->caps.send_attempts = UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
+		peer->caps.resend = true;
+		peer->caps.next_send = 0;
+		send = true;
+	}
 	spin_unlock_bh(&peer->caps.lock);
-	uwg_ext_maybe_send_caps(peer);
+	if (send)
+		uwg_ext_maybe_send_caps(peer);
 }
 
 static void uwg_ext_bbr_on_ack(struct uwg_peer *peer, u64 largest, u64 bitmap,

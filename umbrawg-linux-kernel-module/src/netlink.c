@@ -11,6 +11,7 @@
 #include "queueing.h"
 #include "messages.h"
 #include "type.h"
+#include "fec_data.h"
 #include "uapi/umbrawg.h"
 #include <linux/if.h>
 #include <net/genetlink.h>
@@ -610,13 +611,15 @@ static int set_extra_ports(struct uwg_device *uwg, u8 extra_ports)
 
 static bool uwg_fec_mode_valid(u32 value)
 {
-	u32 k, m;
+	u8 k, m;
+	bool adaptive;
 
-	if (value == UWG_FEC_MODE_OFF || value == UWG_FEC_MODE_ADAPTIVE)
+	if (value == UWG_FEC_MODE_OFF)
 		return true;
-	k = value >> 8;
-	m = value & 0xff;
-	return k >= 1 && m >= 1 && k + m <= UWG_FEC_MAX_SHARDS;
+	/* The data plane is the single source of truth for the supported
+	 * k:m ranges; a profile it cannot encode must not be accepted.
+	 */
+	return uwg_fec_mode_config(value, &k, &m, &adaptive);
 }
 
 static int set_allowedip(struct uwg_peer *peer, struct nlattr **attrs)

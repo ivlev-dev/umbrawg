@@ -4,6 +4,7 @@ set -u
 ROOT=/root/umbrawg
 B=$ROOT/bench/matrix
 BIN=$ROOT/tools/target/release/uwg
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
 OUT=$B/profile
 KO=${KO:-$ROOT/module-baseline/umbrawg.ko}
 mkdir -p "$OUT"
@@ -16,18 +17,19 @@ P_CLI=$(printf '%s' "$K_CLI" | "$BIN" pubkey)
 P_SRV=$(printf '%s' "$K_SRV" | "$BIN" pubkey)
 
 gen_confs() {
-  local obf=$1
+  local obf=$1 obf_lines=""
+  if [ "$obf" = "1" ]; then
+    obf_lines=$(obf_block_from_conf "$ROOT/bench/obf-params.conf" "$BIN" genkey)
+  fi
   {
     echo "[Interface]"; echo "PrivateKey = $K_CLI"; echo "ListenPort = 51820"
-    [ "$obf" = "1" ] && sed -n '/^\[Interface\]/,/^\[Peer\]/p' "$ROOT/bench/obf-params.conf" \
-      | grep -Ev '^(PrivateKey|ListenPort|\[Interface\]|\[Peer\])' | sed '/^[[:space:]]*$/d'
+    [ -n "$obf_lines" ] && printf '%s\n' "$obf_lines"
     echo; echo "[Peer]"; echo "PublicKey = $P_SRV"; echo "Endpoint = 192.168.50.20:51821"
     echo "AllowedIPs = 10.9.0.0/24"; echo "PersistentKeepalive = 5"
   } > "$B/conf-cli"
   {
     echo "[Interface]"; echo "PrivateKey = $K_SRV"; echo "ListenPort = 51821"
-    [ "$obf" = "1" ] && sed -n '/^\[Interface\]/,/^\[Peer\]/p' "$ROOT/bench/obf-params.conf" \
-      | grep -Ev '^(PrivateKey|ListenPort|\[Interface\]|\[Peer\])' | sed '/^[[:space:]]*$/d'
+    [ -n "$obf_lines" ] && printf '%s\n' "$obf_lines"
     echo; echo "[Peer]"; echo "PublicKey = $P_CLI"; echo "Endpoint = 192.168.50.10:51820"
     echo "AllowedIPs = 10.9.0.0/24"; echo "PersistentKeepalive = 5"
   } > "$B/conf-srv"

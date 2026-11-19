@@ -134,6 +134,8 @@ def main():
     base = {}
     if args.mode in ("obf", "det"):
         base = template_params(OBF_CONF)
+        if "HeaderProtectionKey" in base:
+            base["HeaderProtectionKey"] = genkey()
     if args.mode == "det":
         base.update({
             "H1": "712026294", "H2": "1504260570", "H3": "2938347170", "H4": "3916942126",

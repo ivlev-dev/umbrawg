@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/bench-lib.sh"
+
 MODDIR=${MODDIR:-/root/umbrawg/module/src}
 UWG=${UWG:-/root/umbrawg/tools/target/release/uwg}
 OBF=${OBF:-/root/umbrawg/bench/obf-params.conf}
@@ -53,7 +55,7 @@ P1=$(printf '%s' "$K1" | "$UWG" pubkey)
 
 OBFBLOCK=""
 if [ "$OBF_ON" = "1" ]; then
-    OBFBLOCK=$(grep -vE '^(PrivateKey|ListenPort|PublicKey|AllowedIPs|\[Peer\]|\[Interface\])' "$OBF" || true)
+    OBFBLOCK=$(obf_block_from_conf "$OBF" "$UWG" genkey)
 fi
 
 CONF0=$(mktemp)

@@ -94,7 +94,10 @@ struct uwg_ext_fec_shard {
 struct uwg_peer_caps {
 	struct uwg_ext_caps local;
 	struct uwg_ext_caps peer;
+	/* Last profile received from the peer; a repeat must not be answered. */
+	struct uwg_ext_caps last_peer;
 	bool peer_valid;
+	bool last_peer_valid;
 	bool resend;
 	u8 send_attempts;
 	ktime_t next_send;

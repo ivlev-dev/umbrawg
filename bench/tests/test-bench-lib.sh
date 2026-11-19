@@ -152,6 +152,32 @@ sleep 0.1
 proc_stat_snapshot "$tmp/real-b"
 check_eq "cpu_busy_summary реальный /proc/stat" "ok" "$(cpu_busy_summary "$tmp/real-a" "$tmp/real-b" 80 | awk '{ if ($0 ~ /^per_cpu=[0-9]+(,[0-9]+)* hot_cpus=[0-9]+ total=[0-9]+$/) print "ok"; else print $0 }')"
 
+cat > "$tmp/obf-template.conf" <<'EOF'
+# профиль: секретов нет
+[Interface]
+PrivateKey = <PRIVATE_KEY>
+ListenPort = 51820
+S1 = 34
+HeaderProtectionKey = <HEADER_PROTECTION_KEY>
+ContentPaddingAddition = 51-197
+
+[Peer]
+PublicKey = <PEER_PUBLIC_KEY>
+AllowedIPs = 10.9.0.0/24
+EOF
+
+obf_out=$(obf_block_from_conf "$tmp/obf-template.conf" printf 'KEYGEN=\n')
+check_eq "obf_block_from_conf убирает PrivateKey" "0" "$(printf '%s\n' "$obf_out" | grep -c 'PRIVATE_KEY' || true)"
+check_eq "obf_block_from_conf убирает ListenPort" "0" "$(printf '%s\n' "$obf_out" | grep -c '^ListenPort' || true)"
+check_eq "obf_block_from_conf убирает секцию Peer" "0" "$(printf '%s\n' "$obf_out" | grep -cE '^(\[Peer\]|PublicKey|AllowedIPs)' || true)"
+check_eq "obf_block_from_conf убирает комментарии" "0" "$(printf '%s\n' "$obf_out" | grep -c '^#' || true)"
+check_contains "obf_block_from_conf подставляет HeaderProtectionKey" "HeaderProtectionKey = KEYGEN=" "$obf_out"
+check_eq "obf_block_from_conf один HeaderProtectionKey" "1" "$(printf '%s\n' "$obf_out" | grep -c '^HeaderProtectionKey' || true)"
+check_contains "obf_block_from_conf сохраняет профиль" "S1 = 34" "$obf_out"
+check_eq "obf_block_from_conf нет файла" "" "$(obf_block_from_conf "$tmp/no-such.conf" printf 'KEYGEN=\n')"
+check_rc "obf_block_from_conf ошибка генератора" 1 obf_block_from_conf "$tmp/obf-template.conf" false
+check_rc "obf_block_from_conf пустой генератор" 1 obf_block_from_conf "$tmp/obf-template.conf" true
+
 echo "---"
 echo "тестов: $total, провалов: $fails"
 [ "$fails" = "0" ]

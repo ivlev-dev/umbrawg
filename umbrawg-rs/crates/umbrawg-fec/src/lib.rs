@@ -68,3 +68,17 @@ pub const MAX_TOTAL_SHARDS: usize = 255;
 
 /// Default time the decoder waits for missing shards before releasing a block.
 pub const DEFAULT_BLOCK_TIMEOUT: Duration = Duration::from_millis(5);
+
+/// Largest shard length accepted by [`FecDecoder`], in bytes.
+///
+/// Mirrors `UWG_FEC_DATA_SHARD_CAP` of the kernel module. Shards above this
+/// bound are rejected by [`FecDecoder::push`] so a peer cannot make the daemon
+/// allocate arbitrarily large buffers.
+pub const MAX_SHARD_LEN: u16 = 1900;
+
+/// Maximum number of blocks the decoder holds at once.
+///
+/// Mirrors `UWG_FEC_DATA_SLOTS` of the kernel module. When the limit is
+/// reached the oldest block is released early, so a peer sending shards for
+/// many distinct blocks cannot grow the decoder without bound.
+pub const MAX_PENDING_BLOCKS: usize = 16;
