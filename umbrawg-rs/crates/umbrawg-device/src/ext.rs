@@ -98,7 +98,7 @@ impl FecMode {
     pub fn config(self) -> Option<FecConfig> {
         match self {
             Self::Off => None,
-            Self::Adaptive => FecConfig::new(10, 2).ok(),
+            Self::Adaptive => FecConfig::new(2, 1).ok(),
             Self::Fixed { k, m } => FecConfig::new(k, m).ok(),
         }
     }

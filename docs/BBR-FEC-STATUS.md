@@ -20,12 +20,14 @@
 | Сценарий | Скорость | Потери/результат |
 |---|---:|---|
 | TCP clean, FEC off | 3267–3493 Мбит/с | — |
-| TCP clean, FEC adaptive (не активен) | **3493 Мбит/с** | без регрессии |
+| TCP clean, FEC adaptive (не активен) | **3330 Мбит/с** | без регрессии |
 | UDP 200M loss 2%, FEC off | 196.1 Мбит/с | 1.967% |
 | UDP 200M loss 2%, FEC fixed 10:2 | 199.7 Мбит/с | **0.036%** |
-| UDP 200M loss 2%, FEC adaptive | 198.6 Мбит/с | **0.598%** (с учётом прогрева) |
-| TCP loss 2%, FEC fixed 10:2 | 30 Мбит/с | хуже TCP без FEC |
+| UDP 200M loss 2%, FEC adaptive 2:1 | 198.9 Мбит/с | **0.316%** |
+| TCP loss 2%, FEC fixed 2:1 | **457 Мбит/с** | лучше TCP без FEC (213) |
+| TCP loss 2%, FEC adaptive 2:1 | **440 Мбит/с** | лучше TCP без FEC |
 | TCP clean, FEC fixed 10:2 | 1870 Мбит/с | цена fixed-режима |
+| TCP loss 2%, FEC fixed 10:2 | 30 Мбит/с | большой блок не успевает |
 
 ## BBRv3
 
