@@ -69,8 +69,11 @@
   Netlink-настройки bbr/fec сохраняются и видны.
 - Добавлен kernel FEC-кодек `fec.c/h`: GF(256) 0x11d, систематический
   RS до 32+16, encode/decode без kmalloc, матрица 1:1 с Rust
-  (проверено сравнением), selftest при загрузке модуля. Data-path пока
-  не использует кодек.
+  (проверено сравнением), selftest при загрузке модуля.
+- Добавлен kernel BBR-контроллер `bbr.c/h`: BtlBw/RTprop,
+  Startup/ProbeBw/ProbeRtt, pacing/cwnd/inflight, ring 2048×24 Б
+  (~48 КиБ), selftest в `uwg_mod_init` (99.9% полосы на синтетике).
+  Data-path пока не использует ни FEC-кодек, ни BBR.
 - Проверен интероп kernel↔Rust при kernel `bbr on, fec 2:1`: ping 0%,
   TCP 2791 Мбит/с, UDP 400/0.
 - Порт в ядро не начат.

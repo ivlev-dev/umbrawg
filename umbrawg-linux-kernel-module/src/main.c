@@ -14,6 +14,7 @@
 #include "device.h"
 #include "aead.h"
 #include "fec.h"
+#include "bbr.h"
 #include "noise.h"
 #include "queueing.h"
 #include "ratelimiter.h"
@@ -40,6 +41,13 @@ static int __init uwg_mod_init(void)
 	ret = uwg_fec_selftest();
 	if (ret < 0) {
 		pr_err("FEC self-test failed: %d\n", ret);
+		goto err_allowedips;
+	}
+
+	ret = uwg_bbr_selftest();
+	if (ret < 0) {
+		pr_err("BBR self-test failed: %d\n", ret);
+		ret = -EINVAL;
 		goto err_allowedips;
 	}
 
