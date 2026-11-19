@@ -440,8 +440,32 @@ fn send_run<R: rand_core::RngCore>(
         return;
     }
     if device.bbr_queue_active(peer) {
+        let mut small: [&[u8]; TUN_BATCH] = [&[]; TUN_BATCH];
+        let mut small_len = 0usize;
         for packet in plaintexts {
-            let _ = device.bbr_enqueue(peer, packet);
+            if packet.len() <= 256 {
+                small[small_len] = packet;
+                small_len += 1;
+            } else {
+                let _ = device.bbr_enqueue(peer, packet);
+            }
+        }
+        if small_len > 0 {
+            send_run_inner(
+                device,
+                socket,
+                tun,
+                rng,
+                now,
+                scratch,
+                fallback,
+                batch_buffer,
+                batch,
+                peer,
+                &small[..small_len],
+                rekey,
+                rx,
+            );
         }
         return;
     }
