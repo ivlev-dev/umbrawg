@@ -584,6 +584,49 @@ fn send_run_inner<R: rand_core::RngCore>(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn flush_plain_run<R: rand_core::RngCore>(
+    device: &Device,
+    socket: &dyn SocketSource,
+    tun: &Tun,
+    rng: &mut R,
+    now: Instant,
+    scratch: &mut [u8],
+    tx_buffer: &mut [u8],
+    batch_buffer: &mut [u8],
+    batch: &mut TxBatch,
+    peer: &Arc<Peer>,
+    tx_plain: &[u8],
+    offsets: &[(usize, usize); TUN_BATCH],
+    pending: usize,
+    rekey: &mut Vec<Arc<Peer>>,
+    rx: &mut RxBatch,
+) {
+    if pending == 0 {
+        return;
+    }
+    let mut plaintexts: [&[u8]; TUN_BATCH] = [&[]; TUN_BATCH];
+    for index in 0..pending {
+        let (start, length) = offsets[index];
+        plaintexts[index] = &tx_plain[start..start + length];
+    }
+    send_run(
+        device,
+        socket,
+        tun,
+        rng,
+        now,
+        scratch,
+        tx_buffer,
+        batch_buffer,
+        batch,
+        peer,
+        &plaintexts[..pending],
+        rekey,
+        rx,
+    );
+}
+
+#[allow(clippy::too_many_arguments)]
 fn pump_tun_tx<R: rand_core::RngCore>(
     device: &Device,
     socket: &dyn SocketSource,
@@ -592,6 +635,7 @@ fn pump_tun_tx<R: rand_core::RngCore>(
     now: Instant,
     scratch: &mut [u8],
     tx_buffer: &mut [u8],
+    tx_plain: &mut [u8],
     batch_buffer: &mut [u8],
     batch: &mut TxBatch,
     rx: &mut RxBatch,
@@ -600,15 +644,17 @@ fn pump_tun_tx<R: rand_core::RngCore>(
     rekey: &mut Vec<Arc<Peer>>,
 ) -> bool {
     let mut busy = false;
+    let mut offsets = [(0usize, 0usize); TUN_BATCH];
+    let mut pending = 0usize;
+    let mut used = 0usize;
+    let mut current: Option<Arc<Peer>> = None;
+
     loop {
         match tun.read_batch_sizes(tun_slices, tun_sizes) {
             Ok(0) => break,
             Ok(count) => {
                 busy = true;
                 log::debug!("tun batch of {count} segments");
-                let mut plaintexts: [&[u8]; TUN_BATCH] = [&[]; TUN_BATCH];
-                let mut pending = 0usize;
-                let mut current: Option<Arc<Peer>> = None;
                 for index in 0..count {
                     let length = tun_sizes[index];
                     if length == 0 {
@@ -627,7 +673,7 @@ fn pump_tun_tx<R: rand_core::RngCore>(
                         .is_some_and(|known| Arc::ptr_eq(known, &peer));
                     if !same {
                         if let Some(previous) = current.as_ref() {
-                            send_run(
+                            flush_plain_run(
                                 device,
                                 socket,
                                 tun,
@@ -638,19 +684,47 @@ fn pump_tun_tx<R: rand_core::RngCore>(
                                 batch_buffer,
                                 batch,
                                 previous,
-                                &plaintexts[..pending],
+                                tx_plain,
+                                &offsets,
+                                pending,
                                 rekey,
                                 rx,
                             );
                             pending = 0;
+                            used = 0;
                         }
                         current = Some(peer);
                     }
-                    plaintexts[pending] = packet;
+                    if used + length > tx_plain.len() {
+                        if let Some(previous) = current.as_ref() {
+                            flush_plain_run(
+                                device,
+                                socket,
+                                tun,
+                                rng,
+                                now,
+                                scratch,
+                                tx_buffer,
+                                batch_buffer,
+                                batch,
+                                previous,
+                                tx_plain,
+                                &offsets,
+                                pending,
+                                rekey,
+                                rx,
+                            );
+                        }
+                        pending = 0;
+                        used = 0;
+                    }
+                    tx_plain[used..used + length].copy_from_slice(packet);
+                    offsets[pending] = (used, length);
+                    used += length;
                     pending += 1;
                     if pending == TUN_BATCH {
                         if let Some(peer) = current.as_ref() {
-                            send_run(
+                            flush_plain_run(
                                 device,
                                 socket,
                                 tun,
@@ -661,31 +735,15 @@ fn pump_tun_tx<R: rand_core::RngCore>(
                                 batch_buffer,
                                 batch,
                                 peer,
-                                &plaintexts[..pending],
+                                tx_plain,
+                                &offsets,
+                                pending,
                                 rekey,
                                 rx,
                             );
                         }
                         pending = 0;
-                    }
-                }
-                if pending > 0 {
-                    if let Some(peer) = current.as_ref() {
-                        send_run(
-                            device,
-                            socket,
-                            tun,
-                            rng,
-                            now,
-                            scratch,
-                            tx_buffer,
-                            batch_buffer,
-                            batch,
-                            peer,
-                            &plaintexts[..pending],
-                            rekey,
-                            rx,
-                        );
+                        used = 0;
                     }
                 }
             }
@@ -701,6 +759,27 @@ fn pump_tun_tx<R: rand_core::RngCore>(
                 log::debug!("tun read failed: {error}");
                 break;
             }
+        }
+    }
+    if pending > 0 {
+        if let Some(peer) = current.as_ref() {
+            flush_plain_run(
+                device,
+                socket,
+                tun,
+                rng,
+                now,
+                scratch,
+                tx_buffer,
+                batch_buffer,
+                batch,
+                peer,
+                tx_plain,
+                &offsets,
+                pending,
+                rekey,
+                rx,
+            );
         }
     }
     busy
@@ -723,6 +802,7 @@ fn worker_loop(
         .map(|buffer| buffer.as_mut_slice())
         .collect();
     let slot = tun.mtu() as usize + TUN_PACKET_MARGIN;
+    let mut tx_plain = vec![0u8; TUN_BATCH * slot];
     let mut tun_bufs: Vec<Vec<u8>> = (0..TUN_BATCH).map(|_| vec![0u8; slot]).collect();
     let mut tun_slices: Vec<&mut [u8]> = tun_bufs
         .iter_mut()
@@ -801,6 +881,7 @@ fn worker_loop(
             now,
             &mut scratch,
             &mut tx_buffer,
+            &mut tx_plain,
             &mut batch_buffer,
             &mut batch,
             &mut rx,

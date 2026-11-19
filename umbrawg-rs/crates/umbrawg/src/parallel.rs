@@ -1230,6 +1230,7 @@ pub(crate) fn worker_loop(
     let mut scratch = vec![0u8; MAX_PACKET + 512];
     let mut tx_buffer = vec![0u8; MAX_PACKET + 512];
     let slot = tun.mtu() as usize + TUN_PACKET_MARGIN;
+    let mut tx_plain = vec![0u8; TUN_BATCH * slot];
     let mut tun_bufs: Vec<Vec<u8>> = (0..TUN_BATCH).map(|_| vec![0u8; slot]).collect();
     let mut tun_slices: Vec<&mut [u8]> = tun_bufs
         .iter_mut()
@@ -1271,6 +1272,7 @@ pub(crate) fn worker_loop(
                 now,
                 &mut scratch,
                 &mut tx_buffer,
+                &mut tx_plain,
                 &mut batch_buffer,
                 &mut batch,
                 &mut rx,
