@@ -935,6 +935,27 @@ fn uapi_snapshot_and_apply_patch_the_device() {
 }
 
 #[test]
+fn invalid_update_does_not_apply_destructive_changes() {
+    let pair = pair(ObfParams::default());
+    let key_before = pair.a.private_key();
+    let peers_before = pair.a.snapshot().peers.len();
+    assert_eq!(peers_before, 1);
+
+    let mut request = SetRequest {
+        private_key: Some(Key::from_bytes([0x77; 32])),
+        replace_peers: true,
+        ..SetRequest::default()
+    };
+    request.obfuscation.jmin = Some(100);
+    request.obfuscation.jmax = Some(10);
+
+    assert!(pair.a.apply(request).is_err());
+    assert_eq!(pair.a.private_key(), key_before);
+    assert_eq!(pair.a.snapshot().peers.len(), peers_before);
+    assert_eq!(pair.a.obfuscation().jmin, 0);
+}
+
+#[test]
 fn send_batch_coalesces_equal_lengths_and_keeps_order() {
     let mut pair = pair(ObfParams::default());
     let now = Instant::now();

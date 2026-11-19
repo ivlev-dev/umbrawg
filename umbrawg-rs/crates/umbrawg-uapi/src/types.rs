@@ -529,7 +529,7 @@ impl Default for PeerSnapshot {
 }
 
 /// Complete device state returned by [`DeviceControl::snapshot`].
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeviceSnapshot {
     /// Device private key; `None` means no key is configured.
     pub private_key: Option<Key>,
@@ -545,20 +545,6 @@ pub struct DeviceSnapshot {
     pub timings: TimingSnapshot,
     /// Configured peers.
     pub peers: Vec<PeerSnapshot>,
-}
-
-impl Default for DeviceSnapshot {
-    fn default() -> Self {
-        Self {
-            private_key: None,
-            listen_port: 0,
-            fwmark: 0,
-            extra_ports: 4,
-            obfuscation: ObfuscationSnapshot::default(),
-            timings: TimingSnapshot::default(),
-            peers: Vec::new(),
-        }
-    }
 }
 
 /// Update for one of the `i1..i5` special-packet templates.
@@ -920,7 +906,7 @@ mod tests {
 
     #[test]
     fn default_snapshot_uses_default_extra_ports() {
-        assert_eq!(DeviceSnapshot::default().extra_ports, 4);
+        assert_eq!(DeviceSnapshot::default().extra_ports, 0);
         assert_eq!(SetRequest::default().extra_ports, None);
     }
 

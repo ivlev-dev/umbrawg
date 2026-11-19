@@ -45,4 +45,4 @@ pub(crate) const IP_PMTUDISC_OMIT: c_int = 5;
 ///
 /// One `IPV6_PKTINFO` message needs 40 bytes on 64-bit targets and 32 on
 /// 32-bit targets; a `UDP_SEGMENT` message needs 24 and 16 bytes respectively.
-pub(crate) const CONTROL_BUFFER_SIZE: usize = 64;
+pub(crate) const CONTROL_BUFFER_SIZE: usize = 128;

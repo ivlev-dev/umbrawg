@@ -200,7 +200,7 @@ mod tests {
 private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 fwmark=4660
-extra_ports=4
+extra_ports=0
 jc=4
 jmin=40
 jmax=70
@@ -247,7 +247,7 @@ errno=0
     #[test]
     fn prints_extra_ports_always() {
         let mut snapshot = DeviceSnapshot::default();
-        assert!(format_get_response(&snapshot).contains("extra_ports=4\n"));
+        assert!(format_get_response(&snapshot).contains("extra_ports=0\n"));
 
         snapshot.extra_ports = 0;
         assert!(format_get_response(&snapshot).contains("extra_ports=0\n"));
@@ -261,7 +261,7 @@ errno=0
         let response = format_get_response(&DeviceSnapshot::default());
         assert_eq!(
             response,
-            "extra_ports=4\nh1=1\nh2=2\nh3=3\nh4=4\nrandom_trailers=0\ndisable_cookies=0\nerrno=0\n\n"
+            "extra_ports=0\nh1=1\nh2=2\nh3=3\nh4=4\nrandom_trailers=0\ndisable_cookies=0\nerrno=0\n\n"
         );
     }
 
@@ -335,7 +335,7 @@ errno=0
             private_key: Some(Key::from_hex(PRIVATE_KEY).expect("valid")),
             listen_port: 51820,
             fwmark: 4660,
-            extra_ports: 4,
+            extra_ports: 0,
             obfuscation: ObfuscationSnapshot {
                 jc: 4,
                 jmin: 40,

@@ -323,6 +323,20 @@ fn open_socket(port: u16, fwmark: u32, buffer: usize, limits: GsoLimits) -> io::
     Ok(socket)
 }
 
+fn apply_socket_mark(sockets: &SocketSet, mark: u32) -> bool {
+    let mut ok = true;
+    for socket in sockets.all() {
+        if let Err(error) = socket.set_mark(mark) {
+            log::warn!(
+                "cannot set SO_MARK {mark} on {}: {error}",
+                socket.local_addr()
+            );
+            ok = false;
+        }
+    }
+    ok
+}
+
 fn open_socket_set(
     port: u16,
     extra: usize,
@@ -606,6 +620,13 @@ fn pump_tun_tx<R: rand_core::RngCore>(
                 }
             }
             Err(error) if is_tun_would_block(&error) => break,
+            Err(TunError::BufferTooSmall { needed, available }) => {
+                log::warn!(
+                    "TUN buffer is too small: packet needs {needed} bytes, have {available}; \
+                     restart the daemon after changing the interface MTU"
+                );
+                break;
+            }
             Err(error) => {
                 log::debug!("tun read failed: {error}");
                 break;
@@ -645,32 +666,43 @@ fn worker_loop(
     let mut rekey: Vec<Arc<Peer>> = Vec::with_capacity(TUN_BATCH);
     let mut socket: Option<SocketSet> = None;
     let mut bound_extra: Option<usize> = None;
+    let mut bound_mark: Option<u32> = None;
+    let mut rebind_after = Instant::now();
 
     while !shutdown_requested() {
         let now = Instant::now();
         device.refresh_under_load(now);
         let want_port = device.listen_port();
         let want_extra = usize::from(device.extra_ports());
-        if rebind_needed(socket.as_ref(), bound_extra, want_port, want_extra) {
+        let want_mark = device.fwmark();
+        if now >= rebind_after && rebind_needed(socket.as_ref(), bound_extra, want_port, want_extra)
+        {
             match open_socket_set(
                 want_port,
                 want_extra,
-                device.fwmark(),
+                want_mark,
                 socket_buffer,
                 underlay.gso_limits(),
             ) {
                 Ok(new_socket) => {
                     bound_extra = Some(want_extra);
+                    bound_mark = Some(want_mark);
                     socket = Some(new_socket);
                 }
                 Err(error) => {
                     log::error!("cannot bind UDP socket: {error}");
-                    thread::sleep(Duration::from_millis(200));
-                    continue;
+                    if socket.is_none() {
+                        thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+                    rebind_after = now + Duration::from_secs(1);
                 }
             }
         }
         let active = socket.as_ref().expect("socket is bound");
+        if bound_mark != Some(want_mark) && apply_socket_mark(active, want_mark) {
+            bound_mark = Some(want_mark);
+        }
         rekey.clear();
         let mut busy = pump_tun_tx(
             &device,
@@ -902,10 +934,19 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         handles.push(handle);
     }
 
-    wait_for_shutdown(server)?;
+    while !shutdown_requested() {
+        if handles.iter().any(|handle| handle.is_finished()) {
+            log::error!("a worker thread exited unexpectedly; stopping the daemon");
+            request_shutdown();
+            break;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    let joined = server.join();
     for handle in handles {
         let _ = handle.join();
     }
+    joined?;
 
     Ok(())
 }
@@ -914,7 +955,6 @@ fn wait_for_shutdown(server: ServerHandle) -> Result<(), Box<dyn std::error::Err
     while !shutdown_requested() {
         thread::sleep(Duration::from_millis(100));
     }
-    let server = server;
     server.join()?;
     Ok(())
 }

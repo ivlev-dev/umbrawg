@@ -12,8 +12,10 @@ use crate::consts::{CONTROL_BUFFER_SIZE, SOL_UDP, UDP_GRO, UDP_SEGMENT};
 use crate::gso::GsoSize;
 use crate::{Result, TransportError};
 
-/// Length of the data of a `UDP_GRO`/`UDP_SEGMENT` control message.
+/// Length of the data of a `UDP_SEGMENT` control message.
 const SEGMENT_DATA_LEN: usize = 2;
+/// Length of the data of a `UDP_GRO` control message: the kernel writes an `int`.
+const GRO_DATA_LEN: usize = 4;
 
 /// `CMSG_ALIGN`.
 pub(crate) const fn cmsg_align(length: usize) -> usize {
@@ -250,7 +252,22 @@ pub fn gro_size(control: &[u8]) -> Result<Option<GsoSize>> {
     for message in ControlMessages::new(control) {
         let message = message?;
         if message.level == SOL_UDP && message.ty == UDP_GRO {
-            return segment_size(&message, UDP_GRO, "UDP_GRO payload is invalid").map(Some);
+            if message.data.len() < GRO_DATA_LEN {
+                return Err(TransportError::InvalidControlMessage {
+                    reason: "UDP_GRO payload is invalid",
+                });
+            }
+            let mut raw = [0u8; GRO_DATA_LEN];
+            raw.copy_from_slice(&message.data[..GRO_DATA_LEN]);
+            let size = u32::from_ne_bytes(raw);
+            let size = u16::try_from(size).map_err(|_| TransportError::InvalidControlMessage {
+                reason: "UDP_GRO segment size is too large",
+            })?;
+            return GsoSize::new(size).map(Some).map_err(|_| {
+                TransportError::InvalidControlMessage {
+                    reason: "UDP_GRO segment size is zero",
+                }
+            });
         }
     }
     Ok(None)
@@ -302,7 +319,7 @@ mod tests {
         let mut buffer = ControlBuffer::new();
         let mut writer = CmsgWriter::new(&mut buffer);
         writer
-            .push(SOL_UDP, UDP_GRO, &size.get().to_ne_bytes())
+            .push(SOL_UDP, UDP_GRO, &u32::from(size.get()).to_ne_bytes())
             .unwrap();
         let control = writer.finish().to_vec();
 
@@ -350,10 +367,17 @@ mod tests {
         writer
             .push(libc::IPPROTO_IPV6, libc::IPV6_PKTINFO, &[0u8; 20])
             .unwrap();
-        assert!(matches!(
-            writer.push(libc::IPPROTO_IP, libc::IP_PKTINFO, &[0u8; 12]),
-            Err(TransportError::BufferTooSmall { .. })
-        ));
+        let mut exhausted = false;
+        for _ in 0..8 {
+            if writer
+                .push(libc::IPPROTO_IP, libc::IP_PKTINFO, &[0u8; 12])
+                .is_err()
+            {
+                exhausted = true;
+                break;
+            }
+        }
+        assert!(exhausted, "control buffer must report exhaustion");
     }
 
     #[test]
@@ -432,7 +456,7 @@ mod tests {
         let mut writer = CmsgWriter::new(&mut buffer);
         writer.push(libc::IPPROTO_IP, 1234, &[0u8; 4]).unwrap();
         writer
-            .push(SOL_UDP, UDP_GRO, &512u16.to_ne_bytes())
+            .push(SOL_UDP, UDP_GRO, &512u32.to_ne_bytes())
             .unwrap();
         let control = writer.finish().to_vec();
         assert_eq!(

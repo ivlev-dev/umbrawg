@@ -33,6 +33,9 @@ impl DeviceControl for Device {
     }
 
     fn apply(&self, request: SetRequest) -> Result<(), UapiError> {
+        let obfuscation = build_obfuscation(self, request.obfuscation)?;
+        let timings = build_timings(self, request.timings)?;
+
         if let Some(key) = request.private_key {
             let key = if key.is_zero() { None } else { Some(key) };
             self.set_private_key(key).map_err(internal)?;
@@ -46,11 +49,11 @@ impl DeviceControl for Device {
         if let Some(extra_ports) = request.extra_ports {
             self.set_extra_ports(extra_ports);
         }
+        self.set_obfuscation(obfuscation).map_err(internal)?;
+        self.set_timings(timings).map_err(internal)?;
         if request.replace_peers {
             self.remove_all_peers();
         }
-        apply_obfuscation(self, request.obfuscation)?;
-        apply_timings(self, request.timings)?;
         for peer in request.peers {
             apply_peer(self, peer)?;
         }
@@ -142,7 +145,7 @@ fn u16_range(range: Range16) -> U16Range {
     U16Range::new(range.lo(), range.hi())
 }
 
-fn apply_obfuscation(device: &Device, request: ObfuscationRequest) -> Result<(), UapiError> {
+fn build_obfuscation(device: &Device, request: ObfuscationRequest) -> Result<ObfParams, UapiError> {
     let mut params = (*device.obfuscation()).clone();
     if let Some(value) = request.jc {
         params.jc = value;
@@ -194,7 +197,10 @@ fn apply_obfuscation(device: &Device, request: ObfuscationRequest) -> Result<(),
     if let Some(value) = request.disable_cookies {
         params.disable_cookies = value;
     }
-    device.set_obfuscation(params).map_err(internal)
+    params
+        .validate()
+        .map_err(|_| internal(DeviceError::InvalidParameter("obfuscation")))?;
+    Ok(params)
 }
 
 fn parse_special(spec: &str, key: &str) -> Result<Option<SpecialPacket>, UapiError> {
@@ -227,7 +233,7 @@ fn apply_special(
     }
 }
 
-fn apply_timings(device: &Device, request: TimingRequest) -> Result<(), UapiError> {
+fn build_timings(device: &Device, request: TimingRequest) -> Result<Timings, UapiError> {
     let mut timings = device.timings();
     if let Some(range) = request.rekey_after_time {
         timings.rekey_after_time = Range16::new(range.lo(), range.hi());
@@ -244,7 +250,10 @@ fn apply_timings(device: &Device, request: TimingRequest) -> Result<(), UapiErro
     if let Some(range) = request.max_handshake_attempts {
         timings.max_handshake_attempts = Range16::new(range.lo(), range.hi());
     }
-    device.set_timings(timings).map_err(internal)
+    if !timings.validate() {
+        return Err(internal(DeviceError::InvalidParameter("timings")));
+    }
+    Ok(timings)
 }
 
 fn apply_peer(device: &Device, request: PeerRequest) -> Result<(), UapiError> {

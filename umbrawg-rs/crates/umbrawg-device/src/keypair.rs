@@ -139,11 +139,12 @@ impl Keypair {
         self.send_nonce() > REKEY_AFTER_MESSAGES
     }
 
-    pub fn seal(&self, counter: u64, plaintext: &[u8], dst: &mut [u8]) -> Option<usize> {
+    #[cfg(test)]
+    pub(crate) fn seal(&self, counter: u64, plaintext: &[u8], dst: &mut [u8]) -> Option<usize> {
         self.send.seal_into(counter, &[], plaintext, dst).ok()
     }
 
-    pub fn seal_in_place(&self, counter: u64, buffer: &mut [u8]) -> Option<()> {
+    pub(crate) fn seal_in_place(&self, counter: u64, buffer: &mut [u8]) -> Option<()> {
         self.send.seal_in_place(counter, &[], buffer).ok()
     }
 

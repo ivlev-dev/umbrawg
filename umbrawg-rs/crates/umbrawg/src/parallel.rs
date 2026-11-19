@@ -661,6 +661,8 @@ pub(crate) fn rx_loop(
         .collect();
     let mut socket: Option<Arc<SocketSet>> = None;
     let mut bound_extra: Option<usize> = None;
+    let mut bound_mark: Option<u32> = None;
+    let mut rebind_after = Instant::now();
     let mut cursor = 0usize;
     let mut stats_at = Instant::now();
     let mut housekeeping_at = Instant::now();
@@ -669,11 +671,14 @@ pub(crate) fn rx_loop(
     while !shutdown_requested() {
         let want_port = device.listen_port();
         let want_extra = usize::from(device.extra_ports());
-        if rebind_needed(socket.as_deref(), bound_extra, want_port, want_extra) {
+        let want_mark = device.fwmark();
+        if Instant::now() >= rebind_after
+            && rebind_needed(socket.as_deref(), bound_extra, want_port, want_extra)
+        {
             match open_socket_set(
                 want_port,
                 want_extra,
-                device.fwmark(),
+                want_mark,
                 socket_buffer,
                 underlay.gso_limits(),
             ) {
@@ -686,16 +691,23 @@ pub(crate) fn rx_loop(
                     let new_socket = Arc::new(new_socket);
                     shared.set_socket(Some(Arc::clone(&new_socket)));
                     bound_extra = Some(want_extra);
+                    bound_mark = Some(want_mark);
                     socket = Some(new_socket);
                 }
                 Err(error) => {
                     log::error!("cannot bind UDP socket: {error}");
-                    thread::sleep(Duration::from_millis(200));
-                    continue;
+                    if socket.is_none() {
+                        thread::sleep(Duration::from_millis(200));
+                        continue;
+                    }
+                    rebind_after = Instant::now() + Duration::from_secs(1);
                 }
             }
         }
         let active = socket.as_ref().expect("socket is bound").as_ref();
+        if bound_mark != Some(want_mark) && crate::apply_socket_mark(active, want_mark) {
+            bound_mark = Some(want_mark);
+        }
         let mut busy = false;
 
         for listener in active.all() {

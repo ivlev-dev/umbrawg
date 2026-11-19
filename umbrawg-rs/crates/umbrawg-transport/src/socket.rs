@@ -392,7 +392,14 @@ impl Socket {
     ) -> Result<usize> {
         let peer = address_for_socket(endpoint.dst(), self.family);
         let family = AddressFamily::of(endpoint.dst());
-        let use_gso = self.gso_enabled.load(Ordering::Relaxed);
+        let use_gso = self.gso_enabled.load(Ordering::Relaxed)
+            && datagrams.iter().all(|datagram| match datagram.gso_size() {
+                Some(gso_size) => {
+                    gso_size.get() as usize <= self.max_gso_size()
+                        && datagram.len() <= self.max_datagram_len()
+                }
+                None => true,
+            });
         let result = queue.send(
             self.fd(),
             peer,
@@ -432,7 +439,11 @@ impl Socket {
         sys::check_datagram_size(data.len(), family.max_udp_payload())?;
 
         match gso_size {
-            Some(gso_size) if !self.gso_enabled.load(Ordering::Relaxed) => {
+            Some(gso_size)
+                if !self.gso_enabled.load(Ordering::Relaxed)
+                    || gso_size.get() as usize > self.max_gso_size()
+                    || data.len() > self.max_datagram_len() =>
+            {
                 self.send_segments(peer, data, gso_size, endpoint.source())
             }
             Some(gso_size) => {

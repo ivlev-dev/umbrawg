@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 use crate::error::UapiError;
 use crate::protocol::{serve_stream, write_error};
@@ -156,6 +157,7 @@ impl UapiListener {
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => return Err(error.into()),
             };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
 
             let uid = match peer_uid(&stream) {
                 Ok(uid) => uid,
