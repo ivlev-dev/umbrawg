@@ -67,6 +67,8 @@ pub struct Device {
     pub listen_port: u16,
     pub extra_ports: Option<u8>,
     pub fwmark: u32,
+    pub bbr: Option<String>,
+    pub fec: Option<String>,
     pub obfuscation: ObfuscationConfig,
     pub peers: Vec<Peer>,
 }
@@ -81,6 +83,8 @@ impl Device {
             listen_port: 0,
             extra_ports: None,
             fwmark: 0,
+            bbr: None,
+            fec: None,
             obfuscation: ObfuscationConfig::default(),
             peers: Vec::new(),
         }
@@ -114,6 +118,8 @@ impl Device {
                 listen_port: (self.listen_port != 0).then_some(self.listen_port),
                 extra_ports: self.extra_ports,
                 fwmark: (self.fwmark != 0).then_some(self.fwmark),
+                bbr: self.bbr.clone(),
+                fec: self.fec.clone(),
                 obfuscation: self.obfuscation.clone(),
                 quick: Default::default(),
             },
@@ -303,6 +309,28 @@ mod tests {
         let device = Device::new("uwg0");
         assert_eq!(device.extra_ports, None);
         assert!(!device.to_config().to_ini(false).contains("ExtraPorts"));
+    }
+
+    #[test]
+    fn carries_bbr_and_fec_into_config() {
+        let device = Device::new("uwg0");
+        assert_eq!(device.bbr, None);
+        assert_eq!(device.fec, None);
+        let config = device.to_config();
+        assert_eq!(config.device.bbr, None);
+        assert_eq!(config.device.fec, None);
+        assert!(!config.to_ini(false).contains("BBR"));
+        assert!(!config.to_ini(false).contains("FEC"));
+
+        let mut device = Device::new("uwg0");
+        device.bbr = Some("on".to_owned());
+        device.fec = Some("8:2".to_owned());
+        let config = device.to_config();
+        assert_eq!(config.device.bbr.as_deref(), Some("on"));
+        assert_eq!(config.device.fec.as_deref(), Some("8:2"));
+        let emitted = config.to_ini(false);
+        assert!(emitted.contains("BBR = on\n"));
+        assert!(emitted.contains("FEC = 8:2\n"));
     }
 
     #[test]

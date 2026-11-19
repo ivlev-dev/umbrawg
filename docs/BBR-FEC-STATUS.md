@@ -56,9 +56,10 @@
   уменьшения `k`/задержки блока.
 - GSO-группа при FEC ограничена `m`; это снижает syscall-батчинг, но
   сохраняет восстановление.
-- Конфиг/CLI/netlink-ключи `BBR`/`FEC` ещё не добавлены в tools;
-  временно env `UMBRAWG_BBR`, `UMBRAWG_FEC`, `UMBRAWG_FEC_SHARD`,
-  `UMBRAWG_ACK_INTERVAL`. UAPI-поля уже есть.
+- Конфиг/CLI/UAPI: `BBR`, `FEC`, `uwg set bbr/fec`, ключи `bbr=`/`fec=`
+  работают для userspace-демона. Env `UMBRAWG_BBR`, `UMBRAWG_FEC`,
+  `UMBRAWG_FEC_SHARD`, `UMBRAWG_ACK_INTERVAL` остаются для стенда.
+  Netlink-атрибуты появятся вместе с портом в ядро.
 - Порт в ядро не начат.
 
 ## Следующие шаги

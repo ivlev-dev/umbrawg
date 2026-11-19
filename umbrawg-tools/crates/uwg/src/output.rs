@@ -417,6 +417,12 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
                 let _ = writeln!(output, "{prefix}off");
             }
         }
+        "bbr" => {
+            let _ = writeln!(output, "{prefix}{}", option_text(&device.bbr, "(none)"));
+        }
+        "fec" => {
+            let _ = writeln!(output, "{prefix}{}", option_text(&device.fec, "(none)"));
+        }
         "jc" => {
             let _ = writeln!(output, "{prefix}{}", u16_text(device.obfuscation.jc));
         }
@@ -805,6 +811,8 @@ mod tests {
         device.listen_port = 51820;
         device.extra_ports = Some(4);
         device.fwmark = 0x1234;
+        device.bbr = Some("monitor".to_owned());
+        device.fec = Some("10:3".to_owned());
         device.obfuscation.jc = Some(4);
         device.obfuscation.jmin = Some(40);
         device.obfuscation.jmax = Some(70);
@@ -824,6 +832,22 @@ mod tests {
             cipher: None,
         });
         device
+    }
+
+    #[test]
+    fn shows_bbr_and_fec_state() {
+        let device = sample_device();
+        assert_eq!(ugly(&device, "bbr", false).expect("valid"), "monitor\n");
+        assert_eq!(ugly(&device, "fec", false).expect("valid"), "10:3\n");
+
+        let mut device = sample_device();
+        device.bbr = None;
+        device.fec = None;
+        assert_eq!(ugly(&device, "bbr", false).expect("valid"), "(none)\n");
+        assert_eq!(ugly(&device, "fec", false).expect("valid"), "(none)\n");
+        let output = showconf(&device);
+        assert!(!output.contains("BBR"), "{output}");
+        assert!(!output.contains("FEC"), "{output}");
     }
 
     #[test]
@@ -876,6 +900,8 @@ mod tests {
             .starts_with(&device.public_key.clone().expect("key").to_base64()));
         assert_eq!(ugly(&device, "fwmark", false).expect("valid"), "0x1234\n");
         assert_eq!(ugly(&device, "extra-ports", false).expect("valid"), "4\n");
+        assert_eq!(ugly(&device, "bbr", false).expect("valid"), "monitor\n");
+        assert_eq!(ugly(&device, "fec", false).expect("valid"), "10:3\n");
         assert_eq!(ugly(&device, "jc", false).expect("valid"), "4\n");
         assert_eq!(ugly(&device, "h1", false).expect("valid"), "10-20\n");
         assert_eq!(ugly(&device, "i1", false).expect("valid"), "<b 0x1><c>\n");
@@ -950,6 +976,8 @@ mod tests {
         assert!(output.contains("ListenPort = 51820\n"));
         assert!(output.contains("ExtraPorts = 4\n"));
         assert!(output.contains("FwMark = 0x1234\n"));
+        assert!(output.contains("BBR = monitor\n"));
+        assert!(output.contains("FEC = 10:3\n"));
         assert!(output.contains("H1 = 10-20\n"));
         assert!(output.contains("I1 = <b 0x1><c>\n"));
         assert!(output.contains("RandomTrailers = on\n"));

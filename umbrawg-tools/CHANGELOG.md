@@ -7,6 +7,10 @@
 
 ### Добавлено
 
+- `BBR = off|monitor|on` и `FEC = off|adaptive|K:M` в `[Interface]`,
+  команды `uwg set <if> bbr|fec ...`, `uwg show <if> bbr|fec` и
+  UAPI-ключи `bbr=`/`fec=` для userspace-демона.
+
 - `ExtraPorts` в `[Interface]`, `uwg set <if> extra-ports N` и
   `uwg show <if> extra-ports`: число
   дополнительных внешних UDP-портов, 0…8 (по умолчанию 0 — выключено;

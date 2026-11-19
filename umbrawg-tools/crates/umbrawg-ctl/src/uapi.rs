@@ -125,6 +125,12 @@ pub fn build_set_request(config: &SetDevice) -> Result<String, Error> {
     if let Some(fwmark) = device.fwmark {
         write_line(&mut output, "fwmark", &fwmark.to_string())?;
     }
+    if let Some(bbr) = &device.bbr {
+        write_line(&mut output, "bbr", bbr)?;
+    }
+    if let Some(fec) = &device.fec {
+        write_line(&mut output, "fec", fec)?;
+    }
     if config.replace_peers {
         write_line(&mut output, "replace_peers", "true")?;
     }
@@ -293,6 +299,8 @@ fn apply_device_line(device: &mut Device, key: &str, value: &str) -> Result<(), 
         "listen_port" => device.listen_port = parse_u16(key, value)?,
         "extra_ports" => device.extra_ports = Some(parse_extra_ports(key, value)?),
         "fwmark" => device.fwmark = parse_u32(key, value)?,
+        "bbr" => device.bbr = Some(parse_mode_text(key, value)?),
+        "fec" => device.fec = Some(parse_mode_text(key, value)?),
         "jc" => device.obfuscation.jc = Some(parse_u16(key, value)?),
         "jmin" => device.obfuscation.jmin = Some(parse_u16(key, value)?),
         "jmax" => device.obfuscation.jmax = Some(parse_u16(key, value)?),
@@ -459,6 +467,14 @@ fn parse_u16(key: &str, value: &str) -> Result<u16, Error> {
         .map_err(|_| Error::Protocol(format!("invalid {key}: `{value}`")))
 }
 
+fn parse_mode_text(key: &str, value: &str) -> Result<String, Error> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(Error::Protocol(format!("invalid {key}: `{value}`")));
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
 fn parse_u32(key: &str, value: &str) -> Result<u32, Error> {
     value
         .parse::<u32>()
@@ -529,6 +545,8 @@ private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 extra_ports=4
 fwmark=4660
+bbr=monitor
+fec=adaptive
 jc=4
 jmin=40
 jmax=70
@@ -573,6 +591,8 @@ errno=0
         device.device.listen_port = Some(51820);
         device.device.extra_ports = Some(4);
         device.device.fwmark = Some(0);
+        device.device.bbr = Some("on".to_owned());
+        device.device.fec = Some("10:3".to_owned());
         device.device.obfuscation.jc = Some(4);
         device.device.obfuscation.jmin = Some(40);
         device.device.obfuscation.jmax = Some(70);
@@ -615,6 +635,8 @@ errno=0
         assert_eq!(device.listen_port, 51820);
         assert_eq!(device.extra_ports, Some(4));
         assert_eq!(device.fwmark, 4660);
+        assert_eq!(device.bbr.as_deref(), Some("monitor"));
+        assert_eq!(device.fec.as_deref(), Some("adaptive"));
         assert_eq!(device.obfuscation.jc, Some(4));
         assert_eq!(
             device.obfuscation.h1,
@@ -647,6 +669,64 @@ errno=0
             Error::Uapi { errno, .. } => assert_eq!(errno, -22),
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn sends_bbr_and_fec_to_the_daemon() {
+        let mut config = set_device();
+        let request = build_set_request(&config).expect("valid request");
+        assert!(request.contains("bbr=on\n"));
+        assert!(request.contains("fec=10:3\n"));
+
+        config.device.bbr = None;
+        config.device.fec = None;
+        let request = build_set_request(&config).expect("valid request");
+        assert!(!request.contains("bbr="));
+        assert!(!request.contains("fec="));
+    }
+
+    #[test]
+    fn parses_bbr_and_fec_from_get_response() {
+        for (value, expected) in [
+            ("off", "off"),
+            ("monitor", "monitor"),
+            ("on", "on"),
+            ("ON", "on"),
+        ] {
+            let device = parse_get_response(&format!("bbr={value}\nerrno=0\n\n"), "test0")
+                .expect("valid response");
+            assert_eq!(device.bbr.as_deref(), Some(expected), "{value}");
+        }
+        for (value, expected) in [
+            ("off", "off"),
+            ("adaptive", "adaptive"),
+            ("10:3", "10:3"),
+            ("ADAPTIVE", "adaptive"),
+        ] {
+            let device = parse_get_response(&format!("fec={value}\nerrno=0\n\n"), "test0")
+                .expect("valid response");
+            assert_eq!(device.fec.as_deref(), Some(expected), "{value}");
+        }
+        let device =
+            parse_get_response("listen_port=51820\nerrno=0\n\n", "test0").expect("valid response");
+        assert_eq!(device.bbr, None);
+        assert_eq!(device.fec, None);
+        assert!(parse_get_response("bbr=\nerrno=0\n\n", "test0").is_err());
+        assert!(parse_get_response("fec=\nerrno=0\n\n", "test0").is_err());
+    }
+
+    #[test]
+    fn showconf_round_trips_bbr_and_fec() {
+        let device = parse_get_response(GET_RESPONSE, "test0").expect("valid response");
+        let output = device.to_config().to_ini(false);
+        assert!(output.contains("BBR = monitor\n"));
+        assert!(output.contains("FEC = adaptive\n"));
+
+        let device =
+            parse_get_response("listen_port=51820\nerrno=0\n\n", "test0").expect("valid response");
+        let output = device.to_config().to_ini(false);
+        assert!(!output.contains("BBR"));
+        assert!(!output.contains("FEC"));
     }
 
     #[test]
@@ -790,6 +870,8 @@ errno=0
         assert!(request.contains("listen_port=51820\n"));
         assert!(request.contains("extra_ports=4\n"));
         assert!(request.contains("fwmark=0\n"));
+        assert!(request.contains("bbr=on\n"));
+        assert!(request.contains("fec=10:3\n"));
         assert!(request.contains("replace_peers=true\n"));
         assert!(request.contains("h1=61220074-118999195\n"));
         assert!(request.contains("i1=<b 0x1><c>\n"));

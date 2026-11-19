@@ -40,6 +40,7 @@ prints one tab-separated value per line, intended for scripts. With
 .PP
 \fIPARAMETER\fP is one of:
 \fIpublic-key\fP, \fIprivate-key\fP, \fIlisten-port\fP, \fIextra-ports\fP, \fIfwmark\fP,
+\fIbbr\fP, \fIfec\fP,
 \fIpeers\fP, \fIpreshared-keys\fP, \fIendpoints\fP, \fIallowed-ips\fP,
 \fIlatest-handshakes\fP, \fIpersistent-keepalive\fP, \fItransfer\fP,
 \fIdump\fP, \fIjc\fP, \fIjmin\fP, \fIjmax\fP, \fIs1\fP, \fIs2\fP, \fIs3\fP,
@@ -70,6 +71,16 @@ enable them only on networks without port-restricted NAT.
 .TP
 \fBfwmark\fP \fI<mark>\fP
 Firewall mark as a decimal value or \fB0x\fP-prefixed hexadecimal value.
+.TP
+\fBbbr\fP \fI<off|monitor|on>\fP
+BBRv3 mode of the userspace daemon. \fBmonitor\fP estimates congestion
+state from feedback without pacing, \fBon\fP enables pacing and limits.
+.TP
+\fBfec\fP \fI<off|adaptive|K:M>\fP
+Forward error correction mode of the userspace daemon. \fBadaptive\fP
+enables parity after measured loss; \fBK:M\fP uses \fIK\fP data and \fIM\fP
+parity shards, where \fIK\fP and \fIM\fP are at least 1 and \fIK\fP+\fIM\fP
+does not exceed 255.
 .TP
 \fBprivate-key\fP \fI<file>\fP
 Reads the private key from a file. A device or empty file removes the key.
@@ -136,13 +147,16 @@ output.
 The file is INI-like and case-insensitive. Comments start with \fB#\fP.
 The \fB[Interface]\fP section accepts:
 .PP
-\fBPrivateKey\fP, \fBListenPort\fP, \fBExtraPorts\fP, \fBFwMark\fP, \fBJc\fP, \fBJmin\fP,
+\fBPrivateKey\fP, \fBListenPort\fP, \fBExtraPorts\fP, \fBFwMark\fP, \fBBBR\fP, \fBFEC\fP,
+\fBJc\fP, \fBJmin\fP,
 \fBJmax\fP, \fBS1\fP, \fBS2\fP, \fBS3\fP, \fBS4\fP, \fBH1\fP, \fBH2\fP,
 \fBH3\fP, \fBH4\fP, \fBI1\fP, \fBI2\fP, \fBI3\fP, \fBI4\fP, \fBI5\fP,
 \fBHeaderProtectionKey\fP, \fBContentPaddingAddition\fP,
 \fBRekeyAfterTime\fP, \fBRekeyTimeout\fP, \fBRejectAfterTime\fP,
 \fBKeepaliveTimeout\fP, \fBMaxHandshakeAttempts\fP, \fBRandomTrailers\fP,
 \fBDisableCookies\fP.
+\fBBBR\fP and \fBFEC\fP configure the userspace daemon and have no effect on
+kernel interfaces.
 .PP
 Each \fB[Peer]\fP section accepts \fBPublicKey\fP, \fBPresharedKey\fP,
 \fBAdvancedSecurity\fP, \fBCipher\fP, \fBAllowedIPs\fP, \fBEndpoint\fP, and

@@ -174,6 +174,10 @@ pub struct DeviceConfig {
     pub listen_port: Option<u16>,
     pub extra_ports: Option<u8>,
     pub fwmark: Option<u32>,
+    /// BBRv3 mode of the userspace daemon: `off`, `monitor` or `on`.
+    pub bbr: Option<String>,
+    /// FEC mode of the userspace daemon: `off`, `adaptive` or `K:M`.
+    pub fec: Option<String>,
     pub obfuscation: ObfuscationConfig,
     pub quick: QuickConfig,
 }
@@ -314,6 +318,14 @@ impl Config {
                 self.device.fwmark = Some(parse_fwmark(value)?);
                 2
             }
+            "bbr" => {
+                self.device.bbr = Some(parse_bbr(key, value)?);
+                2
+            }
+            "fec" => {
+                self.device.fec = Some(parse_fec(key, value)?);
+                2
+            }
             "private-key" => {
                 self.device.private_key = Some(Key::from_file(std::path::Path::new(value))?);
                 2
@@ -444,6 +456,12 @@ impl Config {
         }
         if let Some(key) = &self.device.private_key {
             push_entry(&mut interface, "PrivateKey", key.to_base64());
+        }
+        if let Some(value) = &self.device.bbr {
+            push_entry(&mut interface, "BBR", value.clone());
+        }
+        if let Some(value) = &self.device.fec {
+            push_entry(&mut interface, "FEC", value.clone());
         }
         let obfuscation = &self.device.obfuscation;
         if let Some(value) = obfuscation.jc {
@@ -624,6 +642,8 @@ impl DeviceConfig {
                 self.extra_ports = Some(parse_extra_ports_at(entry, "ExtraPorts", &entry.value)?)
             }
             "fwmark" => self.fwmark = Some(parse_fwmark_at(entry, &entry.value)?),
+            "bbr" => self.bbr = Some(parse_bbr_at(entry, "BBR", &entry.value)?),
+            "fec" => self.fec = Some(parse_fec_at(entry, "FEC", &entry.value)?),
             "privatekey" => self.private_key = Some(Key::from_base64(&entry.value)?),
             "jc" => self.obfuscation.jc = Some(parse_u16_at(entry, "Jc", &entry.value)?),
             "jmin" => self.obfuscation.jmin = Some(parse_u16_at(entry, "Jmin", &entry.value)?),
@@ -962,6 +982,68 @@ fn parse_fwmark_at(entry: &Entry, value: &str) -> Result<u32, Error> {
     })
 }
 
+fn parse_bbr_at(entry: &Entry, key: &str, value: &str) -> Result<String, Error> {
+    parse_bbr(key, value).map_err(|_| Error::InvalidValue {
+        line: entry.line,
+        key: key.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn parse_bbr(key: &str, value: &str) -> Result<String, Error> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if matches!(normalized.as_str(), "off" | "monitor" | "on") {
+        Ok(normalized)
+    } else {
+        Err(Error::InvalidValue {
+            line: 0,
+            key: key.to_owned(),
+            value: value.to_owned(),
+        })
+    }
+}
+
+/// Largest accepted total number of FEC shards (`K + M`).
+pub const MAX_FEC_SHARDS: u16 = 255;
+
+fn parse_fec_at(entry: &Entry, key: &str, value: &str) -> Result<String, Error> {
+    parse_fec(key, value).map_err(|_| Error::InvalidValue {
+        line: entry.line,
+        key: key.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn parse_fec(key: &str, value: &str) -> Result<String, Error> {
+    let error = || Error::InvalidValue {
+        line: 0,
+        key: key.to_owned(),
+        value: value.to_owned(),
+    };
+    let normalized = value.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "off" | "adaptive" => return Ok(normalized),
+        _ => {}
+    }
+    let (shards, parity) = normalized.split_once(':').ok_or_else(error)?;
+    if shards.is_empty()
+        || parity.is_empty()
+        || !shards.bytes().all(|byte| byte.is_ascii_digit())
+        || !parity.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(error());
+    }
+    let shards = shards.parse::<u16>().map_err(|_| error())?;
+    let parity = parity.parse::<u16>().map_err(|_| error())?;
+    if shards == 0
+        || parity == 0
+        || u32::from(shards) + u32::from(parity) > u32::from(MAX_FEC_SHARDS)
+    {
+        return Err(error());
+    }
+    Ok(format!("{shards}:{parity}"))
+}
+
 fn parse_fwmark(value: &str) -> Result<u32, Error> {
     if value.eq_ignore_ascii_case("off") {
         return Ok(0);
@@ -1062,6 +1144,8 @@ PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
 ListenPort = 51820
 ExtraPorts = 4
 FwMark = 0x1234
+BBR = monitor
+FEC = 10:3
 Jc = 4
 Jmin = 40
 Jmax = 70
@@ -1102,6 +1186,8 @@ PersistentKeepalive = 25
         assert_eq!(device.listen_port, Some(51820));
         assert_eq!(device.extra_ports, Some(4));
         assert_eq!(device.fwmark, Some(0x1234));
+        assert_eq!(device.bbr.as_deref(), Some("monitor"));
+        assert_eq!(device.fec.as_deref(), Some("10:3"));
         assert_eq!(
             device.private_key.as_ref().map(Key::to_base64),
             Some(PRIVATE.to_owned())
@@ -1139,6 +1225,8 @@ PersistentKeepalive = 25
         let reparsed = Config::parse(&emitted).expect("emitted config parses");
         assert_eq!(config, reparsed);
         assert!(emitted.contains("ExtraPorts = 4"));
+        assert!(emitted.contains("BBR = monitor"));
+        assert!(emitted.contains("FEC = 10:3"));
         assert!(emitted.contains("H1 = 61220074-118999195"));
         assert!(emitted.contains("I1 = <b 0x160d2f><c>"));
         assert!(emitted.contains("AllowedIPs = 10.0.0.0/8, fd00::/64"));
@@ -1176,6 +1264,85 @@ PersistentKeepalive = 25
         assert!(emitted.contains("ExtraPorts = 8\n"));
         assert_eq!(Config::parse(&emitted).expect("valid"), config);
         assert!(!Config::default().to_ini(false).contains("ExtraPorts"));
+    }
+
+    #[test]
+    fn parses_bbr_and_fec() {
+        let config =
+            Config::parse("[Interface]\nbbr = MONITOR\nFEC = 10:3\n").expect("valid config");
+        assert_eq!(config.device.bbr.as_deref(), Some("monitor"));
+        assert_eq!(config.device.fec.as_deref(), Some("10:3"));
+
+        for value in ["off", "monitor", "on", "OFF", "On", "Monitor"] {
+            let input = format!("[Interface]\nBBR = {value}\n");
+            let config = Config::parse(&input).expect("valid config");
+            assert_eq!(
+                config.device.bbr.as_deref(),
+                Some(value.to_ascii_lowercase().as_str()),
+                "{value}"
+            );
+        }
+        for (value, expected) in [
+            ("off", "off"),
+            ("ADAPTIVE", "adaptive"),
+            ("1:1", "1:1"),
+            ("01:002", "1:2"),
+            ("252:3", "252:3"),
+        ] {
+            let input = format!("[Interface]\nFEC = {value}\n");
+            let config = Config::parse(&input).expect("valid config");
+            assert_eq!(config.device.fec.as_deref(), Some(expected), "{value}");
+        }
+    }
+
+    #[test]
+    fn rejects_bad_bbr_and_fec() {
+        for value in ["", "maybe", "true", "1", "bbr"] {
+            let input = format!("[Interface]\nBBR = {value}\n");
+            assert!(Config::parse(&input).is_err(), "{value}");
+            assert!(Config::from_args(["bbr", value]).is_err(), "{value}");
+        }
+        for value in [
+            "",
+            "maybe",
+            "1",
+            "0:1",
+            "1:0",
+            "0:0",
+            "1:255",
+            "256:1",
+            "1:",
+            ":1",
+            "1:2:3",
+            "a:b",
+            "40000:40000",
+        ] {
+            let input = format!("[Interface]\nFEC = {value}\n");
+            assert!(Config::parse(&input).is_err(), "{value}");
+            assert!(Config::from_args(["fec", value]).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn round_trips_bbr_and_fec() {
+        let mut config = Config::default();
+        config.device.bbr = Some("on".to_owned());
+        config.device.fec = Some("4:2".to_owned());
+        let emitted = config.to_ini(false);
+        assert!(emitted.contains("BBR = on\n"));
+        assert!(emitted.contains("FEC = 4:2\n"));
+        assert_eq!(Config::parse(&emitted).expect("valid"), config);
+
+        let empty = Config::default().to_ini(false);
+        assert!(!empty.contains("BBR"));
+        assert!(!empty.contains("FEC"));
+    }
+
+    #[test]
+    fn parses_bbr_and_fec_set_arguments() {
+        let config = Config::from_args(["bbr", "monitor", "fec", "8:2"]).expect("valid arguments");
+        assert_eq!(config.device.bbr.as_deref(), Some("monitor"));
+        assert_eq!(config.device.fec.as_deref(), Some("8:2"));
     }
 
     #[test]
