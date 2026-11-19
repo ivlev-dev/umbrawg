@@ -206,6 +206,9 @@ fn device_attributes(config: &SetDevice, version: u32) -> Result<Vec<UmbrawgAttr
     if let Some(port) = device.listen_port {
         attributes.push(UmbrawgAttribute::ListenPort(port));
     }
+    if let Some(extra_ports) = device.extra_ports {
+        attributes.push(UmbrawgAttribute::ExtraPorts(extra_ports));
+    }
     if let Some(fwmark) = device.fwmark {
         attributes.push(UmbrawgAttribute::Fwmark(fwmark));
     }
@@ -404,6 +407,7 @@ impl DeviceBuilder {
                     self.device.public_key = Some(Key::from_bytes(*value));
                 }
                 UmbrawgAttribute::ListenPort(value) => self.device.listen_port = *value,
+                UmbrawgAttribute::ExtraPorts(value) => self.device.extra_ports = *value,
                 UmbrawgAttribute::Fwmark(value) => self.device.fwmark = *value,
                 UmbrawgAttribute::JC(value) => self.device.obfuscation.jc = Some(*value),
                 UmbrawgAttribute::Jmin(value) => self.device.obfuscation.jmin = Some(*value),
@@ -591,6 +595,7 @@ mod tests {
         let mut config = SetDevice::for_interface("test0", Default::default());
         config.replace_peers = true;
         config.device.listen_port = Some(51820);
+        config.device.extra_ports = Some(4);
         config.device.obfuscation.jc = Some(4);
         config.device.obfuscation.h1 = Some(U32Range::new(61_220_074, 118_999_195));
         config.device.obfuscation.i1 = Some("<b 0x1><c>".to_owned());
@@ -636,6 +641,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let attributes = &messages[0].attributes;
         assert!(attributes.contains(&UmbrawgAttribute::Flags(UWGDEVICE_F_REPLACE_PEERS)));
+        assert!(attributes.contains(&UmbrawgAttribute::ExtraPorts(4)));
         assert!(attributes.contains(&UmbrawgAttribute::H1Range(
             U32Range::new(61_220_074, 118_999_195).pack()
         )));
@@ -762,6 +768,23 @@ mod tests {
     }
 
     #[test]
+    fn sends_extra_ports_only_when_configured() {
+        let mut config = config();
+        config.device.extra_ports = None;
+        let messages = build_set_messages(&config, 3).expect("valid");
+        assert!(!messages[0]
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, UmbrawgAttribute::ExtraPorts(_))));
+
+        config.device.extra_ports = Some(8);
+        let messages = build_set_messages(&config, 3).expect("valid");
+        assert!(messages[0]
+            .attributes
+            .contains(&UmbrawgAttribute::ExtraPorts(8)));
+    }
+
+    #[test]
     fn splits_large_peer_lists() {
         let mut config = config();
         config.peers.clear();
@@ -802,6 +825,7 @@ mod tests {
                 UmbrawgAttribute::IfName("test0".to_owned()),
                 UmbrawgAttribute::IfIndex(7),
                 UmbrawgAttribute::ListenPort(51820),
+                UmbrawgAttribute::ExtraPorts(7),
                 UmbrawgAttribute::Fwmark(0x12),
                 UmbrawgAttribute::PrivateKey([1u8; 32]),
                 UmbrawgAttribute::PublicKey([2u8; 32]),
@@ -856,6 +880,7 @@ mod tests {
         let device = builder.finish();
         assert_eq!(device.ifindex, Some(7));
         assert_eq!(device.listen_port, 51820);
+        assert_eq!(device.extra_ports, 7);
         assert_eq!(device.fwmark, 0x12);
         assert_eq!(device.obfuscation.jc, Some(4));
         assert_eq!(device.obfuscation.h1, Some(U32Range::new(10, 20)));

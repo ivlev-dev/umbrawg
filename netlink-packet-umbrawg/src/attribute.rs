@@ -49,6 +49,8 @@ const UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS: u16 = 32;
 // UmbraWG 3.1 attributes
 const UWGDEVICE_A_RANDOM_TRAILERS: u16 = 33;
 const UWGDEVICE_A_DISABLE_COOKIES: u16 = 34;
+// UmbraWG multi-port attributes
+const UWGDEVICE_A_EXTRA_PORTS: u16 = 35;
 
 const HEADER_PROTECTION_KEY_LEN: usize = 32;
 
@@ -278,6 +280,10 @@ pub enum UmbrawgAttribute {
     RandomTrailers(bool),
     /// `UWGDEVICE_A_DISABLE_COOKIES`: `u8` boolean (UmbraWG 3.1).
     DisableCookies(bool),
+    /// `UWGDEVICE_A_EXTRA_PORTS`: number of additional external UDP ports
+    /// (`u8`, `0..=8`), `4` by default. The kernel opens one extra socket
+    /// per port and sends over them round-robin.
+    ExtraPorts(u8),
     /// An attribute this crate does not know; kept verbatim.
     Other(DefaultNla),
 }
@@ -321,7 +327,9 @@ impl Nla for UmbrawgAttribute {
             | Self::H2Range(_)
             | Self::H3Range(_)
             | Self::H4Range(_) => 8,
-            Self::RandomTrailers(_) | Self::DisableCookies(_) => 1,
+            Self::RandomTrailers(_)
+            | Self::DisableCookies(_)
+            | Self::ExtraPorts(_) => 1,
             // Umbra Specific Fields
             Self::Peer(v) => v.attributes_len(),
             Self::JC(_)
@@ -382,6 +390,7 @@ impl Nla for UmbrawgAttribute {
             Self::MaxHandshakeAttempts(_) => UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS,
             Self::RandomTrailers(_) => UWGDEVICE_A_RANDOM_TRAILERS,
             Self::DisableCookies(_) => UWGDEVICE_A_DISABLE_COOKIES,
+            Self::ExtraPorts(_) => UWGDEVICE_A_EXTRA_PORTS,
             Self::Other(attr) => attr.kind(),
         }
     }
@@ -435,6 +444,7 @@ impl Nla for UmbrawgAttribute {
             Self::RandomTrailers(v) | Self::DisableCookies(v) => {
                 buffer[0] = u8::from(*v)
             }
+            Self::ExtraPorts(v) => buffer[0] = *v,
             Self::Other(attr) => attr.emit_value(buffer),
         }
     }
@@ -578,6 +588,10 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 parse_u8(payload)
                     .context("invalid UWGDEVICE_A_DISABLE_COOKIES value")?
                     != 0,
+            ),
+            UWGDEVICE_A_EXTRA_PORTS => Self::ExtraPorts(
+                parse_u8(payload)
+                    .context("invalid UWGDEVICE_A_EXTRA_PORTS value")?,
             ),
             kind => Self::Other(
                 DefaultNla::parse(buf)

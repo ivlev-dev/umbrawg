@@ -39,7 +39,7 @@ prints one tab-separated value per line, intended for scripts. With
 \fIall\fP and a \fIPARAMETER\fP, every line is prefixed with the interface name.
 .PP
 \fIPARAMETER\fP is one of:
-\fIpublic-key\fP, \fIprivate-key\fP, \fIlisten-port\fP, \fIfwmark\fP,
+\fIpublic-key\fP, \fIprivate-key\fP, \fIlisten-port\fP, \fIextra-ports\fP, \fIfwmark\fP,
 \fIpeers\fP, \fIpreshared-keys\fP, \fIendpoints\fP, \fIallowed-ips\fP,
 \fIlatest-handshakes\fP, \fIpersistent-keepalive\fP, \fItransfer\fP,
 \fIdump\fP, \fIjc\fP, \fIjmin\fP, \fIjmax\fP, \fIs1\fP, \fIs2\fP, \fIs3\fP,
@@ -62,6 +62,10 @@ Changes the configuration. Device arguments:
 .TP
 \fBlisten-port\fP \fI<port>\fP
 UDP listen port; 0 or omission selects a random port.
+.TP
+\fBextra-ports\fP \fI<count>\fP
+Number of additional external UDP ports, from 0 to 8; the server default is 4.
+Additional ports are ephemeral and spread one peer across several 4-tuples.
 .TP
 \fBfwmark\fP \fI<mark>\fP
 Firewall mark as a decimal value or \fB0x\fP-prefixed hexadecimal value.
@@ -131,7 +135,7 @@ output.
 The file is INI-like and case-insensitive. Comments start with \fB#\fP.
 The \fB[Interface]\fP section accepts:
 .PP
-\fBPrivateKey\fP, \fBListenPort\fP, \fBFwMark\fP, \fBJc\fP, \fBJmin\fP,
+\fBPrivateKey\fP, \fBListenPort\fP, \fBExtraPorts\fP, \fBFwMark\fP, \fBJc\fP, \fBJmin\fP,
 \fBJmax\fP, \fBS1\fP, \fBS2\fP, \fBS3\fP, \fBS4\fP, \fBH1\fP, \fBH2\fP,
 \fBH3\fP, \fBH4\fP, \fBI1\fP, \fBI2\fP, \fBI3\fP, \fBI4\fP, \fBI5\fP,
 \fBHeaderProtectionKey\fP, \fBContentPaddingAddition\fP,

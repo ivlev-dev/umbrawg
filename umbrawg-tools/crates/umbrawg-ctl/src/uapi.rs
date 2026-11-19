@@ -119,6 +119,9 @@ pub fn build_set_request(config: &SetDevice) -> Result<String, Error> {
     if let Some(port) = device.listen_port {
         write_line(&mut output, "listen_port", &port.to_string())?;
     }
+    if let Some(extra_ports) = device.extra_ports {
+        write_line(&mut output, "extra_ports", &extra_ports.to_string())?;
+    }
     if let Some(fwmark) = device.fwmark {
         write_line(&mut output, "fwmark", &fwmark.to_string())?;
     }
@@ -288,6 +291,7 @@ fn apply_device_line(device: &mut Device, key: &str, value: &str) -> Result<(), 
             device.private_key = Some(key);
         }
         "listen_port" => device.listen_port = parse_u16(key, value)?,
+        "extra_ports" => device.extra_ports = parse_extra_ports(key, value)?,
         "fwmark" => device.fwmark = parse_u32(key, value)?,
         "jc" => device.obfuscation.jc = Some(parse_u16(key, value)?),
         "jmin" => device.obfuscation.jmin = Some(parse_u16(key, value)?),
@@ -443,6 +447,19 @@ fn parse_u32(key: &str, value: &str) -> Result<u32, Error> {
         .map_err(|_| Error::Protocol(format!("invalid {key}: `{value}`")))
 }
 
+fn parse_extra_ports(key: &str, value: &str) -> Result<u8, Error> {
+    let ports = value
+        .parse::<u8>()
+        .map_err(|_| Error::Protocol(format!("invalid {key}: `{value}`")))?;
+    if ports > umbrawg_config::MAX_EXTRA_PORTS {
+        return Err(Error::Protocol(format!(
+            "invalid {key}: `{value}` is out of range 0..={}",
+            umbrawg_config::MAX_EXTRA_PORTS
+        )));
+    }
+    Ok(ports)
+}
+
 fn parse_u64(key: &str, value: &str) -> Result<u64, Error> {
     value
         .parse::<u64>()
@@ -492,6 +509,7 @@ mod tests {
     const GET_RESPONSE: &str = "\
 private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
+extra_ports=4
 fwmark=4660
 jc=4
 jmin=40
@@ -535,6 +553,7 @@ errno=0
         device.replace_peers = true;
         device.device.private_key = Some(Key::from_hex(PRIVATE).expect("valid"));
         device.device.listen_port = Some(51820);
+        device.device.extra_ports = Some(4);
         device.device.fwmark = Some(0);
         device.device.obfuscation.jc = Some(4);
         device.device.obfuscation.jmin = Some(40);
@@ -576,6 +595,7 @@ errno=0
         let device = parse_get_response(GET_RESPONSE, "test0").expect("valid response");
         assert_eq!(device.name, "test0");
         assert_eq!(device.listen_port, 51820);
+        assert_eq!(device.extra_ports, 4);
         assert_eq!(device.fwmark, 4660);
         assert_eq!(device.obfuscation.jc, Some(4));
         assert_eq!(
@@ -702,6 +722,47 @@ errno=0
     }
 
     #[test]
+    fn sends_extra_ports_to_the_daemon() {
+        let mut config = set_device();
+        assert_eq!(config.device.extra_ports, Some(4));
+        let request = build_set_request(&config).expect("valid request");
+        assert!(request.contains("extra_ports=4\n"));
+
+        config.device.extra_ports = Some(0);
+        let request = build_set_request(&config).expect("valid request");
+        assert!(request.contains("extra_ports=0\n"));
+
+        config.device.extra_ports = None;
+        let request = build_set_request(&config).expect("valid request");
+        assert!(!request.contains("extra_ports="));
+    }
+
+    #[test]
+    fn parses_extra_ports_from_get_response() {
+        for value in ["0", "4", "8"] {
+            let device = parse_get_response(
+                &format!("listen_port=51820\nextra_ports={value}\nerrno=0\n\n"),
+                "test0",
+            )
+            .expect("valid response");
+            assert_eq!(
+                device.extra_ports,
+                value.parse::<u8>().expect("valid"),
+                "{value}"
+            );
+        }
+        let device =
+            parse_get_response("listen_port=51820\nerrno=0\n\n", "test0").expect("valid response");
+        assert_eq!(device.extra_ports, 4);
+        for value in ["9", "255", "-1", "abc", ""] {
+            assert!(
+                parse_get_response(&format!("extra_ports={value}\nerrno=0\n\n"), "test0").is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
     fn builds_set_request() {
         let request = build_set_request(&set_device()).expect("valid request");
         assert!(request.starts_with("set=1\n"));
@@ -709,6 +770,7 @@ errno=0
             "private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n"
         ));
         assert!(request.contains("listen_port=51820\n"));
+        assert!(request.contains("extra_ports=4\n"));
         assert!(request.contains("fwmark=0\n"));
         assert!(request.contains("replace_peers=true\n"));
         assert!(request.contains("h1=61220074-118999195\n"));

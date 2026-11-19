@@ -25,6 +25,8 @@ pub const HEADER_PROTECTION_NONCE_LEN: u16 = 12;
 
 /// Maximal interface name length the kernel accepts (`IFNAMSIZ - 1`).
 const IFNAME_MAX_LEN: usize = 15;
+/// Largest accepted number of additional external UDP ports.
+pub const EXTRA_PORTS_MAX: u8 = 8;
 
 /// One of the four magic header ranges (`UWGDEVICE_A_H1`..`UWGDEVICE_A_H4`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -115,6 +117,7 @@ pub struct UmbrawgDeviceConfig {
     if_name: Option<String>,
     private_key: Option<[u8; KEY_LEN]>,
     listen_port: Option<u16>,
+    extra_ports: Option<u8>,
     fwmark: Option<u32>,
     flags: Option<u32>,
     junk_count: Option<u16>,
@@ -154,6 +157,7 @@ impl UmbrawgDeviceConfig {
             if_name: None,
             private_key: None,
             listen_port: None,
+            extra_ports: None,
             fwmark: None,
             flags: None,
             junk_count: None,
@@ -229,6 +233,12 @@ impl UmbrawgDeviceConfig {
     /// Sets the UDP listen port; `0` makes the kernel choose one randomly.
     pub fn listen_port(mut self, port: u16) -> Self {
         self.listen_port = Some(port);
+        self
+    }
+
+    /// Sets the number of additional external UDP ports (`0..=8`).
+    pub fn extra_ports(mut self, ports: u8) -> Self {
+        self.extra_ports = Some(ports);
         self
     }
 
@@ -534,6 +544,9 @@ impl UmbrawgDeviceConfig {
         if let Some(port) = self.listen_port {
             attributes.push(UmbrawgAttribute::ListenPort(port));
         }
+        if let Some(extra_ports) = self.extra_ports {
+            attributes.push(UmbrawgAttribute::ExtraPorts(extra_ports));
+        }
         if let Some(mark) = self.fwmark {
             attributes.push(UmbrawgAttribute::Fwmark(mark));
         }
@@ -670,6 +683,9 @@ impl UmbrawgDeviceConfig {
                 }
                 UmbrawgAttribute::ListenPort(port) => {
                     config.listen_port = Some(*port);
+                }
+                UmbrawgAttribute::ExtraPorts(ports) => {
+                    config.extra_ports = Some(*ports);
                 }
                 UmbrawgAttribute::Fwmark(mark) => {
                     config.fwmark = Some(*mark);
@@ -827,6 +843,16 @@ impl UmbrawgDeviceConfig {
                 return Err(UmbrawgConfigError::UnsupportedFlags {
                     field: "UWGDEVICE_A_FLAGS",
                     flags,
+                });
+            }
+        }
+
+        if let Some(extra_ports) = self.extra_ports {
+            if extra_ports > EXTRA_PORTS_MAX {
+                return Err(UmbrawgConfigError::InvalidRange {
+                    field: "UWGDEVICE_A_EXTRA_PORTS",
+                    lo: 0,
+                    hi: u32::from(EXTRA_PORTS_MAX),
                 });
             }
         }

@@ -17,6 +17,6 @@ pub use ini::{Document, Entry, Section, SectionKind};
 pub use key::{Key, KEY_BASE64_LEN, KEY_HEX_LEN, KEY_LEN};
 pub use model::{
     is_dns_address, parse_bool_value, split_list_value, Config, DeviceConfig, ObfuscationConfig,
-    ParseOptions, PeerConfig, QuickConfig, QuickKey, RoutingTable,
+    ParseOptions, PeerConfig, QuickConfig, QuickKey, RoutingTable, MAX_EXTRA_PORTS,
 };
 pub use range::{U16Range, U32Range};

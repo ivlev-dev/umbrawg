@@ -409,6 +409,9 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
         "listen-port" => {
             let _ = writeln!(output, "{prefix}{}", device.listen_port);
         }
+        "extra-ports" => {
+            let _ = writeln!(output, "{prefix}{}", device.extra_ports);
+        }
         "fwmark" => {
             if device.fwmark != 0 {
                 let _ = writeln!(output, "{prefix}0x{:x}", device.fwmark);
@@ -644,7 +647,9 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
 }
 
 pub fn showconf(device: &Device) -> String {
-    device.to_config().to_ini(false)
+    let mut config = device.to_config();
+    config.device.extra_ports = Some(device.extra_ports);
+    config.to_ini(false)
 }
 
 fn sorted_peers(device: &Device) -> Vec<&Peer> {
@@ -800,6 +805,7 @@ mod tests {
         device.private_key = Some(Key::from_hex(&"11".repeat(32)).expect("valid"));
         device.public_key = Some(Key::from_hex(&"22".repeat(32)).expect("valid"));
         device.listen_port = 51820;
+        device.extra_ports = 4;
         device.fwmark = 0x1234;
         device.obfuscation.jc = Some(4);
         device.obfuscation.jmin = Some(40);
@@ -871,6 +877,7 @@ mod tests {
             .expect("valid")
             .starts_with(&device.public_key.clone().expect("key").to_base64()));
         assert_eq!(ugly(&device, "fwmark", false).expect("valid"), "0x1234\n");
+        assert_eq!(ugly(&device, "extra-ports", false).expect("valid"), "4\n");
         assert_eq!(ugly(&device, "jc", false).expect("valid"), "4\n");
         assert_eq!(ugly(&device, "h1", false).expect("valid"), "10-20\n");
         assert_eq!(ugly(&device, "i1", false).expect("valid"), "<b 0x1><c>\n");
@@ -943,6 +950,7 @@ mod tests {
         let output = showconf(&sample_device());
         assert!(output.starts_with("[Interface]\n"));
         assert!(output.contains("ListenPort = 51820\n"));
+        assert!(output.contains("ExtraPorts = 4\n"));
         assert!(output.contains("FwMark = 0x1234\n"));
         assert!(output.contains("H1 = 10-20\n"));
         assert!(output.contains("I1 = <b 0x1><c>\n"));
@@ -953,6 +961,15 @@ mod tests {
         assert!(output.contains("AdvancedSecurity = on\n"));
         let reparsed = umbrawg_config::Config::parse(&output).expect("showconf parses");
         assert_eq!(reparsed, sample_device().to_config());
+    }
+
+    #[test]
+    fn showconf_prints_extra_ports() {
+        let mut device = sample_device();
+        device.extra_ports = 0;
+        assert!(showconf(&device).contains("ExtraPorts = 0\n"));
+        device.extra_ports = 8;
+        assert!(showconf(&device).contains("ExtraPorts = 8\n"));
     }
 
     #[test]

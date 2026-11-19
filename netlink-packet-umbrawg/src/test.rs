@@ -11,8 +11,8 @@ use pretty_assertions::assert_eq;
 
 use crate::{
     UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
-    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer,
-    UmbrawgPeerAttribute, UmbrawgTimeSpec,
+    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgDeviceConfig,
+    UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgTimeSpec,
 };
 
 fn roundtrip_msg(msg: UmbrawgMessage) -> UmbrawgMessage {
@@ -250,6 +250,22 @@ fn test_all_umbra_attributes_emit_and_roundtrip() {
 }
 
 #[test]
+fn test_device_config_extra_ports() {
+    let msg = UmbrawgDeviceConfig::by_name("uwg0")
+        .extra_ports(6)
+        .build()
+        .expect("valid config");
+    assert!(msg.attributes.contains(&UmbrawgAttribute::ExtraPorts(6)));
+    let parsed = UmbrawgDeviceConfig::from_message(&msg).expect("parse");
+    assert_eq!(parsed, UmbrawgDeviceConfig::by_name("uwg0").extra_ports(6));
+
+    assert!(UmbrawgDeviceConfig::by_name("uwg0")
+        .extra_ports(9)
+        .build()
+        .is_err());
+}
+
+#[test]
 fn test_uwg31_device_attributes_roundtrip() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
@@ -257,10 +273,38 @@ fn test_uwg31_device_attributes_roundtrip() {
             UmbrawgAttribute::IfName("uwg0".into()),
             UmbrawgAttribute::RandomTrailers(true),
             UmbrawgAttribute::DisableCookies(false),
+            UmbrawgAttribute::ExtraPorts(4),
         ],
     };
 
     assert_eq!(msg, roundtrip_msg(msg.clone()));
+}
+
+#[test]
+fn test_extra_ports_wire_format() {
+    use netlink_packet_core::NlaBuffer;
+
+    let attr = UmbrawgAttribute::ExtraPorts(4);
+    let mut buf = vec![0; attr.buffer_len()];
+    attr.emit(&mut buf);
+    // NLA header: len = 5 (4 header + 1 payload), kind = 35, then the u8
+    // payload zero-padded to 4-byte alignment.
+    assert_eq!(buf, vec![0x05, 0x00, 0x23, 0x00, 0x04, 0x00, 0x00, 0x00]);
+
+    let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(parsed, UmbrawgAttribute::ExtraPorts(4));
+
+    let attr = UmbrawgAttribute::ExtraPorts(8);
+    let mut buf = vec![0; attr.buffer_len()];
+    attr.emit(&mut buf);
+    let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(parsed, UmbrawgAttribute::ExtraPorts(8));
+
+    let attr = UmbrawgAttribute::ExtraPorts(0);
+    let mut buf = vec![0; attr.buffer_len()];
+    attr.emit(&mut buf);
+    let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(parsed, UmbrawgAttribute::ExtraPorts(0));
 }
 
 #[test]

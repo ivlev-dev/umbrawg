@@ -172,6 +172,7 @@ impl QuickKey {
 pub struct DeviceConfig {
     pub private_key: Option<Key>,
     pub listen_port: Option<u16>,
+    pub extra_ports: Option<u8>,
     pub fwmark: Option<u32>,
     pub obfuscation: ObfuscationConfig,
     pub quick: QuickConfig,
@@ -305,6 +306,10 @@ impl Config {
                 self.device.listen_port = Some(parse_u16("listen-port", value)?);
                 2
             }
+            "extra-ports" => {
+                self.device.extra_ports = Some(parse_extra_ports("extra-ports", value)?);
+                2
+            }
             "fwmark" => {
                 self.device.fwmark = Some(parse_fwmark(value)?);
                 2
@@ -430,6 +435,9 @@ impl Config {
         };
         if let Some(port) = self.device.listen_port {
             push_entry(&mut interface, "ListenPort", port.to_string());
+        }
+        if let Some(extra_ports) = self.device.extra_ports {
+            push_entry(&mut interface, "ExtraPorts", extra_ports.to_string());
         }
         if let Some(fwmark) = self.device.fwmark {
             push_entry(&mut interface, "FwMark", format!("0x{fwmark:x}"));
@@ -611,6 +619,9 @@ impl DeviceConfig {
         match key.as_str() {
             "listenport" => {
                 self.listen_port = Some(parse_u16_at(entry, "ListenPort", &entry.value)?)
+            }
+            "extraports" => {
+                self.extra_ports = Some(parse_extra_ports_at(entry, "ExtraPorts", &entry.value)?)
             }
             "fwmark" => self.fwmark = Some(parse_fwmark_at(entry, &entry.value)?),
             "privatekey" => self.private_key = Some(Key::from_base64(&entry.value)?),
@@ -824,6 +835,33 @@ fn parse_allowed_ips(value: &str, line: usize, key: &str) -> Result<Vec<AllowedI
         .collect()
 }
 
+/// Largest accepted `ExtraPorts` value.
+pub const MAX_EXTRA_PORTS: u8 = 8;
+
+fn parse_extra_ports_at(entry: &Entry, key: &str, value: &str) -> Result<u8, Error> {
+    parse_extra_ports(key, value).map_err(|_| Error::InvalidValue {
+        line: entry.line,
+        key: key.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn parse_extra_ports(key: &str, value: &str) -> Result<u8, Error> {
+    let error = || Error::InvalidValue {
+        line: 0,
+        key: key.to_owned(),
+        value: value.to_owned(),
+    };
+    if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(error());
+    }
+    let parsed = value.parse::<u8>().map_err(|_| error())?;
+    if parsed > MAX_EXTRA_PORTS {
+        return Err(error());
+    }
+    Ok(parsed)
+}
+
 fn parse_u16_at(entry: &Entry, key: &str, value: &str) -> Result<u16, Error> {
     parse_u16(key, value).map_err(|_| Error::InvalidValue {
         line: entry.line,
@@ -1022,6 +1060,7 @@ mod tests {
 [Interface]
 PrivateKey = yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=
 ListenPort = 51820
+ExtraPorts = 4
 FwMark = 0x1234
 Jc = 4
 Jmin = 40
@@ -1061,6 +1100,7 @@ PersistentKeepalive = 25
         let config = Config::parse(SAMPLE).expect("valid config");
         let device = &config.device;
         assert_eq!(device.listen_port, Some(51820));
+        assert_eq!(device.extra_ports, Some(4));
         assert_eq!(device.fwmark, Some(0x1234));
         assert_eq!(
             device.private_key.as_ref().map(Key::to_base64),
@@ -1098,11 +1138,44 @@ PersistentKeepalive = 25
         let emitted = config.to_ini(false);
         let reparsed = Config::parse(&emitted).expect("emitted config parses");
         assert_eq!(config, reparsed);
+        assert!(emitted.contains("ExtraPorts = 4"));
         assert!(emitted.contains("H1 = 61220074-118999195"));
         assert!(emitted.contains("I1 = <b 0x160d2f><c>"));
         assert!(emitted.contains("AllowedIPs = 10.0.0.0/8, fd00::/64"));
         assert!(emitted.contains("AdvancedSecurity = on"));
         assert!(emitted.contains("Cipher = aes-256-gcm"));
+    }
+
+    #[test]
+    fn parses_extra_ports() {
+        for value in [0u8, 4, 8] {
+            let input = format!("[Interface]\nExtraPorts = {value}\n");
+            let config = Config::parse(&input).expect("valid config");
+            assert_eq!(config.device.extra_ports, Some(value), "{value}");
+        }
+        let config = Config::parse("[Interface]\nextraports = 3\n").expect("valid config");
+        assert_eq!(config.device.extra_ports, Some(3));
+        assert_eq!(Config::default().device.extra_ports, None);
+    }
+
+    #[test]
+    fn rejects_bad_extra_ports() {
+        for value in ["9", "-1", "abc", "", "1.5"] {
+            let input = format!("[Interface]\nExtraPorts = {value}\n");
+            assert!(Config::parse(&input).is_err(), "{value}");
+        }
+        assert!(Config::from_args(["extra-ports", "9"]).is_err());
+        assert!(Config::from_args(["extra-ports", "-1"]).is_err());
+        assert!(Config::from_args(["extra-ports", "abc"]).is_err());
+    }
+
+    #[test]
+    fn round_trips_extra_ports() {
+        let config = Config::parse("[Interface]\nExtraPorts = 8\n").expect("valid config");
+        let emitted = config.to_ini(false);
+        assert!(emitted.contains("ExtraPorts = 8\n"));
+        assert_eq!(Config::parse(&emitted).expect("valid"), config);
+        assert!(!Config::default().to_ini(false).contains("ExtraPorts"));
     }
 
     #[test]
@@ -1194,6 +1267,7 @@ PersistentKeepalive = 25
     #[test]
     fn rejects_bad_values() {
         assert!(Config::parse("[Interface]\nListenPort = 70000\n").is_err());
+        assert!(Config::parse("[Interface]\nExtraPorts = 9\n").is_err());
         assert!(Config::parse("[Interface]\nJc = abc\n").is_err());
         assert!(Config::parse("[Interface]\nH1 = 10-5\n").is_err());
         assert!(Config::parse("[Interface]\nRandomTrailers = maybe\n").is_err());
@@ -1222,6 +1296,8 @@ PersistentKeepalive = 25
         let args = [
             "listen-port",
             "51820",
+            "extra-ports",
+            "4",
             "fwmark",
             "off",
             "jc",
@@ -1243,6 +1319,7 @@ PersistentKeepalive = 25
         ];
         let config = Config::from_args(args).expect("valid arguments");
         assert_eq!(config.device.listen_port, Some(51820));
+        assert_eq!(config.device.extra_ports, Some(4));
         assert_eq!(config.device.fwmark, Some(0));
         assert_eq!(config.device.obfuscation.jc, Some(4));
         assert_eq!(config.device.obfuscation.h1, Some(U32Range::new(10, 20)));

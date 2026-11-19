@@ -1,7 +1,7 @@
 _uwg_completion() {
 	local commands params interfaces
 	commands="help version genkey genpsk pubkey show showconf set setconf addconf syncconf"
-	params="public-key private-key listen-port fwmark peers preshared-keys endpoints allowed-ips latest-handshakes persistent-keepalive advanced-security transfer dump jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key content-padding-addition rekey-after-time rekey-timeout reject-after-time keepalive-timeout max-handshake-attempts max_handshake_attempts random-trailers disable-cookies"
+	params="public-key private-key listen-port extra-ports fwmark peers preshared-keys endpoints allowed-ips latest-handshakes persistent-keepalive advanced-security transfer dump jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key content-padding-addition rekey-after-time rekey-timeout reject-after-time keepalive-timeout max-handshake-attempts max_handshake_attempts random-trailers disable-cookies"
 	interfaces="$(uwg show interfaces 2>/dev/null)"
 
 	if [[ $COMP_CWORD -eq 1 ]]; then
@@ -37,10 +37,11 @@ _uwg_completion() {
 
 	[[ ${COMP_WORDS[1]} == set ]] || return
 
-	local has_listen_port=0 has_fwmark=0 has_private_key=0 has_peer=0 words=() i
+	local has_listen_port=0 has_extra_ports=0 has_fwmark=0 has_private_key=0 has_peer=0 words=() i
 	for ((i=3;i<COMP_CWORD;i+=2)); do
 		case "${COMP_WORDS[i]}" in
 			listen-port) has_listen_port=1 ;;
+			extra-ports) has_extra_ports=1 ;;
 			fwmark) has_fwmark=1 ;;
 			private-key) has_private_key=1 ;;
 			peer) has_peer=$i; break ;;
@@ -50,6 +51,7 @@ _uwg_completion() {
 	if [[ $has_peer -eq 0 ]]; then
 		if (( COMP_CWORD % 2 != 0 )); then
 			[[ $has_listen_port -eq 1 ]] || words+=( listen-port )
+			[[ $has_extra_ports -eq 1 ]] || words+=( extra-ports )
 			[[ $has_fwmark -eq 1 ]] || words+=( fwmark )
 			[[ $has_private_key -eq 1 ]] || words+=( private-key )
 			words+=( peer )

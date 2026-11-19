@@ -7,6 +7,11 @@
 
 ### Добавлено
 
+- `ExtraPorts` в `[Interface]`, `uwg set <if> extra-ports N`,
+  `uwg show <if> extra-ports` и аргумент `--extra-ports`: число
+  дополнительных внешних UDP-портов, 0…8 (по умолчанию 4, `0`
+  отключает). Для модуля ядра значение уходит netlink-атрибутом
+  `UWGDEVICE_A_EXTRA_PORTS`, для демона — ключом UAPI `extra_ports=`.
 - `Cipher` в `[Peer]` и `uwg set <if> peer <key> cipher
   chacha20-poly1305|aes-256-gcm`: выбор шифра transport-пакетов для модуля
   ядра и демона. По умолчанию ChaCha20-Poly1305; `showconf` печатает
