@@ -36,9 +36,7 @@ fn main() {
     let pclmul = std::is_x86_feature_detected!("pclmulqdq");
     let avx2 = std::is_x86_feature_detected!("avx2");
     let vaes = std::is_x86_feature_detected!("vaes");
-    println!(
-        "cpu: aes={aesni} pclmulqdq={pclmul} avx2={avx2} vaes={vaes}"
-    );
+    println!("cpu: aes={aesni} pclmulqdq={pclmul} avx2={avx2} vaes={vaes}");
     println!(
         "{:<22} {:>7} {:>12} {:>12}",
         "algorithm", "bytes", "Mbit/s", "GByte/s"

@@ -27,11 +27,7 @@ impl Keypair {
     }
 
     #[must_use]
-    pub fn from_noise_with(
-        keys: &NoiseKeypair,
-        created: Instant,
-        algorithm: Algorithm,
-    ) -> Self {
+    pub fn from_noise_with(keys: &NoiseKeypair, created: Instant, algorithm: Algorithm) -> Self {
         Self {
             created,
             local_index: keys.local_index(),
