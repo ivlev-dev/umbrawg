@@ -7,6 +7,7 @@
 #define _UWG_PEER_H
 
 #include "device.h"
+#include "ext.h"
 #include "messages.h"
 #include "noise.h"
 #include "cookie.h"
@@ -71,6 +72,8 @@ struct uwg_peer {
 	u64 internal_id;
 	atomic_t jp_packet_counter;
 	unsigned int udp_window;
+	struct uwg_peer_caps caps;
+	struct uwg_peer_ack_tracker ack_tracker;
 };
 
 struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,

@@ -13,6 +13,7 @@
 #include "socket.h"
 #include "type.h"
 #include "aead.h"
+#include "ext.h"
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
 
@@ -476,6 +477,25 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 
 	uwg_timers_any_authenticated_packet_received(peer);
 	uwg_timers_any_authenticated_packet_traversal(peer);
+
+	if (unlikely(peer->device->bbr_mode != UWG_BBR_MODE_OFF ||
+		     peer->device->fec_mode != UWG_FEC_MODE_OFF)) {
+		switch (uwg_ext_receive(peer, skb)) {
+		case UWG_EXT_RX_CONSUMED:
+			update_rx_stats(peer, message_data_len(0) + skb->len);
+			net_dbg_ratelimited("%s: Receiving extension packet from peer %llu (%pISpfsc)\n",
+					    dev->name, peer->internal_id,
+					    &peer->endpoint.addr);
+			goto packet_processed;
+		case UWG_EXT_RX_INVALID:
+			DEV_STATS_INC(dev, rx_errors);
+			DEV_STATS_INC(dev, rx_frame_errors);
+			goto packet_processed;
+		case UWG_EXT_RX_NOT_EXTENSION:
+		default:
+			break;
+		}
+	}
 
 	/* A packet with length 0, or with all zeroes (content padding)
 	 * is a keepalive packet

@@ -1,0 +1,116 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+
+#ifndef _UWG_EXT_H
+#define _UWG_EXT_H
+
+#include <linux/types.h>
+#include <linux/bits.h>
+#include <linux/ktime.h>
+
+struct sk_buff;
+struct uwg_device;
+struct uwg_peer;
+
+#define UWG_EXT_TAG 0x00
+#define UWG_EXT_MAGIC_0 'U'
+#define UWG_EXT_MAGIC_1 'W'
+#define UWG_EXT_MAGIC_2 'G'
+#define UWG_EXT_VERSION 1
+#define UWG_EXT_HEADER_LEN 8
+
+#define UWG_EXT_KIND_CAPS 1
+#define UWG_EXT_KIND_ACK 2
+#define UWG_EXT_KIND_FEC_SHARD 3
+
+#define UWG_EXT_CAPS_LEN 12
+#define UWG_EXT_ACK_HEADER_LEN 16
+#define UWG_EXT_ACK_BITMAP_MAX 8
+#define UWG_EXT_FEC_HEADER_LEN 12
+
+#define UWG_EXT_CAP_BBR BIT(0)
+#define UWG_EXT_CAP_ACK BIT(1)
+#define UWG_EXT_CAP_FEC BIT(2)
+#define UWG_EXT_CAP_FEC_ADAPTIVE BIT(3)
+
+#define UWG_EXT_ACK_FLAG_ECN_CE BIT(0)
+
+#define UWG_EXT_FEC_FLAG_PARITY BIT(0)
+
+#define UWG_EXT_DEFAULT_ACK_INTERVAL 2
+#define UWG_EXT_DEFAULT_FEC_K 10
+#define UWG_EXT_DEFAULT_FEC_M 1
+
+enum uwg_ext_rx_result {
+	UWG_EXT_RX_NOT_EXTENSION = 0,
+	UWG_EXT_RX_CONSUMED,
+	UWG_EXT_RX_INVALID,
+};
+
+struct uwg_ext_header {
+	u8 kind;
+	u16 payload_len;
+	const u8 *payload;
+};
+
+struct uwg_ext_caps {
+	u32 flags;
+	u16 ack_interval;
+	u8 fec_k;
+	u8 fec_m;
+	u32 reserved;
+};
+
+struct uwg_ext_ack {
+	u64 largest;
+	u32 ack_delay_us;
+	u8 flags;
+	u8 bitmap_len;
+	u16 reserved;
+	u8 bitmap[UWG_EXT_ACK_BITMAP_MAX];
+};
+
+struct uwg_ext_fec_shard {
+	u32 block_id;
+	u8 index;
+	u8 k;
+	u8 m;
+	u8 flags;
+	u16 shard_len;
+	u16 reserved;
+	const u8 *payload;
+};
+
+struct uwg_peer_caps {
+	struct uwg_ext_caps local;
+	struct uwg_ext_caps peer;
+	bool peer_valid;
+};
+
+struct uwg_peer_ack_tracker {
+	u64 largest;
+	u64 bitmap;
+	u64 received;
+	u32 ack_delay_us;
+	u16 bitmap_len;
+	u8 flags;
+	bool valid;
+	unsigned long last_ack_jiffies;
+	ktime_t last_ack_ktime;
+};
+
+bool uwg_ext_detect(const u8 *data, size_t len);
+int uwg_ext_parse_header(const u8 *data, size_t len,
+			 struct uwg_ext_header *header);
+int uwg_ext_parse_caps(const u8 *payload, size_t len,
+		       struct uwg_ext_caps *caps);
+int uwg_ext_parse_ack(const u8 *payload, size_t len, struct uwg_ext_ack *ack);
+int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
+			    struct uwg_ext_fec_shard *shard);
+
+void uwg_ext_local_caps(const struct uwg_device *uwg,
+			struct uwg_ext_caps *caps);
+void uwg_ext_peer_init(struct uwg_peer *peer);
+enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
+				       struct sk_buff *skb);
+
+#endif /* _UWG_EXT_H */
