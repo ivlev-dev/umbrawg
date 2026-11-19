@@ -59,7 +59,10 @@
 - Конфиг/CLI/UAPI: `BBR`, `FEC`, `uwg set bbr/fec`, ключи `bbr=`/`fec=`
   работают для userspace-демона. Env `UMBRAWG_BBR`, `UMBRAWG_FEC`,
   `UMBRAWG_FEC_SHARD`, `UMBRAWG_ACK_INTERVAL` остаются для стенда.
-  Netlink-атрибуты появятся вместе с портом в ядро.
+- Netlink: `UWGDEVICE_A_BBR=36` (u8 0/1/2) и `UWGDEVICE_A_FEC=37`
+  (`0`/`1`/`(K<<8)|M`) уже принимаются и отдаются модулем и tools.
+  Data-plane ядра их пока только хранит — реализация FEC/BBR в модуле
+  будет следующим этапом.
 - Порт в ядро не начат.
 
 ## Следующие шаги

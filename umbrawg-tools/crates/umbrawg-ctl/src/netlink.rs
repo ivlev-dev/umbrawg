@@ -12,8 +12,9 @@ use netlink_packet_umbrawg::constants::{
     UWGPEER_F_HAS_ADVANCED_SECURITY, UWGPEER_F_REMOVE_ME, UWGPEER_F_REPLACE_ALLOWEDIPS,
 };
 use netlink_packet_umbrawg::{
-    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCipher,
-    UmbrawgCmd, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
+    fec_pack, fec_unpack, UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
+    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
+    FEC_ADAPTIVE, FEC_OFF,
 };
 use umbrawg_config::{AllowedIp, Cipher, Key, U16Range, U32Range};
 
@@ -208,6 +209,12 @@ fn device_attributes(config: &SetDevice, version: u32) -> Result<Vec<UmbrawgAttr
     }
     if let Some(extra_ports) = device.extra_ports {
         attributes.push(UmbrawgAttribute::ExtraPorts(extra_ports));
+    }
+    if let Some(bbr) = &device.bbr {
+        attributes.push(UmbrawgAttribute::Bbr(bbr_value(bbr)?));
+    }
+    if let Some(fec) = &device.fec {
+        attributes.push(UmbrawgAttribute::Fec(fec_value(fec)?));
     }
     if let Some(fwmark) = device.fwmark {
         attributes.push(UmbrawgAttribute::Fwmark(fwmark));
@@ -408,6 +415,8 @@ impl DeviceBuilder {
                 }
                 UmbrawgAttribute::ListenPort(value) => self.device.listen_port = *value,
                 UmbrawgAttribute::ExtraPorts(value) => self.device.extra_ports = Some(*value),
+                UmbrawgAttribute::Bbr(value) => self.device.bbr = Some(bbr_text(*value)?),
+                UmbrawgAttribute::Fec(value) => self.device.fec = Some(fec_text(*value)?),
                 UmbrawgAttribute::Fwmark(value) => self.device.fwmark = *value,
                 UmbrawgAttribute::JC(value) => self.device.obfuscation.jc = Some(*value),
                 UmbrawgAttribute::Jmin(value) => self.device.obfuscation.jmin = Some(*value),
@@ -582,6 +591,61 @@ fn allowed_ip_from_netlink(value: &UmbrawgAllowedIp) -> Result<AllowedIp, Error>
 fn parse_header(name: &str, value: &str) -> Result<U32Range, Error> {
     U32Range::parse(value)
         .map_err(|error| Error::Protocol(format!("invalid {name} from kernel: {error}")))
+}
+
+fn bbr_value(text: &str) -> Result<u8, Error> {
+    let normalized = text.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "off" => Ok(0),
+        "monitor" => Ok(1),
+        "on" => Ok(2),
+        _ => Err(Error::Protocol(format!("invalid BBR mode `{text}`"))),
+    }
+}
+
+fn bbr_text(value: u8) -> Result<String, Error> {
+    match value {
+        0 => Ok("off".to_owned()),
+        1 => Ok("monitor".to_owned()),
+        2 => Ok("on".to_owned()),
+        _ => Err(Error::Protocol(format!(
+            "invalid BBR value {value} from kernel"
+        ))),
+    }
+}
+
+fn fec_value(text: &str) -> Result<u32, Error> {
+    let normalized = text.trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "off" => return Ok(FEC_OFF),
+        "adaptive" => return Ok(FEC_ADAPTIVE),
+        _ => {}
+    }
+    let invalid = || Error::Protocol(format!("invalid FEC mode `{text}`"));
+    let (shards, parity) = normalized.split_once(':').ok_or_else(invalid)?;
+    if shards.is_empty()
+        || parity.is_empty()
+        || !shards.bytes().all(|byte| byte.is_ascii_digit())
+        || !parity.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(invalid());
+    }
+    let shards: u8 = shards.parse().map_err(|_| invalid())?;
+    let parity: u8 = parity.parse().map_err(|_| invalid())?;
+    fec_pack(shards, parity).ok_or_else(invalid)
+}
+
+fn fec_text(value: u32) -> Result<String, Error> {
+    match value {
+        FEC_OFF => Ok("off".to_owned()),
+        FEC_ADAPTIVE => Ok("adaptive".to_owned()),
+        _ => match fec_unpack(value) {
+            Some((shards, parity)) => Ok(format!("{shards}:{parity}")),
+            None => Err(Error::Protocol(format!(
+                "invalid FEC value {value} from kernel"
+            ))),
+        },
+    }
 }
 
 #[cfg(test)]
@@ -826,6 +890,8 @@ mod tests {
                 UmbrawgAttribute::IfIndex(7),
                 UmbrawgAttribute::ListenPort(51820),
                 UmbrawgAttribute::ExtraPorts(7),
+                UmbrawgAttribute::Bbr(2),
+                UmbrawgAttribute::Fec(0x0a03),
                 UmbrawgAttribute::Fwmark(0x12),
                 UmbrawgAttribute::PrivateKey([1u8; 32]),
                 UmbrawgAttribute::PublicKey([2u8; 32]),
@@ -881,6 +947,8 @@ mod tests {
         assert_eq!(device.ifindex, Some(7));
         assert_eq!(device.listen_port, 51820);
         assert_eq!(device.extra_ports, Some(7));
+        assert_eq!(device.bbr.as_deref(), Some("on"));
+        assert_eq!(device.fec.as_deref(), Some("10:3"));
         assert_eq!(device.fwmark, 0x12);
         assert_eq!(device.obfuscation.jc, Some(4));
         assert_eq!(device.obfuscation.h1, Some(U32Range::new(10, 20)));
@@ -1048,5 +1116,125 @@ mod tests {
             .expect("advanced security");
         assert_eq!(attribute.kind(), UWGPEER_A_ADVANCED_SECURITY);
         assert_eq!(attribute.value_len(), 0);
+    }
+
+    #[test]
+    fn sends_bbr_and_fec_only_when_configured() {
+        let mut config = config();
+        assert_eq!(config.device.bbr, None);
+        assert_eq!(config.device.fec, None);
+        let messages = build_set_messages(&config, 3).expect("valid");
+        assert!(!messages[0]
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, UmbrawgAttribute::Bbr(_))));
+        assert!(!messages[0]
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, UmbrawgAttribute::Fec(_))));
+
+        config.device.bbr = Some("monitor".to_owned());
+        config.device.fec = Some("10:3".to_owned());
+        let messages = build_set_messages(&config, 3).expect("valid");
+        let attributes = &messages[0].attributes;
+        assert!(attributes.contains(&UmbrawgAttribute::Bbr(1)));
+        assert!(attributes.contains(&UmbrawgAttribute::Fec(0x0a03)));
+
+        config.device.bbr = Some("on".to_owned());
+        config.device.fec = Some("adaptive".to_owned());
+        let messages = build_set_messages(&config, 3).expect("valid");
+        let attributes = &messages[0].attributes;
+        assert!(attributes.contains(&UmbrawgAttribute::Bbr(2)));
+        assert!(attributes.contains(&UmbrawgAttribute::Fec(1)));
+
+        config.device.bbr = Some("off".to_owned());
+        config.device.fec = Some("off".to_owned());
+        let messages = build_set_messages(&config, 3).expect("valid");
+        let attributes = &messages[0].attributes;
+        assert!(attributes.contains(&UmbrawgAttribute::Bbr(0)));
+        assert!(attributes.contains(&UmbrawgAttribute::Fec(0)));
+    }
+
+    #[test]
+    fn encodes_bbr_modes() {
+        assert_eq!(bbr_value("off").expect("valid"), 0);
+        assert_eq!(bbr_value("monitor").expect("valid"), 1);
+        assert_eq!(bbr_value("on").expect("valid"), 2);
+        assert_eq!(bbr_value(" ON ").expect("valid"), 2);
+        for value in ["", "maybe", "true", "1", "bbr"] {
+            assert!(bbr_value(value).is_err(), "{value}");
+        }
+        assert_eq!(bbr_text(0).expect("valid"), "off");
+        assert_eq!(bbr_text(1).expect("valid"), "monitor");
+        assert_eq!(bbr_text(2).expect("valid"), "on");
+        assert!(bbr_text(3).is_err());
+    }
+
+    #[test]
+    fn encodes_fec_modes() {
+        assert_eq!(fec_value("off").expect("valid"), 0);
+        assert_eq!(fec_value("adaptive").expect("valid"), 1);
+        assert_eq!(fec_value("10:3").expect("valid"), 0x0a03);
+        assert_eq!(fec_value("1:1").expect("valid"), 0x0101);
+        assert_eq!(fec_value("254:1").expect("valid"), 0xfe01);
+        assert_eq!(fec_value(" ADAPTIVE ").expect("valid"), 1);
+        for value in [
+            "", "0:0", "0:3", "3:0", "255:1", "200:100", "10", "10:3:4", "-1:2", "a:b", "1:",
+        ] {
+            assert!(fec_value(value).is_err(), "{value}");
+        }
+        assert_eq!(fec_text(0).expect("valid"), "off");
+        assert_eq!(fec_text(1).expect("valid"), "adaptive");
+        assert_eq!(fec_text(0x0a03).expect("valid"), "10:3");
+        assert_eq!(fec_text(0xfe01).expect("valid"), "254:1");
+        assert!(fec_text(2).is_err());
+        assert!(fec_text(0x0100).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_bbr_and_fec_from_config() {
+        let mut set = config();
+        set.device.bbr = Some("maybe".to_owned());
+        assert!(build_set_messages(&set, 3).is_err());
+
+        let mut set = config();
+        set.device.fec = Some("0:0".to_owned());
+        assert!(build_set_messages(&set, 3).is_err());
+
+        let mut set = config();
+        set.device.fec = Some("200:100".to_owned());
+        assert!(build_set_messages(&set, 3).is_err());
+    }
+
+    #[test]
+    fn reads_bbr_and_fec_from_netlink() {
+        let mut builder = DeviceBuilder::new("test0");
+        builder
+            .apply(&[UmbrawgAttribute::Bbr(2), UmbrawgAttribute::Fec(0x0a03)])
+            .expect("apply");
+        let device = builder.finish();
+        assert_eq!(device.bbr.as_deref(), Some("on"));
+        assert_eq!(device.fec.as_deref(), Some("10:3"));
+
+        for (mode, expected) in [(0u8, "off"), (1, "monitor"), (2, "on")] {
+            let mut builder = DeviceBuilder::new("test0");
+            builder
+                .apply(&[UmbrawgAttribute::Bbr(mode)])
+                .expect("apply");
+            assert_eq!(builder.finish().bbr.as_deref(), Some(expected));
+        }
+
+        for (value, expected) in [(0u32, "off"), (1, "adaptive"), (0x0101, "1:1")] {
+            let mut builder = DeviceBuilder::new("test0");
+            builder
+                .apply(&[UmbrawgAttribute::Fec(value)])
+                .expect("apply");
+            assert_eq!(builder.finish().fec.as_deref(), Some(expected));
+        }
+
+        let mut builder = DeviceBuilder::new("test0");
+        assert!(builder.apply(&[UmbrawgAttribute::Bbr(3)]).is_err());
+        let mut builder = DeviceBuilder::new("test0");
+        assert!(builder.apply(&[UmbrawgAttribute::Fec(2)]).is_err());
     }
 }

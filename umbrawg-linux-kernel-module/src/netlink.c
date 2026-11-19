@@ -70,6 +70,8 @@ static const struct nla_policy device_policy[UWGDEVICE_A_MAX + 1] = {
 	[UWGDEVICE_A_RANDOM_TRAILERS] = { .type = NLA_U8 },
 	[UWGDEVICE_A_DISABLE_COOKIES] = { .type = NLA_U8 },
 	[UWGDEVICE_A_EXTRA_PORTS] = { .type = NLA_U8 },
+	[UWGDEVICE_A_BBR] = { .type = NLA_U8 },
+	[UWGDEVICE_A_FEC] = { .type = NLA_U32 },
 };
 
 static const struct nla_policy peer_policy[UWGPEER_A_MAX + 1] = {
@@ -448,6 +450,8 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 				uwg->incoming_port) ||
 		    nla_put_u32(skb, UWGDEVICE_A_FWMARK, uwg->fwmark) ||
 		    nla_put_u8(skb, UWGDEVICE_A_EXTRA_PORTS, uwg->extra_ports) ||
+		    nla_put_u8(skb, UWGDEVICE_A_BBR, uwg->bbr_mode) ||
+		    nla_put_u32(skb, UWGDEVICE_A_FEC, uwg->fec_mode) ||
 		    nla_put_u32(skb, UWGDEVICE_A_IFINDEX, uwg->dev->ifindex) ||
 		    nla_put_string(skb, UWGDEVICE_A_IFNAME, uwg->dev->name) ||
 		    nla_put_u16(skb, UWGDEVICE_A_JC, uwg->jc) ||
@@ -602,6 +606,17 @@ static int set_extra_ports(struct uwg_device *uwg, u8 extra_ports)
 		return ret;
 	}
 	return 0;
+}
+
+static bool uwg_fec_mode_valid(u32 value)
+{
+	u32 k, m;
+
+	if (value == UWG_FEC_MODE_OFF || value == UWG_FEC_MODE_ADAPTIVE)
+		return true;
+	k = value >> 8;
+	m = value & 0xff;
+	return k >= 1 && m >= 1 && k + m <= UWG_FEC_MAX_SHARDS;
 }
 
 static int set_allowedip(struct uwg_peer *peer, struct nlattr **attrs)
@@ -817,7 +832,9 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 
 	if (info->attrs[UWGDEVICE_A_LISTEN_PORT] ||
 	    info->attrs[UWGDEVICE_A_FWMARK] ||
-	    info->attrs[UWGDEVICE_A_EXTRA_PORTS]) {
+	    info->attrs[UWGDEVICE_A_EXTRA_PORTS] ||
+	    info->attrs[UWGDEVICE_A_BBR] ||
+	    info->attrs[UWGDEVICE_A_FEC]) {
 		struct net *net;
 		rcu_read_lock();
 		net = rcu_dereference(uwg->creating_net);
@@ -857,6 +874,32 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 		ret = set_extra_ports(uwg, val8);
 		if (ret)
 			goto out;
+	}
+
+	if (info->attrs[UWGDEVICE_A_BBR]) {
+		u8 val8 = nla_get_u8(info->attrs[UWGDEVICE_A_BBR]);
+
+		if (val8 > UWG_BBR_MODE_MAX) {
+			net_dbg_ratelimited(
+				"%s: BbrMode must be %d, %d or %d\n",
+				uwg->dev->name, UWG_BBR_MODE_OFF,
+				UWG_BBR_MODE_MONITOR, UWG_BBR_MODE_ON);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->bbr_mode = val8;
+	}
+
+	if (info->attrs[UWGDEVICE_A_FEC]) {
+		u32 val32 = nla_get_u32(info->attrs[UWGDEVICE_A_FEC]);
+
+		if (!uwg_fec_mode_valid(val32)) {
+			net_dbg_ratelimited("%s: FecMode is invalid\n",
+				uwg->dev->name);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->fec_mode = val32;
 	}
 
 	if (info->attrs[UWGDEVICE_A_JC] ||

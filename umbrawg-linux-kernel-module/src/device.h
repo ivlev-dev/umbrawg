@@ -47,10 +47,19 @@ struct uwg_device {
 	struct sock __rcu *sock4, *sock6;
 #define UWG_EXTRA_PORTS_MAX 8
 #define UWG_EXTRA_PORTS_DEFAULT 0
+#define UWG_BBR_MODE_OFF 0
+#define UWG_BBR_MODE_MONITOR 1
+#define UWG_BBR_MODE_ON 2
+#define UWG_BBR_MODE_MAX UWG_BBR_MODE_ON
+#define UWG_FEC_MODE_OFF 0
+#define UWG_FEC_MODE_ADAPTIVE 1
+#define UWG_FEC_MAX_SHARDS 255
 	struct sock __rcu *sock4_extra[UWG_EXTRA_PORTS_MAX];
 	struct sock __rcu *sock6_extra[UWG_EXTRA_PORTS_MAX];
 	u8 sock4_extra_count, sock6_extra_count;
 	u8 extra_ports;
+	u8 bbr_mode;
+	u32 fec_mode;
 	atomic_t sock4_rr, sock6_rr;
 	struct net __rcu *creating_net;
 	struct noise_static_identity static_identity;

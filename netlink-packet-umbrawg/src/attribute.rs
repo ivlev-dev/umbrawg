@@ -52,8 +52,59 @@ const UWGDEVICE_A_RANDOM_TRAILERS: u16 = 33;
 const UWGDEVICE_A_DISABLE_COOKIES: u16 = 34;
 // UmbraWG multi-port attributes
 const UWGDEVICE_A_EXTRA_PORTS: u16 = 35;
+// UmbraWG BBR/FEC attributes
+const UWGDEVICE_A_BBR: u16 = 36;
+const UWGDEVICE_A_FEC: u16 = 37;
 
 const HEADER_PROTECTION_KEY_LEN: usize = 32;
+
+/// Highest valid `UWGDEVICE_A_BBR` value (`on`).
+pub const BBR_MAX: u8 = 2;
+
+/// `UWGDEVICE_A_FEC` value that disables FEC.
+pub const FEC_OFF: u32 = 0;
+
+/// `UWGDEVICE_A_FEC` value that selects adaptive FEC.
+pub const FEC_ADAPTIVE: u32 = 1;
+
+/// Largest accepted total number of FEC shards (`K + M`).
+pub const FEC_MAX_SHARDS: u16 = 255;
+
+/// Packs explicit FEC shard counts into the `UWGDEVICE_A_FEC` payload
+/// (`k << 8 | m`).
+///
+/// Returns `None` unless `k >= 1`, `m >= 1` and `k + m <= 255`.
+pub const fn fec_pack(k: u8, m: u8) -> Option<u32> {
+    if k == 0 || m == 0 || k as u16 + m as u16 > FEC_MAX_SHARDS {
+        return None;
+    }
+    Some(((k as u32) << 8) | m as u32)
+}
+
+/// Unpacks explicit FEC shard counts from a `UWGDEVICE_A_FEC` payload.
+///
+/// Returns `None` for the `off`/`adaptive` modes and for payloads that do not
+/// satisfy the `k >= 1`, `m >= 1`, `k + m <= 255` contract.
+pub const fn fec_unpack(value: u32) -> Option<(u8, u8)> {
+    if value == FEC_OFF || value == FEC_ADAPTIVE {
+        return None;
+    }
+    let k = (value >> 8) as u8;
+    let m = value as u8;
+    if value >> 16 != 0
+        || k == 0
+        || m == 0
+        || k as u16 + m as u16 > FEC_MAX_SHARDS
+    {
+        return None;
+    }
+    Some((k, m))
+}
+
+/// Returns `true` when `value` is a valid `UWGDEVICE_A_FEC` payload.
+pub const fn fec_value_is_valid(value: u32) -> bool {
+    value == FEC_OFF || value == FEC_ADAPTIVE || fec_unpack(value).is_some()
+}
 
 /// Wire representation of a magic header attribute.
 enum MagicHeaderValue {
@@ -285,6 +336,18 @@ pub enum UmbrawgAttribute {
     /// (`u8`, `0..=8`), `4` by default. The kernel opens one extra socket
     /// per port and sends over them round-robin.
     ExtraPorts(u8),
+    /// `UWGDEVICE_A_BBR`: BBR congestion control mode (`u8`).
+    ///
+    /// `0` disables BBR, `1` only monitors it and `2` enables it. Values above
+    /// [`BBR_MAX`] are rejected when parsing.
+    Bbr(u8),
+    /// `UWGDEVICE_A_FEC`: forward error correction mode (`u32`).
+    ///
+    /// `0` disables FEC, `1` selects adaptive FEC, and any other valid value
+    /// packs explicit shard counts as `(K << 8) | M` with `K >= 1`, `M >= 1`
+    /// and `K + M <= 255`. Use [`fec_pack`] and [`fec_unpack`] to convert
+    /// between shard counts and the wire value.
+    Fec(u32),
     /// An attribute this crate does not know; kept verbatim.
     Other(DefaultNla),
 }
@@ -330,7 +393,9 @@ impl Nla for UmbrawgAttribute {
             | Self::H4Range(_) => 8,
             Self::RandomTrailers(_)
             | Self::DisableCookies(_)
-            | Self::ExtraPorts(_) => 1,
+            | Self::ExtraPorts(_)
+            | Self::Bbr(_) => 1,
+            Self::Fec(_) => 4,
             // Umbra Specific Fields
             Self::Peer(v) => v.attributes_len(),
             Self::JC(_)
@@ -392,6 +457,8 @@ impl Nla for UmbrawgAttribute {
             Self::RandomTrailers(_) => UWGDEVICE_A_RANDOM_TRAILERS,
             Self::DisableCookies(_) => UWGDEVICE_A_DISABLE_COOKIES,
             Self::ExtraPorts(_) => UWGDEVICE_A_EXTRA_PORTS,
+            Self::Bbr(_) => UWGDEVICE_A_BBR,
+            Self::Fec(_) => UWGDEVICE_A_FEC,
             Self::Other(attr) => attr.kind(),
         }
     }
@@ -446,6 +513,8 @@ impl Nla for UmbrawgAttribute {
                 buffer[0] = u8::from(*v)
             }
             Self::ExtraPorts(v) => buffer[0] = *v,
+            Self::Bbr(v) => buffer[0] = *v,
+            Self::Fec(v) => emit_u32(buffer, *v).unwrap(),
             Self::Other(attr) => attr.emit_value(buffer),
         }
     }
@@ -599,6 +668,26 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                     )));
                 }
                 Self::ExtraPorts(ports)
+            }
+            UWGDEVICE_A_BBR => {
+                let mode = parse_u8(payload)
+                    .context("invalid UWGDEVICE_A_BBR value")?;
+                if mode > BBR_MAX {
+                    return Err(DecodeError::from(format!(
+                        "UWGDEVICE_A_BBR value {mode} exceeds {BBR_MAX}"
+                    )));
+                }
+                Self::Bbr(mode)
+            }
+            UWGDEVICE_A_FEC => {
+                let value = parse_u32(payload)
+                    .context("invalid UWGDEVICE_A_FEC value")?;
+                if !fec_value_is_valid(value) {
+                    return Err(DecodeError::from(format!(
+                        "invalid UWGDEVICE_A_FEC value {value}"
+                    )));
+                }
+                Self::Fec(value)
             }
             kind => Self::Other(
                 DefaultNla::parse(buf)

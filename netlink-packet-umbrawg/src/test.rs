@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
 };
 
-use netlink_packet_core::{Emitable, Parseable, ParseableParametrized};
+use netlink_packet_core::{Emitable, Nla, Parseable, ParseableParametrized};
 use netlink_packet_generic::{GenlBuffer, GenlHeader};
 use pretty_assertions::assert_eq;
 
@@ -908,4 +908,100 @@ fn test_unknown_peer_command_conversion() {
     assert_eq!(UmbrawgCmd::from(2), UmbrawgCmd::UnknownPeer);
     assert_eq!(UmbrawgCmd::from(0), UmbrawgCmd::GetDevice);
     assert_eq!(UmbrawgCmd::from(1), UmbrawgCmd::SetDevice);
+}
+
+#[test]
+fn test_bbr_fec_roundtrip() {
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::SetDevice,
+        attributes: vec![
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::Bbr(2),
+            UmbrawgAttribute::Fec(crate::attribute::fec_pack(10, 3).unwrap()),
+        ],
+    };
+
+    assert_eq!(msg, roundtrip_msg(msg.clone()));
+}
+
+#[test]
+fn test_bbr_wire_format() {
+    use netlink_packet_core::NlaBuffer;
+
+    for mode in 0..=crate::attribute::BBR_MAX {
+        let attr = UmbrawgAttribute::Bbr(mode);
+        assert_eq!(attr.kind(), 36);
+        assert_eq!(attr.value_len(), 1);
+        let mut buf = vec![0; attr.buffer_len()];
+        attr.emit(&mut buf);
+        // NLA header: len = 5 (4 header + 1 payload), kind = 36, then the u8
+        // payload zero-padded to 4-byte alignment.
+        assert_eq!(buf[..4], [0x05, 0x00, 0x24, 0x00]);
+        assert_eq!(buf[4], mode);
+        let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+        assert_eq!(parsed, UmbrawgAttribute::Bbr(mode));
+    }
+
+    let attr = UmbrawgAttribute::Bbr(3);
+    let mut buf = vec![0; attr.buffer_len()];
+    attr.emit(&mut buf);
+    assert!(UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).is_err());
+}
+
+#[test]
+fn test_fec_wire_format() {
+    use netlink_packet_core::NlaBuffer;
+
+    let cases = [
+        (crate::attribute::FEC_OFF, vec![0x00, 0x00, 0x00, 0x00]),
+        (crate::attribute::FEC_ADAPTIVE, vec![0x01, 0x00, 0x00, 0x00]),
+        (0x0402, vec![0x02, 0x04, 0x00, 0x00]),
+        (0x0101, vec![0x01, 0x01, 0x00, 0x00]),
+        (0xfe01, vec![0x01, 0xfe, 0x00, 0x00]),
+    ];
+    for (value, payload) in cases {
+        let attr = UmbrawgAttribute::Fec(value);
+        assert_eq!(attr.kind(), 37);
+        assert_eq!(attr.value_len(), 4);
+        let mut buf = vec![0; attr.buffer_len()];
+        attr.emit(&mut buf);
+        // NLA header: len = 8 (4 header + 4 payload), kind = 37.
+        assert_eq!(buf[..4], [0x08, 0x00, 0x25, 0x00]);
+        assert_eq!(buf[4..], payload[..]);
+        let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+        assert_eq!(parsed, UmbrawgAttribute::Fec(value));
+    }
+}
+
+#[test]
+fn test_fec_rejects_invalid_payloads() {
+    use netlink_packet_core::NlaBuffer;
+
+    // 2..=255 cannot be `(K << 8) | M` with both counts non-zero.
+    for value in [2u32, 0x00ff, 0x0100, 0xff01, 0x010000] {
+        let attr = UmbrawgAttribute::Fec(value);
+        let mut buf = vec![0; attr.buffer_len()];
+        attr.emit(&mut buf);
+        assert!(
+            UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).is_err(),
+            "value {value:#x} must be rejected"
+        );
+    }
+}
+
+#[test]
+fn test_fec_pack_and_unpack() {
+    use crate::attribute::{fec_pack, fec_unpack, FEC_ADAPTIVE, FEC_OFF};
+
+    assert_eq!(fec_pack(10, 3), Some(0x0a03));
+    assert_eq!(fec_unpack(0x0a03), Some((10, 3)));
+    assert_eq!(fec_pack(254, 1), Some(0xfe01));
+    assert_eq!(fec_unpack(0xfe01), Some((254, 1)));
+    assert_eq!(fec_pack(0, 0), None);
+    assert_eq!(fec_pack(0, 3), None);
+    assert_eq!(fec_pack(3, 0), None);
+    assert_eq!(fec_pack(255, 1), None);
+    assert_eq!(fec_pack(200, 100), None);
+    assert_eq!(fec_unpack(FEC_OFF), None);
+    assert_eq!(fec_unpack(FEC_ADAPTIVE), None);
 }

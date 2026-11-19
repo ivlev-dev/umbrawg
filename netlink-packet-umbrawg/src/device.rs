@@ -791,6 +791,8 @@ impl UmbrawgDeviceConfig {
                 }
                 UmbrawgAttribute::PublicKey(_)
                 | UmbrawgAttribute::Peer(_)
+                | UmbrawgAttribute::Bbr(_)
+                | UmbrawgAttribute::Fec(_)
                 | UmbrawgAttribute::Other(_) => {}
             }
         }

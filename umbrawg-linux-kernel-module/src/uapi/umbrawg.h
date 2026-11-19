@@ -30,6 +30,8 @@
  *    UWGDEVICE_A_LISTEN_PORT: NLA_U16
  *    UWGDEVICE_A_FWMARK: NLA_U32
  *    UWGDEVICE_A_EXTRA_PORTS: NLA_U8
+ *    UWGDEVICE_A_BBR: NLA_U8
+ *    UWGDEVICE_A_FEC: NLA_U32
  *    UWGDEVICE_A_PEERS: NLA_NESTED
  *        0: NLA_NESTED
  *            UWGPEER_A_PUBLIC_KEY: NLA_EXACT_LEN, len UWG_KEY_LEN
@@ -87,6 +89,10 @@
  *    UWGDEVICE_A_FWMARK: NLA_U32, 0 to disable
  *    UWGDEVICE_A_EXTRA_PORTS: NLA_U8, number of additional external UDP
  *                            ports, from 0 to 8
+ *    UWGDEVICE_A_BBR: NLA_U8, 0 to disable, 1 to monitor, 2 to enable
+ *    UWGDEVICE_A_FEC: NLA_U32, 0 to disable, 1 to use adaptive mode,
+ *                    otherwise (K << 8) | M for K data and M parity
+ *                    shards, where K >= 1, M >= 1 and K + M <= 255
  *    UWGDEVICE_A_PEERS: NLA_NESTED
  *        0: NLA_NESTED
  *            UWGPEER_A_PUBLIC_KEY: len UWG_KEY_LEN
@@ -220,6 +226,8 @@ enum uwgdevice_attribute {
 	UWGDEVICE_A_RANDOM_TRAILERS,
 	UWGDEVICE_A_DISABLE_COOKIES,
 	UWGDEVICE_A_EXTRA_PORTS,
+	UWGDEVICE_A_BBR,
+	UWGDEVICE_A_FEC,
 	__UWGDEVICE_A_LAST
 };
 #define UWGDEVICE_A_MAX (__UWGDEVICE_A_LAST - 1)

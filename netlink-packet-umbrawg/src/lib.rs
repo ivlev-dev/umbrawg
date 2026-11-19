@@ -129,7 +129,10 @@ mod test;
 
 pub use self::{
     allowedip::{UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr},
-    attribute::UmbrawgAttribute,
+    attribute::{
+        fec_pack, fec_unpack, UmbrawgAttribute, BBR_MAX, FEC_ADAPTIVE,
+        FEC_MAX_SHARDS, FEC_OFF,
+    },
     cipher::UmbrawgCipher,
     device::{
         UmbrawgDeviceConfig, UmbrawgMagicHeader, EXTRA_PORTS_MAX,

@@ -312,6 +312,8 @@ static void uwg_setup(struct net_device *dev)
 	memset(uwg, 0, sizeof(*uwg));
 	uwg->dev = dev;
 	uwg->extra_ports = UWG_EXTRA_PORTS_DEFAULT;
+	uwg->bbr_mode = UWG_BBR_MODE_OFF;
+	uwg->fec_mode = UWG_FEC_MODE_OFF;
 
 	u32_range_init(&uwg->init_header, MESSAGE_HANDSHAKE_INITIATION, MESSAGE_HANDSHAKE_INITIATION);
 	u32_range_init(&uwg->resp_header, MESSAGE_HANDSHAKE_RESPONSE, MESSAGE_HANDSHAKE_RESPONSE);
