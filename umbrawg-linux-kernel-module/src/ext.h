@@ -94,6 +94,7 @@ struct uwg_peer_caps {
 	struct uwg_ext_caps local;
 	struct uwg_ext_caps peer;
 	bool peer_valid;
+	bool resend;
 	u8 send_attempts;
 	ktime_t next_send;
 	spinlock_t lock;
@@ -141,6 +142,8 @@ enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 bool uwg_ext_enabled(const struct uwg_device *uwg);
 int uwg_ext_build_caps(u8 *buf, size_t len, const struct uwg_ext_caps *caps);
 int uwg_ext_build_ack(u8 *buf, size_t len, const struct uwg_ext_ack *ack);
+int uwg_ext_build_fec_shard_header(u8 *buf, size_t len,
+				   const struct uwg_ext_fec_shard *shard);
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer);
 void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce);
 void uwg_ext_ack_timeout(struct uwg_peer *peer);

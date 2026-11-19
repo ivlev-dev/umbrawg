@@ -5,6 +5,8 @@
 #include "device.h"
 #include "queueing.h"
 #include "bbr.h"
+#include "fec.h"
+#include "fec_data.h"
 
 #include <linux/errno.h>
 #include <linux/jiffies.h>
@@ -105,7 +107,8 @@ int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
 	shard->shard_len = get_unaligned_le16(payload + 8);
 	shard->reserved = get_unaligned_le16(payload + 10);
 
-	if (!shard->k || !shard->m)
+	if (!shard->k || shard->k > UWG_FEC_MAX_DATA ||
+	    shard->m > UWG_FEC_MAX_PARITY)
 		return -EINVAL;
 	total = (u16)shard->k + shard->m;
 	if (total > UWG_FEC_MAX_SHARDS)
@@ -127,17 +130,24 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 			struct uwg_ext_caps *caps)
 {
 	u32 flags = 0;
+	u8 k = 0, m = 0;
+	bool adaptive = false;
 
 	memset(caps, 0, sizeof(*caps));
 	caps->ack_interval = UWG_EXT_DEFAULT_ACK_INTERVAL;
 
-	/* The kernel data path currently implements ACK feedback only.
-	 * Do not advertise BBR/FEC until their send/receive paths land,
-	 * otherwise a userspace peer would start sending FEC shards or
-	 * expect BBR encapsulation that the module cannot process.
-	 */
-	if (uwg->bbr_mode != UWG_BBR_MODE_OFF)
+	if (uwg->bbr_mode != UWG_BBR_MODE_OFF ||
+	    uwg->fec_mode != UWG_FEC_MODE_OFF)
 		flags |= UWG_EXT_CAP_ACK;
+
+	if (uwg->fec_mode != UWG_FEC_MODE_OFF &&
+	    uwg_fec_mode_config(uwg->fec_mode, &k, &m, &adaptive)) {
+		flags |= UWG_EXT_CAP_FEC;
+		if (adaptive)
+			flags |= UWG_EXT_CAP_FEC_ADAPTIVE;
+		caps->fec_k = k;
+		caps->fec_m = m;
+	}
 
 	caps->flags = flags;
 }
@@ -208,6 +218,35 @@ int uwg_ext_build_ack(u8 *buf, size_t len, const struct uwg_ext_ack *ack)
 	return (int)total;
 }
 
+int uwg_ext_build_fec_shard_header(u8 *buf, size_t len,
+				   const struct uwg_ext_fec_shard *shard)
+{
+	unsigned int total = (unsigned int)shard->k + shard->m;
+
+	if (len < UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN)
+		return -EMSGSIZE;
+	if (!shard->k || total > UWG_FEC_MAX_SHARDS ||
+	    shard->index >= total)
+		return -EINVAL;
+	if ((unsigned int)shard->shard_len +
+		    UWG_EXT_FEC_HEADER_LEN > 0xffffU)
+		return -EMSGSIZE;
+	if (!!(shard->flags & UWG_EXT_FEC_FLAG_PARITY) !=
+	    (shard->index >= shard->k))
+		return -EINVAL;
+
+	uwg_ext_write_header(buf, UWG_EXT_KIND_FEC_SHARD,
+			     UWG_EXT_FEC_HEADER_LEN + shard->shard_len);
+	put_unaligned_le32(shard->block_id, buf + 8);
+	buf[12] = shard->index;
+	buf[13] = shard->k;
+	buf[14] = shard->m;
+	buf[15] = shard->flags;
+	put_unaligned_le16(shard->shard_len, buf + 16);
+	put_unaligned_le16(shard->reserved, buf + 18);
+	return UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN;
+}
+
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 {
 	struct uwg_ext_caps local;
@@ -221,7 +260,8 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 	now = ktime_get();
 	spin_lock_bh(&peer->caps.lock);
 	uwg_ext_local_caps(peer->device, &peer->caps.local);
-	if (!peer->caps.local.flags || peer->caps.peer_valid ||
+	if (!peer->caps.local.flags ||
+	    (peer->caps.peer_valid && !peer->caps.resend) ||
 	    peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS ||
 	    (peer->caps.send_attempts &&
 	     ktime_before(now, peer->caps.next_send))) {
@@ -229,6 +269,7 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 		return;
 	}
 	++peer->caps.send_attempts;
+	peer->caps.resend = false;
 	peer->caps.next_send = ktime_add_ms(now, UWG_EXT_CAPS_RETRY_MS);
 	local = peer->caps.local;
 	spin_unlock_bh(&peer->caps.lock);
@@ -241,6 +282,7 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 	spin_lock_bh(&peer->caps.lock);
 	if (peer->caps.send_attempts)
 		--peer->caps.send_attempts;
+	peer->caps.resend = true;
 	peer->caps.next_send = 0;
 	spin_unlock_bh(&peer->caps.lock);
 	net_dbg_ratelimited("%s: Could not send CAPS to peer %llu\n",
@@ -448,14 +490,24 @@ static void uwg_ext_handle_ack(struct uwg_peer *peer, const u8 *payload,
 	uwg_ext_bbr_on_ack(peer, ack.largest, bitmap, ack.ack_delay_us);
 }
 
-static enum uwg_ext_rx_result uwg_ext_handle_fec_shard(const u8 *payload,
+static enum uwg_ext_rx_result uwg_ext_handle_fec_shard(struct uwg_peer *peer,
+						       struct sk_buff *skb,
+						       const u8 *payload,
 						       size_t len)
 {
 	struct uwg_ext_fec_shard shard;
+	u64 keypair_id;
+	int ret;
 
 	if (uwg_ext_parse_fec_shard(payload, len, &shard))
 		return UWG_EXT_RX_INVALID;
-	return UWG_EXT_RX_CONSUMED;
+	if (unlikely(!PACKET_CB(skb)->keypair))
+		return UWG_EXT_RX_INVALID;
+	keypair_id = PACKET_CB(skb)->keypair->internal_id;
+	ret = uwg_fec_rx_shard(peer, &shard, skb,
+			       UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN,
+			       keypair_id, true);
+	return ret ? UWG_EXT_RX_INVALID : UWG_EXT_RX_CONSUMED;
 }
 
 enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
@@ -498,7 +550,8 @@ enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 		    skb_copy_bits(skb, UWG_EXT_HEADER_LEN, fecbuf,
 				  UWG_EXT_FEC_HEADER_LEN))
 			return UWG_EXT_RX_INVALID;
-		return uwg_ext_handle_fec_shard(fecbuf, header.payload_len);
+		return uwg_ext_handle_fec_shard(peer, skb, fecbuf,
+						header.payload_len);
 	default:
 		return UWG_EXT_RX_INVALID;
 	}

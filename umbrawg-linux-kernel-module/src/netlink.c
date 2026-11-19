@@ -904,6 +904,10 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			goto out;
 		}
 		uwg->fec_mode = val32;
+		if (uwg_peer_fec_sync_device(uwg))
+			net_dbg_ratelimited(
+				"%s: Could not allocate FEC state for every peer\n",
+				uwg->dev->name);
 	}
 
 	if (info->attrs[UWGDEVICE_A_JC] ||

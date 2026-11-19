@@ -33,6 +33,8 @@ uwg_packet_percpu_multicore_worker_alloc(work_func_t function, void *ptr);
 /* receive.c APIs: */
 void uwg_packet_receive(struct uwg_device *uwg, struct sk_buff *skb);
 void uwg_packet_handshake_receive_worker(struct work_struct *work);
+void uwg_packet_deliver_inner(struct uwg_peer *peer, struct sk_buff *skb,
+			      u8 ds, bool use_napi);
 /* NAPI poll function: */
 int uwg_packet_rx_poll(struct napi_struct *napi, int budget);
 /* Workqueue worker: */
@@ -47,6 +49,8 @@ void uwg_packet_send_handshake_cookie(struct uwg_device *uwg,
 				     __le32 sender_index);
 void uwg_packet_send_keepalive(struct uwg_peer *peer);
 int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len);
+void uwg_packet_send_fec_frames(struct uwg_peer *peer,
+				struct sk_buff_head *frames);
 void uwg_packet_purge_staged_packets(struct uwg_peer *peer);
 void uwg_packet_send_staged_packets(struct uwg_peer *peer);
 /* Workqueue workers: */
@@ -69,6 +73,7 @@ struct packet_cb {
 	u32 padding;
 	u8 ds;
 	bool is_keepalive;
+	bool is_fec;
 };
 
 #define PACKET_CB(skb) ((struct packet_cb *)((skb)->cb))

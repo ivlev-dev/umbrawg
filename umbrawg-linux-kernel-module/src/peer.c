@@ -10,6 +10,7 @@
 #include "peerlookup.h"
 #include "noise.h"
 #include "bbr.h"
+#include "fec_data.h"
 
 #include <linux/kref.h>
 #include <linux/lockdep.h>
@@ -108,6 +109,8 @@ struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 	if (unlikely(uwg_peer_bbr_sync(peer)))
 		goto err_dst;
 	uwg_ext_peer_init(peer);
+	if (unlikely(uwg_peer_fec_sync(peer)))
+		goto err_fec;
 	peer->cipher = UWG_CIPHER_CHACHA20POLY1305;
 	uwg_noise_handshake_init(&peer->handshake, &uwg->static_identity,
 				public_key, preshared_key, peer);
@@ -135,6 +138,8 @@ struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 	pr_debug("%s: Peer %llu created\n", uwg->dev->name, peer->internal_id);
 	return peer;
 
+err_fec:
+	uwg_peer_bbr_release(peer);
 err_dst:
 	dst_cache_destroy(&peer->endpoint_cache);
 err:
@@ -221,6 +226,7 @@ static void peer_remove_after_dead(struct uwg_peer *peer)
 
 	--peer->device->num_peers;
 	uwg_peer_bbr_release(peer);
+	uwg_peer_fec_release(peer);
 	uwg_peer_put(peer);
 }
 
@@ -269,6 +275,7 @@ static void rcu_release(struct rcu_head *rcu)
 	 * this covers a peer created but never fully removed.
 	 */
 	kfree(rcu_dereference_protected(peer->bbr, 1));
+	uwg_peer_fec_rcu_free(peer);
 
 	/* The final zeroing takes care of clearing any remaining handshake key
 	 * material and other potentially sensitive information.

@@ -11,6 +11,7 @@
 #include "ratelimiter.h"
 #include "peer.h"
 #include "messages.h"
+#include "fec_data.h"
 
 #include <linux/module.h>
 #include <linux/rtnetlink.h>
@@ -201,6 +202,10 @@ static netdev_tx_t uwg_xmit(struct sk_buff *skb, struct net_device *dev)
 
 		PACKET_CB(skb)->mtu = mtu;
 		PACKET_CB(skb)->is_keepalive = false;
+		PACKET_CB(skb)->is_fec = false;
+
+		if (uwg_fec_tx_push(peer, skb, &packets))
+			continue;
 
 		__skb_queue_tail(&packets, skb);
 	}

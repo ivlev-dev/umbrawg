@@ -457,13 +457,86 @@ out:
 
 #include "selftest/counter.c"
 
+void uwg_packet_deliver_inner(struct uwg_peer *peer, struct sk_buff *skb,
+			      u8 ds, bool use_napi)
+{
+	struct net_device *dev = peer->device->dev;
+	struct uwg_peer *routed_peer;
+	unsigned int len, len_before_trim;
+
+	skb_reset_network_header(skb);
+
+	if (unlikely(skb_network_header(skb) < skb->head))
+		goto dishonest_packet_size;
+	if (unlikely(!(pskb_network_may_pull(skb, sizeof(struct iphdr)) &&
+		       (ip_hdr(skb)->version == 4 ||
+			(ip_hdr(skb)->version == 6 &&
+			 pskb_network_may_pull(skb, sizeof(struct ipv6hdr)))))))
+		goto dishonest_packet_type;
+
+	skb->dev = dev;
+	skb->ip_summed = CHECKSUM_UNNECESSARY;
+	skb->csum_level = ~0;
+	skb->protocol = ip_tunnel_parse_protocol(skb);
+	if (skb->protocol == htons(ETH_P_IP)) {
+		len = ntohs(ip_hdr(skb)->tot_len);
+		if (unlikely(len < sizeof(struct iphdr)))
+			goto dishonest_packet_size;
+		INET_ECN_decapsulate(skb, ds, ip_hdr(skb)->tos);
+	} else if (skb->protocol == htons(ETH_P_IPV6)) {
+		len = ntohs(ipv6_hdr(skb)->payload_len) +
+		      sizeof(struct ipv6hdr);
+		INET_ECN_decapsulate(skb, ds, ipv6_get_dsfield(ipv6_hdr(skb)));
+	} else {
+		goto dishonest_packet_type;
+	}
+
+	if (unlikely(len > skb->len))
+		goto dishonest_packet_size;
+	len_before_trim = skb->len;
+	if (unlikely(pskb_trim(skb, len)))
+		goto packet_processed;
+
+	routed_peer = uwg_allowedips_lookup_src(&peer->device->peer_allowedips,
+					       skb);
+	uwg_peer_put(routed_peer);
+	if (unlikely(routed_peer != peer))
+		goto dishonest_packet_peer;
+
+	if (use_napi)
+		napi_gro_receive(&peer->napi, skb);
+	else
+		netif_rx(skb);
+	update_rx_stats(peer, message_data_len(len_before_trim));
+	return;
+
+dishonest_packet_peer:
+	net_dbg_skb_ratelimited("%s: Packet has unallowed src IP (%pISc) from peer %llu (%pISpfsc)\n",
+				dev->name, skb, peer->internal_id,
+				&peer->endpoint.addr);
+	DEV_STATS_INC(dev, rx_errors);
+	DEV_STATS_INC(dev, rx_frame_errors);
+	goto packet_processed;
+dishonest_packet_type:
+	net_dbg_ratelimited("%s: Packet is neither ipv4 nor ipv6 from peer %llu (%pISpfsc)\n",
+			    dev->name, peer->internal_id, &peer->endpoint.addr);
+	DEV_STATS_INC(dev, rx_errors);
+	DEV_STATS_INC(dev, rx_frame_errors);
+	goto packet_processed;
+dishonest_packet_size:
+	net_dbg_ratelimited("%s: Packet has incorrect size from peer %llu (%pISpfsc)\n",
+			    dev->name, peer->internal_id, &peer->endpoint.addr);
+	DEV_STATS_INC(dev, rx_errors);
+	DEV_STATS_INC(dev, rx_length_errors);
+packet_processed:
+	kfree_skb(skb);
+}
+
 static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 					struct sk_buff *skb,
 					struct endpoint *endpoint)
 {
 	struct net_device *dev = peer->device->dev;
-	unsigned int len, len_before_trim;
-	struct uwg_peer *routed_peer;
 	u8 buf, *p = skb_header_pointer(skb, 0, 1, &buf);
 
 	uwg_socket_set_peer_endpoint(peer, endpoint);
@@ -515,73 +588,9 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 
 	uwg_timers_data_received(peer);
 
-	if (unlikely(skb_network_header(skb) < skb->head))
-		goto dishonest_packet_size;
-	if (unlikely(!(pskb_network_may_pull(skb, sizeof(struct iphdr)) &&
-		       (ip_hdr(skb)->version == 4 ||
-			(ip_hdr(skb)->version == 6 &&
-			 pskb_network_may_pull(skb, sizeof(struct ipv6hdr)))))))
-		goto dishonest_packet_type;
-
-	skb->dev = dev;
-	/* We've already verified the Poly1305 auth tag, which means this packet
-	 * was not modified in transit. We can therefore tell the networking
-	 * stack that all checksums of every layer of encapsulation have already
-	 * been checked "by the hardware" and therefore is unnecessary to check
-	 * again in software.
-	 */
-	skb->ip_summed = CHECKSUM_UNNECESSARY;
-	skb->csum_level = ~0; /* All levels */
-	skb->protocol = ip_tunnel_parse_protocol(skb);
-	if (skb->protocol == htons(ETH_P_IP)) {
-		len = ntohs(ip_hdr(skb)->tot_len);
-		if (unlikely(len < sizeof(struct iphdr)))
-			goto dishonest_packet_size;
-		INET_ECN_decapsulate(skb, PACKET_CB(skb)->ds, ip_hdr(skb)->tos);
-	} else if (skb->protocol == htons(ETH_P_IPV6)) {
-		len = ntohs(ipv6_hdr(skb)->payload_len) +
-		      sizeof(struct ipv6hdr);
-		INET_ECN_decapsulate(skb, PACKET_CB(skb)->ds, ipv6_get_dsfield(ipv6_hdr(skb)));
-	} else {
-		goto dishonest_packet_type;
-	}
-
-	if (unlikely(len > skb->len))
-		goto dishonest_packet_size;
-	len_before_trim = skb->len;
-	if (unlikely(pskb_trim(skb, len)))
-		goto packet_processed;
-
-	routed_peer = uwg_allowedips_lookup_src(&peer->device->peer_allowedips,
-					       skb);
-	uwg_peer_put(routed_peer); /* We don't need the extra reference. */
-
-	if (unlikely(routed_peer != peer))
-		goto dishonest_packet_peer;
-
-	napi_gro_receive(&peer->napi, skb);
-	update_rx_stats(peer, message_data_len(len_before_trim));
+	uwg_packet_deliver_inner(peer, skb, PACKET_CB(skb)->ds, true);
 	return;
 
-dishonest_packet_peer:
-	net_dbg_skb_ratelimited("%s: Packet has unallowed src IP (%pISc) from peer %llu (%pISpfsc)\n",
-				dev->name, skb, peer->internal_id,
-				&peer->endpoint.addr);
-	DEV_STATS_INC(dev, rx_errors);
-	DEV_STATS_INC(dev, rx_frame_errors);
-	goto packet_processed;
-dishonest_packet_type:
-	net_dbg_ratelimited("%s: Packet is neither ipv4 nor ipv6 from peer %llu (%pISpfsc)\n",
-			    dev->name, peer->internal_id, &peer->endpoint.addr);
-	DEV_STATS_INC(dev, rx_errors);
-	DEV_STATS_INC(dev, rx_frame_errors);
-	goto packet_processed;
-dishonest_packet_size:
-	net_dbg_ratelimited("%s: Packet has incorrect size from peer %llu (%pISpfsc)\n",
-			    dev->name, peer->internal_id, &peer->endpoint.addr);
-	DEV_STATS_INC(dev, rx_errors);
-	DEV_STATS_INC(dev, rx_length_errors);
-	goto packet_processed;
 packet_processed:
 	dev_kfree_skb(skb);
 }

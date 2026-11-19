@@ -22,6 +22,8 @@
 
 struct uwg_device;
 struct uwg_bbr;
+struct uwg_fec_tx;
+struct uwg_fec_rx;
 
 struct endpoint {
 	union {
@@ -77,6 +79,8 @@ struct uwg_peer {
 	struct uwg_peer_ack_tracker ack_tracker;
 	struct uwg_peer_ack_state ack_state;
 	struct uwg_bbr __rcu *bbr;
+	struct uwg_fec_tx __rcu *fec_tx;
+	struct uwg_fec_rx __rcu *fec_rx;
 	spinlock_t bbr_lock;
 };
 
@@ -88,6 +92,10 @@ struct uwg_bbr *uwg_peer_bbr_lookup(struct uwg_peer *peer);
 void uwg_peer_bbr_release(struct uwg_peer *peer);
 int uwg_peer_bbr_sync(struct uwg_peer *peer);
 int uwg_peer_bbr_sync_device(struct uwg_device *uwg);
+
+int uwg_peer_fec_sync(struct uwg_peer *peer);
+int uwg_peer_fec_sync_device(struct uwg_device *uwg);
+void uwg_peer_fec_release(struct uwg_peer *peer);
 
 struct uwg_peer *__must_check uwg_peer_get_maybe_zero(struct uwg_peer *peer);
 static inline struct uwg_peer *uwg_peer_get(struct uwg_peer *peer)

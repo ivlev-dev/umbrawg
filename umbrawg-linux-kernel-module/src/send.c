@@ -369,6 +369,7 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 		skb->dev = peer->device->dev;
 		PACKET_CB(skb)->mtu = skb->dev->mtu;
 		PACKET_CB(skb)->is_keepalive = true;
+		PACKET_CB(skb)->is_fec = false;
 		skb_queue_tail(&peer->staged_packet_queue, skb);
 		net_dbg_ratelimited("%s: Sending keepalive packet to peer %llu (%pISpfsc)\n",
 				    peer->device->dev->name, peer->internal_id,
@@ -548,8 +549,15 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 		unsigned int len = skbs[i]->len;
 		u8 ds = PACKET_CB(skbs[i])->ds;
 
-		for (j = i + 1; j < nskbs; ++j) {
-			if (skbs[j]->len != len || PACKET_CB(skbs[j])->ds != ds)
+		j = i + 1;
+		if (PACKET_CB(skbs[i])->is_fec)
+			goto send_group;
+
+		for (; j < nskbs; ++j) {
+			if (skbs[j]->len != len ||
+			    PACKET_CB(skbs[j])->ds != ds)
+				break;
+			if (PACKET_CB(skbs[j])->is_fec)
 				break;
 			if (j - i >= UWG_GSO_SEGS_MAX)
 				break;
@@ -557,6 +565,7 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 				break;
 		}
 
+send_group:
 		if (j - i > 1 && uwg_packet_send_gso(peer, skbs + i, j - i,
 						     &data_sent)) {
 			i = j;
@@ -705,6 +714,7 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 	PACKET_CB(skb)->mtu = skb->dev->mtu;
 	PACKET_CB(skb)->ds = 0;
 	PACKET_CB(skb)->is_keepalive = false;
+	PACKET_CB(skb)->is_fec = false;
 	PACKET_CB(skb)->nonce =
 		atomic64_inc_return(&keypair->sending_counter) - 1;
 	if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES)) {
@@ -726,6 +736,21 @@ void uwg_packet_purge_staged_packets(struct uwg_peer *peer)
 		      peer->staged_packet_queue.qlen);
 	__skb_queue_purge(&peer->staged_packet_queue);
 	spin_unlock_bh(&peer->staged_packet_queue.lock);
+}
+
+void uwg_packet_send_fec_frames(struct uwg_peer *peer,
+				struct sk_buff_head *frames)
+{
+	if (skb_queue_empty(frames))
+		return;
+	if (unlikely(READ_ONCE(peer->is_dead))) {
+		__skb_queue_purge(frames);
+		return;
+	}
+	spin_lock_bh(&peer->staged_packet_queue.lock);
+	skb_queue_splice_tail(frames, &peer->staged_packet_queue);
+	spin_unlock_bh(&peer->staged_packet_queue.lock);
+	uwg_packet_send_staged_packets(peer);
 }
 
 void uwg_packet_send_staged_packets(struct uwg_peer *peer)
@@ -764,7 +789,8 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 		/* 0 for no outer TOS: no leak. TODO: at some later point, we
 		 * might consider using flowi->tos as outer instead.
 		 */
-		PACKET_CB(skb)->ds = ip_tunnel_ecn_encap(0, ip_hdr(skb), skb);
+		PACKET_CB(skb)->ds = PACKET_CB(skb)->is_fec ?
+			0 : ip_tunnel_ecn_encap(0, ip_hdr(skb), skb);
 		PACKET_CB(skb)->nonce =
 				atomic64_inc_return(&keypair->sending_counter) - 1;
 		if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES))
