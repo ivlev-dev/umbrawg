@@ -14,6 +14,7 @@
 #include "type.h"
 #include "aead.h"
 #include "ext.h"
+#include "fec_data.h"
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
 
@@ -552,6 +553,12 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 
 	uwg_timers_any_authenticated_packet_received(peer);
 	uwg_timers_any_authenticated_packet_traversal(peer);
+
+	/* Retry capability negotiation on any authenticated traffic: the first
+	 * CAPS frame may have raced the keypair installation on the peer.
+	 */
+	uwg_ext_maybe_send_caps(peer);
+	uwg_fec_adaptive_observe(peer, PACKET_CB(skb)->nonce);
 
 	if (unlikely(peer->device->bbr_mode != UWG_BBR_MODE_OFF ||
 		     peer->device->fec_mode != UWG_FEC_MODE_OFF)) {

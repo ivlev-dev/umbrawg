@@ -1,7 +1,6 @@
 //! Peer-level protocol extension: capabilities, ACK feedback, BBRv3 and FEC.
 
 use std::collections::VecDeque;
-
 use std::time::{Duration, Instant};
 
 use umbrawg_cc::{Ack as BbrAck, Bbr, BbrConfig};
@@ -236,6 +235,7 @@ impl AckTracker {
 
     fn due(&self, now: Instant) -> bool {
         self.largest.is_some()
+            && self.received_since > 0
             && (self.received_since >= self.interval
                 || self.last_sent.is_none_or(|sent| {
                     now.saturating_duration_since(sent) >= Duration::from_millis(1)

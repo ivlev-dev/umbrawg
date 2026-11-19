@@ -140,12 +140,14 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 	    uwg->fec_mode != UWG_FEC_MODE_OFF)
 		flags |= UWG_EXT_CAP_ACK;
 
-	/* Mixed kernel<->userspace FEC bulk path is still under debug;
-	 * advertise ACK only to keep mixed deployments on the legacy path.
-	 */
-	(void)k;
-	(void)m;
-	(void)adaptive;
+	if (uwg->fec_mode != UWG_FEC_MODE_OFF &&
+	    uwg_fec_mode_config(uwg->fec_mode, &k, &m, &adaptive)) {
+		flags |= UWG_EXT_CAP_FEC;
+		if (adaptive)
+			flags |= UWG_EXT_CAP_FEC_ADAPTIVE;
+		caps->fec_k = k;
+		caps->fec_m = m;
+	}
 
 	caps->flags = flags;
 }
@@ -282,7 +284,13 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 	}
 	++peer->caps.send_attempts;
 	peer->caps.resend = false;
-	peer->caps.next_send = ktime_add_ms(now, UWG_EXT_CAPS_RETRY_MS);
+	/* The very first CAPS frame races with the peer installing the new
+	 * keypair and can be lost. Retry quickly at first, then back off.
+	 */
+	peer->caps.next_send = ktime_add_ms(
+		now, peer->caps.send_attempts < UWG_EXT_CAPS_MAX_ATTEMPTS ?
+			     UWG_EXT_CAPS_FAST_RETRY_MS :
+			     UWG_EXT_CAPS_RETRY_MS);
 	local = peer->caps.local;
 	spin_unlock_bh(&peer->caps.lock);
 
@@ -457,7 +465,16 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	uwg_ext_local_caps(peer->device, &peer->caps.local);
 	peer->caps.peer = caps;
 	peer->caps.peer_valid = true;
+	/* Our own CAPS frame may have been sent before the peer installed the
+	 * new keypair and was lost. Hearing from the peer is a good moment to
+	 * (re)send ours; the attempt counter keeps this bounded.
+	 */
+	if (peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
+		peer->caps.send_attempts = UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
+	peer->caps.resend = true;
+	peer->caps.next_send = 0;
 	spin_unlock_bh(&peer->caps.lock);
+	uwg_ext_maybe_send_caps(peer);
 }
 
 static void uwg_ext_bbr_on_ack(struct uwg_peer *peer, u64 largest, u64 bitmap,

@@ -36,6 +36,7 @@ struct uwg_peer;
 
 #define UWG_EXT_CAPS_MAX_ATTEMPTS 3
 #define UWG_EXT_CAPS_RETRY_MS 2000
+#define UWG_EXT_CAPS_FAST_RETRY_MS 250
 
 #define UWG_EXT_CAP_BBR BIT(0)
 #define UWG_EXT_CAP_ACK BIT(1)

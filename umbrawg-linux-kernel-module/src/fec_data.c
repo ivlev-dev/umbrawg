@@ -25,6 +25,14 @@ struct uwg_fec_tx {
 	u8 k;
 	u8 m;
 	bool adaptive;
+	bool adaptive_on;
+	bool adaptive_valid;
+	u64 adaptive_largest;
+	u64 adaptive_base;
+	u64 adaptive_received;
+	u64 adaptive_observed;
+	u32 adaptive_loss_q16;
+	unsigned long adaptive_clean_since;
 	u8 count;
 	u16 lens[UWG_FEC_DATA_MAX_K];
 	u8 *shards;
@@ -90,14 +98,75 @@ bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive)
 
 static unsigned int uwg_fec_tx_limit(const struct uwg_peer *peer)
 {
-	int mtu = READ_ONCE(peer->device->dev->mtu);
-	int limit = mtu - 48;
+	int limit = READ_ONCE(peer->device->dev->mtu) + 2;
 
+	/* The TUN MTU is already derived from the underlay MTU with the tunnel
+	 * overhead subtracted, so a shard carrying one full-size inner packet
+	 * plus the FEC/ext headers still fits an underlay datagram. The extra
+	 * two bytes are the u16 packet length prefix of a shard.
+	 */
 	if (limit > UWG_FEC_DATA_SHARD_CAP)
 		limit = UWG_FEC_DATA_SHARD_CAP;
 	if (limit < 64)
 		limit = 64;
 	return (unsigned int)limit;
+}
+
+void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter)
+{
+	struct uwg_fec_tx *tx;
+	u64 expected, lost, loss_q16;
+
+	rcu_read_lock();
+	tx = rcu_dereference(peer->fec_tx);
+	if (!tx || !tx->adaptive)
+		goto out;
+	spin_lock_bh(&tx->lock);
+	if (!tx->adaptive_valid) {
+		tx->adaptive_valid = true;
+		tx->adaptive_largest = counter;
+		tx->adaptive_base = counter;
+		tx->adaptive_received = 1;
+		goto unlock;
+	}
+	if (counter < tx->adaptive_base)
+		goto unlock;
+	if (counter > tx->adaptive_largest)
+		tx->adaptive_largest = counter;
+	tx->adaptive_received++;
+	expected = tx->adaptive_largest - tx->adaptive_base + 1;
+	if (expected < 256)
+		goto unlock;
+	if (unlikely(expected > 1U << 20)) {
+		/* Drop an implausible gap instead of overflowing the estimate. */
+		tx->adaptive_base = tx->adaptive_largest + 1;
+		tx->adaptive_received = 0;
+		goto unlock;
+	}
+	lost = expected > tx->adaptive_received ?
+		expected - tx->adaptive_received : 0;
+	loss_q16 = (u32)div_u64(lost << 16, expected);
+	tx->adaptive_loss_q16 = (tx->adaptive_loss_q16 * 3 + loss_q16) / 4;
+	tx->adaptive_observed += expected;
+	tx->adaptive_base = tx->adaptive_largest + 1;
+	tx->adaptive_received = 0;
+	if (!tx->adaptive_on) {
+		if (tx->adaptive_observed >= 1024 &&
+		    tx->adaptive_loss_q16 > 655)
+			tx->adaptive_on = true;
+	} else if (tx->adaptive_loss_q16 < 131) {
+		if (!tx->adaptive_clean_since)
+			tx->adaptive_clean_since = jiffies;
+		else if (time_after(jiffies,
+				    tx->adaptive_clean_since + 5 * HZ))
+			tx->adaptive_on = false;
+	} else {
+		tx->adaptive_clean_since = 0;
+	}
+unlock:
+	spin_unlock_bh(&tx->lock);
+out:
+	rcu_read_unlock();
 }
 
 bool uwg_fec_peer_tx_ready(const struct uwg_peer *peer)
@@ -254,9 +323,23 @@ bool uwg_fec_tx_push(struct uwg_peer *peer, struct sk_buff *skb,
 
 	if (!uwg_fec_peer_tx_ready(peer))
 		return false;
+	if (skb->len + 2 > uwg_fec_tx_limit(peer))
+		return false;
+	/* The shard payload is a byte copy of the plaintext packet taken before
+	 * the regular send path finalizes checksums. Complete them first, or a
+	 * receiver that verifies inner checksums (userspace) drops the packet.
+	 * Done outside the FEC lock: skb_checksum_help may allocate.
+	 */
+	if (unlikely(skb->ip_summed == CHECKSUM_PARTIAL &&
+		     skb_checksum_help(skb)))
+		return false;
 
 	rcu_read_lock();
 	tx = rcu_dereference(peer->fec_tx);
+	if (tx && tx->adaptive && !READ_ONCE(tx->adaptive_on)) {
+		rcu_read_unlock();
+		return false;
+	}
 	if (tx) {
 		spin_lock_bh(&tx->lock);
 		if (tx->count && skb->len + 2 > uwg_fec_tx_limit(peer))

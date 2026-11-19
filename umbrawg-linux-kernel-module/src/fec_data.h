@@ -19,6 +19,8 @@ struct uwg_fec_rx;
 #define UWG_FEC_DATA_BLOCK_TIMEOUT_US 5000
 #define UWG_FEC_DATA_TX_DELAY_US 1000
 
+void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter);
+
 bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive);
 bool uwg_fec_peer_tx_ready(const struct uwg_peer *peer);
 bool uwg_fec_tx_push(struct uwg_peer *peer, struct sk_buff *skb,
