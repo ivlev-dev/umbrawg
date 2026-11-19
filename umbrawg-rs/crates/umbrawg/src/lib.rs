@@ -343,7 +343,7 @@ fn open_socket_set(
     fwmark: u32,
     buffer: usize,
     limits: GsoLimits,
-    disable_gso: bool,
+    gso_segments: Option<usize>,
 ) -> io::Result<SocketSet> {
     let mut sockets = Vec::with_capacity(extra + 1);
     let primary = open_socket(port, fwmark, buffer, limits)?;
@@ -366,9 +366,9 @@ fn open_socket_set(
         }
     }
     let set = SocketSet::new(sockets).map_err(|error| io::Error::other(error.to_string()))?;
-    if disable_gso {
+    if let Some(segments) = gso_segments {
         for socket in set.all() {
-            socket.disable_gso();
+            socket.limit_gso_segments(segments);
         }
     }
     Ok(set)
@@ -751,7 +751,7 @@ fn worker_loop(
                 want_mark,
                 socket_buffer,
                 underlay.gso_limits(),
-                device.fec_enabled(),
+                device.fec_gso_segments(),
             ) {
                 Ok(new_socket) => {
                     bound_extra = Some(want_extra);
@@ -982,7 +982,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
 
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
-        .with_offload(device.ext_config().fec == FecMode::Off)
+        .with_offload(true)
         .with_vnet_hdr_size(VirtioNetHdr::LEN)
         .with_nonblocking(true)
         .with_mtu(u32::from(device.mtu()));
@@ -1082,7 +1082,7 @@ fn run_parallel(
     let workers = parallel.workers;
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
-        .with_offload(device.ext_config().fec == FecMode::Off)
+        .with_offload(true)
         .with_vnet_hdr_size(VirtioNetHdr::LEN)
         .with_nonblocking(true)
         .with_mtu(u32::from(device.mtu()));

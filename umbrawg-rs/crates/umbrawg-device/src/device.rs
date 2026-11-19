@@ -336,6 +336,13 @@ impl Device {
     }
 
     #[must_use]
+    pub fn fec_gso_segments(&self) -> Option<usize> {
+        let config = self.ext_config();
+        let fec = config.fec.config()?;
+        Some(fec.m().max(1))
+    }
+
+    #[must_use]
     pub fn fec_enabled(&self) -> bool {
         self.ext_config.read().fec != crate::FecMode::Off
     }

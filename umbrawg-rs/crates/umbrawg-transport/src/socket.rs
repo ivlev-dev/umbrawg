@@ -194,6 +194,7 @@ pub struct Socket {
     mtu: u32,
     limits: GsoLimits,
     gso_enabled: AtomicBool,
+    max_segments_limit: AtomicUsize,
     gro: bool,
 }
 
@@ -257,6 +258,7 @@ impl Socket {
             mtu,
             limits,
             gso_enabled: AtomicBool::new(gso),
+            max_segments_limit: AtomicUsize::new(usize::MAX),
             gro,
         })
     }
@@ -334,7 +336,15 @@ impl Socket {
 
     /// Maximum number of segments in one GSO super-datagram.
     pub fn max_segments(&self) -> usize {
-        self.limits.max_segments()
+        self.limits
+            .max_segments()
+            .min(self.max_segments_limit.load(Ordering::Relaxed))
+    }
+
+    /// Caps how many segments a single GSO datagram may carry.
+    pub fn limit_gso_segments(&self, segments: usize) {
+        self.max_segments_limit
+            .store(segments.max(1), Ordering::Relaxed);
     }
 
     /// Maximum size of a GSO super-datagram in bytes.

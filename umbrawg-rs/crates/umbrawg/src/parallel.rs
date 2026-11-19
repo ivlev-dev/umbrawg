@@ -681,7 +681,7 @@ pub(crate) fn rx_loop(
                 want_mark,
                 socket_buffer,
                 underlay.gso_limits(),
-                device.fec_enabled(),
+                device.fec_gso_segments(),
             ) {
                 Ok(new_socket) => {
                     log::info!(
