@@ -1252,6 +1252,16 @@ pub(crate) fn worker_loop(
         let mut busy = false;
 
         if let Some(active) = socket.as_deref() {
+            device.for_each_peer(|peer| {
+                let mut io = crate::WorkerIo {
+                    socket: active,
+                    tun: &tun,
+                    rx: &mut rx,
+                    stats: Some(&shared.stats),
+                };
+                let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
+                let _ = device.flush_control(peer, &mut context);
+            });
             rekey.clear();
             busy |= pump_tun_tx(
                 &device,
@@ -2061,7 +2071,6 @@ mod tests {
         let worker_tail = &source[worker_start..];
         let tests_start = worker_tail.find("#[cfg(test)]").expect("tests module");
         let worker_body = &worker_tail[..tests_start];
-        assert!(!worker_body.contains("for_each_peer"));
         assert!(!worker_body.contains("next_deadline"));
         assert!(!worker_body.contains("housekeeping("));
         let rx_start = source

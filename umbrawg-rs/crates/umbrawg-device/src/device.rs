@@ -1101,31 +1101,43 @@ impl Device {
         if let Some(block) = peer.extension().fec_flush_due(ctx.now) {
             let _ = self.send_fec_block_direct(peer, &block, ctx);
         }
-        if peer.current_keypair().is_some() {
-            let frames = peer.extension().pending_control(ctx.now);
-            for frame in frames {
-                let mut dst = [0u8; 1024];
-                match self.encrypt_packet(peer, &frame, &mut dst, ctx.rng, ctx.now) {
-                    Ok(length) => {
-                        let Some(endpoint) = peer.endpoint() else {
-                            peer.extension().push_control(frame);
-                            break;
-                        };
-                        ctx.io
-                            .send_datagram(endpoint, Some(peer), &dst[..length], None);
-                        peer.add_tx(length as u64);
-                        peer.extension().note_caps_sent(ctx.now);
-                        sent += 1;
-                    }
-                    Err(DeviceError::NoKeypair | DeviceError::KeypairExpired) => {
+        sent += self.flush_control(peer, ctx);
+        Ok(sent)
+    }
+
+    /// Sends pending CAPS/ACK frames without touching staged data.
+    pub fn flush_control<R: RngCore, S: DatagramSink>(
+        &self,
+        peer: &Arc<Peer>,
+        ctx: &mut IoContext<'_, R, S>,
+    ) -> usize {
+        if peer.current_keypair().is_none() {
+            return 0;
+        }
+        let mut sent = 0;
+        let frames = peer.extension().pending_control(ctx.now);
+        for frame in frames {
+            let mut dst = [0u8; 1024];
+            match self.encrypt_packet(peer, &frame, &mut dst, ctx.rng, ctx.now) {
+                Ok(length) => {
+                    let Some(endpoint) = peer.endpoint() else {
                         peer.extension().push_control(frame);
                         break;
-                    }
-                    Err(_) => {}
+                    };
+                    ctx.io
+                        .send_datagram(endpoint, Some(peer), &dst[..length], None);
+                    peer.add_tx(length as u64);
+                    peer.extension().note_caps_sent(ctx.now);
+                    sent += 1;
                 }
+                Err(DeviceError::NoKeypair | DeviceError::KeypairExpired) => {
+                    peer.extension().push_control(frame);
+                    break;
+                }
+                Err(_) => {}
             }
         }
-        Ok(sent)
+        sent
     }
 
     pub fn encrypt_batch<R: RngCore>(

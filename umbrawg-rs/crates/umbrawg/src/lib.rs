@@ -782,6 +782,16 @@ fn worker_loop(
         if bound_mark != Some(want_mark) && apply_socket_mark(active, want_mark) {
             bound_mark = Some(want_mark);
         }
+        device.for_each_peer(|peer| {
+            let mut io = WorkerIo {
+                socket: active,
+                tun: &tun,
+                rx: &mut rx,
+                stats: None,
+            };
+            let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
+            let _ = device.flush_control(peer, &mut context);
+        });
         rekey.clear();
         let mut busy = pump_tun_tx(
             &device,
