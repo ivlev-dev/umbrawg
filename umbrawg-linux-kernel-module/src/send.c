@@ -14,6 +14,7 @@
 #include "cookie.h"
 #include "type.h"
 #include "aead.h"
+#include "ext.h"
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
 
@@ -164,6 +165,7 @@ void uwg_packet_send_handshake_response(struct uwg_peer *peer)
 						      sizeof(packet),
 						      HANDSHAKE_DSCP,
 							  uwg->resp_padding, true);
+			uwg_ext_maybe_send_caps(peer);
 		}
 	}
 }
@@ -580,6 +582,57 @@ err:
 	uwg_noise_keypair_put(PACKET_CB(first)->keypair, false);
 	uwg_peer_put(peer);
 	kfree_skb_list(first);
+}
+
+int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
+{
+	struct uwg_device *uwg = peer->device;
+	struct noise_keypair *keypair;
+	struct sk_buff *skb;
+
+	if (unlikely(!len || len > U16_MAX))
+		return -EMSGSIZE;
+	if (unlikely(READ_ONCE(peer->is_dead)))
+		return -ENODEV;
+
+	rcu_read_lock_bh();
+	keypair = uwg_noise_keypair_get(
+		rcu_dereference_bh(peer->keypairs.current_keypair));
+	rcu_read_unlock_bh();
+	if (unlikely(!keypair))
+		return -ENOKEY;
+	if (unlikely(!READ_ONCE(keypair->sending.is_valid)) ||
+	    unlikely(uwg_birthdate_has_expired(keypair->sending.birthdate,
+					       REJECT_AFTER_TIME)) ||
+	    unlikely(atomic64_read(&keypair->sending_counter) >=
+		     REJECT_AFTER_MESSAGES)) {
+		uwg_noise_keypair_put(keypair, false);
+		return -EKEYREJECTED;
+	}
+
+	skb = alloc_skb(DATA_PACKET_HEAD_ROOM + len, GFP_ATOMIC);
+	if (unlikely(!skb)) {
+		uwg_noise_keypair_put(keypair, false);
+		return -ENOMEM;
+	}
+	skb_reserve(skb, DATA_PACKET_HEAD_ROOM);
+	skb_put_data(skb, frame, len);
+	skb->dev = uwg->dev;
+	PACKET_CB(skb)->mtu = skb->dev->mtu;
+	PACKET_CB(skb)->ds = 0;
+	PACKET_CB(skb)->is_keepalive = false;
+	PACKET_CB(skb)->nonce =
+		atomic64_inc_return(&keypair->sending_counter) - 1;
+	if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES)) {
+		WRITE_ONCE(keypair->sending.is_valid, false);
+		uwg_noise_keypair_put(keypair, false);
+		kfree_skb(skb);
+		return -EOVERFLOW;
+	}
+	PACKET_CB(skb)->keypair = keypair;
+	uwg_peer_get(peer);
+	uwg_packet_create_data(peer, skb);
+	return 0;
 }
 
 void uwg_packet_purge_staged_packets(struct uwg_peer *peer)

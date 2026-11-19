@@ -46,6 +46,7 @@ void uwg_packet_send_handshake_cookie(struct uwg_device *uwg,
 				     struct sk_buff *initiating_skb,
 				     __le32 sender_index);
 void uwg_packet_send_keepalive(struct uwg_peer *peer);
+int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len);
 void uwg_packet_purge_staged_packets(struct uwg_peer *peer);
 void uwg_packet_send_staged_packets(struct uwg_peer *peer);
 /* Workqueue workers: */

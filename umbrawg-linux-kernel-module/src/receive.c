@@ -260,6 +260,7 @@ static void uwg_receive_handshake_packet(struct uwg_device *uwg,
 						     &peer->keypairs)) {
 			uwg_timers_session_derived(peer);
 			uwg_timers_handshake_complete(peer);
+			uwg_ext_maybe_send_caps(peer);
 			/* Calling this function will either send any existing
 			 * packets in the queue and not send a keepalive, which
 			 * is the best case, Or, if there's nothing in the
@@ -471,6 +472,7 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 						    PACKET_CB(skb)->keypair))) {
 		uwg_timers_handshake_complete(peer);
 		uwg_packet_send_staged_packets(peer);
+		uwg_ext_maybe_send_caps(peer);
 	}
 
 	keep_key_fresh(peer);
@@ -496,6 +498,9 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 			break;
 		}
 	}
+
+	uwg_ext_data_received(peer, PACKET_CB(skb)->keypair->internal_id,
+			      PACKET_CB(skb)->nonce);
 
 	/* A packet with length 0, or with all zeroes (content padding)
 	 * is a keepalive packet

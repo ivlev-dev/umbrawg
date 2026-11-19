@@ -58,7 +58,7 @@ struct uwg_peer {
 	atomic64_t rx_bytes, tx_bytes;
 	struct timer_list timer_retransmit_handshake, timer_send_keepalive;
 	struct timer_list timer_new_handshake, timer_zero_key_material;
-	struct timer_list timer_persistent_keepalive;
+	struct timer_list timer_persistent_keepalive, timer_send_ack;
 	unsigned int timer_handshake_attempts;
 	unsigned int max_handshake_attempts;
 	u32 persistent_keepalive_interval;
@@ -74,6 +74,7 @@ struct uwg_peer {
 	unsigned int udp_window;
 	struct uwg_peer_caps caps;
 	struct uwg_peer_ack_tracker ack_tracker;
+	struct uwg_peer_ack_state ack_state;
 };
 
 struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,

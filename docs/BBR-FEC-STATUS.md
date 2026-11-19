@@ -61,10 +61,14 @@
   `UMBRAWG_FEC_SHARD`, `UMBRAWG_ACK_INTERVAL` остаются для стенда.
 - Netlink: `UWGDEVICE_A_BBR=36` (u8 0/1/2) и `UWGDEVICE_A_FEC=37`
   (`0`/`1`/`(K<<8)|M`) уже принимаются и отдаются модулем и tools.
-- Ядро: добавлены `ext.c`/`ext.h`, приём и валидация CAPS/ACK/
-  FEC_SHARD после расшифровки. CAPS сохраняет возможности пира, ACK —
-  трекер (largest/bitmap). Отправка CAPS/ACK из ядра — следующий этап;
-  FEC/BBR data-plane ядра пока не реализован.
+- Ядро: `ext.c`/`ext.h`, приём CAPS/ACK/FEC_SHARD и отправка CAPS/ACK
+  через crypto-queue. CAPS: до 3 попыток раз в 2 с; ACK: каждые 2
+  пакета/1 мс, bitmap 64 бита, ACK-на-ACK исключён.
+- Модуль пока анонсирует **только ACK** (не BBR/FEC), чтобы userspace
+  пир не включал FEC/BBR, которые kernel data-plane ещё не умеет.
+  Netlink-настройки bbr/fec сохраняются и видны.
+- Проверен интероп kernel↔Rust при kernel `bbr on, fec 2:1`: ping 0%,
+  TCP 2791 Мбит/с, UDP 400/0.
 - Порт в ядро не начат.
 
 ## Следующие шаги

@@ -6,6 +6,7 @@
 #include <linux/types.h>
 #include <linux/bits.h>
 #include <linux/ktime.h>
+#include <linux/spinlock.h>
 
 struct sk_buff;
 struct uwg_device;
@@ -26,6 +27,15 @@ struct uwg_peer;
 #define UWG_EXT_ACK_HEADER_LEN 16
 #define UWG_EXT_ACK_BITMAP_MAX 8
 #define UWG_EXT_FEC_HEADER_LEN 12
+
+#define UWG_EXT_MAX_FRAME_LEN \
+	(UWG_EXT_HEADER_LEN + UWG_EXT_ACK_HEADER_LEN + UWG_EXT_ACK_BITMAP_MAX)
+
+#define UWG_EXT_ACK_BITMAP_BITS (UWG_EXT_ACK_BITMAP_MAX * 8)
+#define UWG_EXT_ACK_MIN_INTERVAL_MS 1
+
+#define UWG_EXT_CAPS_MAX_ATTEMPTS 3
+#define UWG_EXT_CAPS_RETRY_MS 2000
 
 #define UWG_EXT_CAP_BBR BIT(0)
 #define UWG_EXT_CAP_ACK BIT(1)
@@ -84,6 +94,21 @@ struct uwg_peer_caps {
 	struct uwg_ext_caps local;
 	struct uwg_ext_caps peer;
 	bool peer_valid;
+	u8 send_attempts;
+	ktime_t next_send;
+	spinlock_t lock;
+};
+
+struct uwg_peer_ack_state {
+	u64 largest;
+	u64 bitmap;
+	u64 keypair_id;
+	u32 pending;
+	ktime_t largest_ktime;
+	ktime_t last_ack_ktime;
+	bool valid;
+	bool sent;
+	spinlock_t lock;
 };
 
 struct uwg_peer_ack_tracker {
@@ -112,5 +137,12 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 void uwg_ext_peer_init(struct uwg_peer *peer);
 enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 				       struct sk_buff *skb);
+
+bool uwg_ext_enabled(const struct uwg_device *uwg);
+int uwg_ext_build_caps(u8 *buf, size_t len, const struct uwg_ext_caps *caps);
+int uwg_ext_build_ack(u8 *buf, size_t len, const struct uwg_ext_ack *ack);
+void uwg_ext_maybe_send_caps(struct uwg_peer *peer);
+void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce);
+void uwg_ext_ack_timeout(struct uwg_peer *peer);
 
 #endif /* _UWG_EXT_H */

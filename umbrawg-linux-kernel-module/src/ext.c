@@ -3,6 +3,7 @@
 #include "ext.h"
 #include "peer.h"
 #include "device.h"
+#include "queueing.h"
 
 #include <linux/errno.h>
 #include <linux/jiffies.h>
@@ -129,20 +130,13 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 	memset(caps, 0, sizeof(*caps));
 	caps->ack_interval = UWG_EXT_DEFAULT_ACK_INTERVAL;
 
+	/* The kernel data path currently implements ACK feedback only.
+	 * Do not advertise BBR/FEC until their send/receive paths land,
+	 * otherwise a userspace peer would start sending FEC shards or
+	 * expect BBR encapsulation that the module cannot process.
+	 */
 	if (uwg->bbr_mode != UWG_BBR_MODE_OFF)
-		flags |= UWG_EXT_CAP_BBR | UWG_EXT_CAP_ACK;
-
-	if (uwg->fec_mode != UWG_FEC_MODE_OFF) {
-		flags |= UWG_EXT_CAP_FEC;
-		if (uwg->fec_mode == UWG_FEC_MODE_ADAPTIVE) {
-			flags |= UWG_EXT_CAP_FEC_ADAPTIVE;
-			caps->fec_k = UWG_EXT_DEFAULT_FEC_K;
-			caps->fec_m = UWG_EXT_DEFAULT_FEC_M;
-		} else {
-			caps->fec_k = (u8)(uwg->fec_mode >> 8);
-			caps->fec_m = (u8)uwg->fec_mode;
-		}
-	}
+		flags |= UWG_EXT_CAP_ACK;
 
 	caps->flags = flags;
 }
@@ -151,7 +145,250 @@ void uwg_ext_peer_init(struct uwg_peer *peer)
 {
 	memset(&peer->caps, 0, sizeof(peer->caps));
 	memset(&peer->ack_tracker, 0, sizeof(peer->ack_tracker));
+	memset(&peer->ack_state, 0, sizeof(peer->ack_state));
+	spin_lock_init(&peer->caps.lock);
+	spin_lock_init(&peer->ack_state.lock);
 	uwg_ext_local_caps(peer->device, &peer->caps.local);
+}
+
+bool uwg_ext_enabled(const struct uwg_device *uwg)
+{
+	return READ_ONCE(uwg->bbr_mode) != UWG_BBR_MODE_OFF ||
+	       READ_ONCE(uwg->fec_mode) != UWG_FEC_MODE_OFF;
+}
+
+static void uwg_ext_write_header(u8 *buf, u8 kind, u16 payload_len)
+{
+	buf[0] = UWG_EXT_TAG;
+	buf[1] = UWG_EXT_MAGIC_0;
+	buf[2] = UWG_EXT_MAGIC_1;
+	buf[3] = UWG_EXT_MAGIC_2;
+	buf[4] = UWG_EXT_VERSION;
+	buf[5] = kind;
+	put_unaligned_le16(payload_len, buf + 6);
+}
+
+int uwg_ext_build_caps(u8 *buf, size_t len, const struct uwg_ext_caps *caps)
+{
+	size_t total = UWG_EXT_HEADER_LEN + UWG_EXT_CAPS_LEN;
+
+	if (len < total)
+		return -EMSGSIZE;
+
+	uwg_ext_write_header(buf, UWG_EXT_KIND_CAPS, UWG_EXT_CAPS_LEN);
+	put_unaligned_le32(caps->flags, buf + 8);
+	put_unaligned_le16(caps->ack_interval, buf + 12);
+	buf[14] = caps->fec_k;
+	buf[15] = caps->fec_m;
+	put_unaligned_le32(caps->reserved, buf + 16);
+	return (int)total;
+}
+
+int uwg_ext_build_ack(u8 *buf, size_t len, const struct uwg_ext_ack *ack)
+{
+	u8 bitmap_len = ack->bitmap_len;
+	size_t total;
+
+	if (!bitmap_len || bitmap_len > UWG_EXT_ACK_BITMAP_MAX)
+		bitmap_len = UWG_EXT_ACK_BITMAP_MAX;
+
+	total = UWG_EXT_HEADER_LEN + UWG_EXT_ACK_HEADER_LEN + bitmap_len;
+	if (len < total)
+		return -EMSGSIZE;
+
+	uwg_ext_write_header(buf, UWG_EXT_KIND_ACK,
+			     UWG_EXT_ACK_HEADER_LEN + bitmap_len);
+	put_unaligned_le64(ack->largest, buf + 8);
+	put_unaligned_le32(ack->ack_delay_us, buf + 16);
+	buf[20] = ack->flags;
+	buf[21] = bitmap_len;
+	put_unaligned_le16(ack->reserved, buf + 22);
+	memcpy(buf + 24, ack->bitmap, bitmap_len);
+	return (int)total;
+}
+
+void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
+{
+	struct uwg_ext_caps local;
+	u8 frame[UWG_EXT_MAX_FRAME_LEN];
+	ktime_t now;
+	int len;
+
+	if (!uwg_ext_enabled(peer->device))
+		return;
+
+	now = ktime_get();
+	spin_lock_bh(&peer->caps.lock);
+	uwg_ext_local_caps(peer->device, &peer->caps.local);
+	if (!peer->caps.local.flags || peer->caps.peer_valid ||
+	    peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS ||
+	    (peer->caps.send_attempts &&
+	     ktime_before(now, peer->caps.next_send))) {
+		spin_unlock_bh(&peer->caps.lock);
+		return;
+	}
+	++peer->caps.send_attempts;
+	peer->caps.next_send = ktime_add_ms(now, UWG_EXT_CAPS_RETRY_MS);
+	local = peer->caps.local;
+	spin_unlock_bh(&peer->caps.lock);
+
+	len = uwg_ext_build_caps(frame, sizeof(frame), &local);
+	if (likely(len > 0 &&
+		   !uwg_packet_send_control(peer, frame, (size_t)len)))
+		return;
+
+	spin_lock_bh(&peer->caps.lock);
+	if (peer->caps.send_attempts)
+		--peer->caps.send_attempts;
+	peer->caps.next_send = 0;
+	spin_unlock_bh(&peer->caps.lock);
+	net_dbg_ratelimited("%s: Could not send CAPS to peer %llu\n",
+			    peer->device->dev->name, peer->internal_id);
+}
+
+static void uwg_ext_ack_observe(struct uwg_peer_ack_state *state, u64 keypair_id,
+				u64 nonce, ktime_t now)
+{
+	u64 shift;
+
+	if (!state->valid || state->keypair_id != keypair_id) {
+		state->keypair_id = keypair_id;
+		state->largest = nonce;
+		state->bitmap = 1;
+		state->largest_ktime = now;
+		state->valid = true;
+	} else if (nonce > state->largest) {
+		shift = nonce - state->largest;
+		state->bitmap = shift >= UWG_EXT_ACK_BITMAP_BITS ?
+					1 : (state->bitmap << shift) | 1;
+		state->largest = nonce;
+		state->largest_ktime = now;
+	} else {
+		shift = state->largest - nonce;
+		if (shift < UWG_EXT_ACK_BITMAP_BITS)
+			state->bitmap |= (u64)1 << shift;
+	}
+	++state->pending;
+}
+
+static int uwg_ext_ack_build(const struct uwg_peer_ack_state *state,
+			     ktime_t now, u8 *frame, size_t len)
+{
+	struct uwg_ext_ack ack;
+	u64 delay_us;
+
+	memset(&ack, 0, sizeof(ack));
+	ack.largest = state->largest;
+	delay_us = (u64)ktime_to_us(ktime_sub(now, state->largest_ktime));
+	ack.ack_delay_us = (u32)min_t(u64, delay_us, U32_MAX);
+	ack.bitmap_len = UWG_EXT_ACK_BITMAP_MAX;
+	put_unaligned_le64(state->bitmap, ack.bitmap);
+	return uwg_ext_build_ack(frame, len, &ack);
+}
+
+static bool uwg_ext_ack_due(const struct uwg_peer_ack_state *state,
+			    u32 interval, ktime_t now)
+{
+	if (!state->pending)
+		return false;
+	if (!state->sent || state->pending >= interval)
+		return true;
+	return ktime_after(now, ktime_add_ms(state->last_ack_ktime,
+					     UWG_EXT_ACK_MIN_INTERVAL_MS));
+}
+
+static bool uwg_ext_peer_answers(const struct uwg_peer *peer)
+{
+	return READ_ONCE(peer->caps.peer_valid) ||
+	       READ_ONCE(peer->caps.send_attempts) < UWG_EXT_CAPS_MAX_ATTEMPTS;
+}
+
+static void uwg_ext_ack_armed(struct uwg_peer *peer)
+{
+	timer_reduce(&peer->timer_send_ack, jiffies + 1);
+}
+
+void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce)
+{
+	struct uwg_peer_ack_state *state = &peer->ack_state;
+	struct noise_keypair *keypair;
+	u8 frame[UWG_EXT_MAX_FRAME_LEN];
+	u32 interval;
+	ktime_t now;
+	int len = -ENOENT;
+
+	if (!uwg_ext_enabled(peer->device))
+		return;
+	if (!uwg_ext_peer_answers(peer))
+		return;
+
+	rcu_read_lock_bh();
+	keypair = rcu_dereference_bh(peer->keypairs.current_keypair);
+	if (unlikely(!keypair || keypair->internal_id != keypair_id)) {
+		rcu_read_unlock_bh();
+		return;
+	}
+	rcu_read_unlock_bh();
+
+	now = ktime_get();
+	interval = READ_ONCE(peer->caps.local.ack_interval);
+	if (!interval)
+		interval = UWG_EXT_DEFAULT_ACK_INTERVAL;
+
+	spin_lock_bh(&state->lock);
+	uwg_ext_ack_observe(state, keypair_id, nonce, now);
+	if (uwg_ext_ack_due(state, interval, now)) {
+		len = uwg_ext_ack_build(state, now, frame, sizeof(frame));
+		state->pending = 0;
+		state->sent = true;
+		state->last_ack_ktime = now;
+	}
+	spin_unlock_bh(&state->lock);
+
+	if (likely(len > 0)) {
+		if (unlikely(uwg_packet_send_control(peer, frame, (size_t)len)))
+			net_dbg_ratelimited("%s: Could not send ACK to peer %llu\n",
+					    peer->device->dev->name,
+					    peer->internal_id);
+		return;
+	}
+	uwg_ext_ack_armed(peer);
+}
+
+void uwg_ext_ack_timeout(struct uwg_peer *peer)
+{
+	struct uwg_peer_ack_state *state = &peer->ack_state;
+	u8 frame[UWG_EXT_MAX_FRAME_LEN];
+	ktime_t now;
+	bool again = false;
+	int len = -ENOENT;
+
+	if (!uwg_ext_enabled(peer->device))
+		return;
+	if (!uwg_ext_peer_answers(peer))
+		return;
+
+	now = ktime_get();
+	spin_lock_bh(&state->lock);
+	if (state->valid && state->pending) {
+		if (ktime_after(now, ktime_add_ms(state->last_ack_ktime,
+						   UWG_EXT_ACK_MIN_INTERVAL_MS))) {
+			len = uwg_ext_ack_build(state, now, frame,
+						sizeof(frame));
+			state->pending = 0;
+			state->sent = true;
+			state->last_ack_ktime = now;
+		} else {
+			again = true;
+		}
+	}
+	spin_unlock_bh(&state->lock);
+
+	if (len > 0) {
+		uwg_packet_send_control(peer, frame, (size_t)len);
+	} else if (again) {
+		uwg_ext_ack_armed(peer);
+	}
 }
 
 static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
@@ -161,9 +398,11 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 
 	if (uwg_ext_parse_caps(payload, len, &caps))
 		return;
+	spin_lock_bh(&peer->caps.lock);
 	uwg_ext_local_caps(peer->device, &peer->caps.local);
 	peer->caps.peer = caps;
 	peer->caps.peer_valid = true;
+	spin_unlock_bh(&peer->caps.lock);
 }
 
 static void uwg_ext_handle_ack(struct uwg_peer *peer, const u8 *payload,

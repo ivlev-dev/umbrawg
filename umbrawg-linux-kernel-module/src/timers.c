@@ -150,6 +150,14 @@ static void uwg_expired_send_persistent_keepalive(struct timer_list *timer)
 		uwg_packet_send_keepalive(peer);
 }
 
+static void uwg_expired_send_ack(struct timer_list *timer)
+{
+	struct uwg_peer *peer = timer_container_of(peer, timer,
+						  timer_send_ack);
+
+	uwg_ext_ack_timeout(peer);
+}
+
 /* Should be called after an authenticated data packet is sent. */
 void uwg_timers_data_sent(struct uwg_peer *peer)
 {
@@ -250,6 +258,7 @@ void uwg_timers_init(struct uwg_peer *peer)
 		    uwg_expired_zero_key_material, 0);
 	timer_setup(&peer->timer_persistent_keepalive,
 		    uwg_expired_send_persistent_keepalive, 0);
+	timer_setup(&peer->timer_send_ack, uwg_expired_send_ack, 0);
 	INIT_WORK(&peer->clear_peer_work, uwg_queued_expired_zero_key_material);
 	peer->timer_handshake_attempts = 0;
 	peer->max_handshake_attempts = !u16_range_is_zero(peer->device->max_handshake_attempts) ? u16_range_pick_one(peer->device->max_handshake_attempts) : MAX_TIMER_HANDSHAKES;
@@ -264,5 +273,6 @@ void uwg_timers_stop(struct uwg_peer *peer)
 	timer_delete_sync(&peer->timer_new_handshake);
 	timer_delete_sync(&peer->timer_zero_key_material);
 	timer_delete_sync(&peer->timer_persistent_keepalive);
+	timer_delete_sync(&peer->timer_send_ack);
 	flush_work(&peer->clear_peer_work);
 }
