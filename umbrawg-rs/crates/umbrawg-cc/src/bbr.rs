@@ -563,7 +563,12 @@ impl Bbr {
         match self.mode {
             Mode::Startup => {
                 if self.full_bw_reached {
-                    self.enter_drain();
+                    // A tunnel carries an external application queue; draining it
+                    // inside the controller leaves the sender stuck. Move to the
+                    // steady-state gain cycle at 1.0 instead.
+                    self.mode = Mode::ProbeBw;
+                    self.cycle_idx = 2;
+                    self.cycle_start_ns = now_ns;
                 }
             }
             Mode::Drain => {

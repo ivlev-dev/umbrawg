@@ -285,6 +285,8 @@ pub(crate) struct PeerExtension {
     adaptive_clean_since: Option<Instant>,
     fec_deadline: Option<Instant>,
     pending: VecDeque<Vec<u8>>,
+    bbr_queue: VecDeque<Vec<u8>>,
+    bbr_queued_bytes: usize,
 }
 
 impl Default for PeerExtension {
@@ -310,6 +312,8 @@ impl PeerExtension {
             adaptive_clean_since: None,
             fec_deadline: None,
             pending: VecDeque::new(),
+            bbr_queue: VecDeque::new(),
+            bbr_queued_bytes: 0,
         };
         extension.configure(config);
         extension
@@ -334,6 +338,8 @@ impl PeerExtension {
         self.caps_attempts = 0;
         self.caps_next = None;
         self.pending.clear();
+        self.bbr_queue.clear();
+        self.bbr_queued_bytes = 0;
         self.fec_deadline = None;
         self.adaptive_clean_since = None;
         self.adaptive_observed = 0;
@@ -456,6 +462,45 @@ impl PeerExtension {
     pub(crate) fn observe_control(&mut self, counter: u64, now: Instant) {
         self.ack.observe(counter, now, false);
         self.update_adaptive(now);
+    }
+
+    pub(crate) fn bbr_queue_active(&self) -> bool {
+        self.config.bbr == BbrMode::On && self.peer_caps.contains(CapsFlags::ACK)
+    }
+
+    pub(crate) fn bbr_enqueue(&mut self, packet: &[u8]) -> bool {
+        const MAX_PACKETS: usize = 1024;
+        const MAX_BYTES: usize = 4 * 1024 * 1024;
+        if self.bbr_queue.len() >= MAX_PACKETS
+            || self.bbr_queued_bytes.saturating_add(packet.len()) > MAX_BYTES
+        {
+            return false;
+        }
+        self.bbr_queued_bytes = self.bbr_queued_bytes.saturating_add(packet.len());
+        self.bbr_queue.push_back(packet.to_vec());
+        true
+    }
+
+    pub(crate) fn bbr_drain(&mut self, now: Instant, max_packets: usize) -> Vec<Vec<u8>> {
+        let Some(bbr) = self.bbr.as_ref() else {
+            return Vec::new();
+        };
+        if self.config.bbr != BbrMode::On {
+            return Vec::new();
+        }
+        let mut output = Vec::new();
+        while output.len() < max_packets {
+            let Some(front) = self.bbr_queue.front() else {
+                break;
+            };
+            if bbr.next_send_delay(front.len(), now) > Duration::from_micros(500) {
+                break;
+            }
+            let packet = self.bbr_queue.pop_front().expect("front exists");
+            self.bbr_queued_bytes = self.bbr_queued_bytes.saturating_sub(packet.len());
+            output.push(packet);
+        }
+        output
     }
 
     pub(crate) fn pacing_delay(&mut self, bytes: usize, now: Instant) -> Duration {

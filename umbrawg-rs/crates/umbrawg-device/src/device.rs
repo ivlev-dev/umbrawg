@@ -1302,6 +1302,20 @@ impl Device {
     }
 
     #[must_use]
+    pub fn bbr_queue_active(&self, peer: &Peer) -> bool {
+        peer.extension().bbr_queue_active()
+    }
+
+    pub fn bbr_enqueue(&self, peer: &Peer, packet: &[u8]) -> bool {
+        peer.extension().bbr_enqueue(packet)
+    }
+
+    #[must_use]
+    pub fn bbr_drain(&self, peer: &Peer, now: Instant, max_packets: usize) -> Vec<Vec<u8>> {
+        peer.extension().bbr_drain(now, max_packets)
+    }
+
+    #[must_use]
     pub fn pacing_delay(&self, peer: &Peer, bytes: usize, now: Instant) -> Duration {
         peer.extension().pacing_delay(bytes, now)
     }

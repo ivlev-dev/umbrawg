@@ -1264,6 +1264,28 @@ pub(crate) fn worker_loop(
                 let _ = device.flush_control(peer, &mut context);
             });
             rekey.clear();
+            device.for_each_peer(|peer| {
+                let packets = device.bbr_drain(peer, now, crate::MAX_BATCH_SIZE);
+                if packets.is_empty() {
+                    return;
+                }
+                let slices: Vec<&[u8]> = packets.iter().map(Vec::as_slice).collect();
+                crate::send_run_inner(
+                    &device,
+                    active,
+                    &tun,
+                    &mut rng,
+                    now,
+                    &mut scratch,
+                    &mut tx_buffer,
+                    &mut batch_buffer,
+                    &mut batch,
+                    peer,
+                    &slices,
+                    &mut rekey,
+                    &mut rx,
+                );
+            });
             busy |= pump_tun_tx(
                 &device,
                 active,

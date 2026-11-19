@@ -439,6 +439,12 @@ fn send_run<R: rand_core::RngCore>(
     if plaintexts.is_empty() {
         return;
     }
+    if device.bbr_queue_active(peer) {
+        for packet in plaintexts {
+            let _ = device.bbr_enqueue(peer, packet);
+        }
+        return;
+    }
     {
         let bytes: usize = plaintexts.iter().map(|packet| packet.len()).sum();
         let delay = device.pacing_delay(peer, bytes, now);
@@ -873,6 +879,28 @@ fn worker_loop(
             let _ = device.flush_control(peer, &mut context);
         });
         rekey.clear();
+        device.for_each_peer(|peer| {
+            let packets = device.bbr_drain(peer, now, MAX_BATCH_SIZE);
+            if packets.is_empty() {
+                return;
+            }
+            let slices: Vec<&[u8]> = packets.iter().map(Vec::as_slice).collect();
+            send_run_inner(
+                &device,
+                active,
+                &tun,
+                &mut rng,
+                now,
+                &mut scratch,
+                &mut tx_buffer,
+                &mut batch_buffer,
+                &mut batch,
+                peer,
+                &slices,
+                &mut rekey,
+                &mut rx,
+            );
+        });
         let mut busy = pump_tun_tx(
             &device,
             active,
