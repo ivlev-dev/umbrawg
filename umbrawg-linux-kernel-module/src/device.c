@@ -203,6 +203,7 @@ static netdev_tx_t uwg_xmit(struct sk_buff *skb, struct net_device *dev)
 		PACKET_CB(skb)->mtu = mtu;
 		PACKET_CB(skb)->is_keepalive = false;
 		PACKET_CB(skb)->is_fec = false;
+		PACKET_CB(skb)->pace_len = 0;
 
 		if (uwg_fec_tx_push(peer, skb, &packets))
 			continue;

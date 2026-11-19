@@ -132,6 +132,7 @@ struct uwg_bbr {
 
 void uwg_bbr_init(struct uwg_bbr *b, u32 mss, u32 initial_rtt_us);
 void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns);
+void uwg_bbr_on_sent(struct uwg_bbr *b, u64 counter, u64 now_ns);
 void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
 		    u32 ack_delay_us, u64 now_ns);
 u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns);

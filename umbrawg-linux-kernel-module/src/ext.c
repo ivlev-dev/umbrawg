@@ -310,7 +310,7 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 }
 
 static void uwg_ext_ack_observe(struct uwg_peer_ack_state *state, u64 keypair_id,
-				u64 nonce, ktime_t now)
+				u64 nonce, ktime_t now, bool count_for_ack)
 {
 	u64 shift;
 
@@ -331,7 +331,8 @@ static void uwg_ext_ack_observe(struct uwg_peer_ack_state *state, u64 keypair_id
 		if (shift < UWG_EXT_ACK_BITMAP_BITS)
 			state->bitmap |= (u64)1 << shift;
 	}
-	++state->pending;
+	if (count_for_ack)
+		++state->pending;
 }
 
 static int uwg_ext_ack_build(const struct uwg_peer_ack_state *state,
@@ -371,7 +372,8 @@ static void uwg_ext_ack_armed(struct uwg_peer *peer)
 	timer_reduce(&peer->timer_send_ack, jiffies + 1);
 }
 
-void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce)
+void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce,
+			   bool count_for_ack)
 {
 	struct uwg_peer_ack_state *state = &peer->ack_state;
 	struct noise_keypair *keypair;
@@ -399,7 +401,7 @@ void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce)
 		interval = UWG_EXT_DEFAULT_ACK_INTERVAL;
 
 	spin_lock_bh(&state->lock);
-	uwg_ext_ack_observe(state, keypair_id, nonce, now);
+	uwg_ext_ack_observe(state, keypair_id, nonce, now, count_for_ack);
 	if (uwg_ext_ack_due(state, interval, now)) {
 		len = uwg_ext_ack_build(state, now, frame, sizeof(frame));
 		state->pending = 0;
@@ -557,6 +559,16 @@ enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 		return UWG_EXT_RX_NOT_EXTENSION;
 	if (uwg_ext_parse_header(hdr, skb->len, &header))
 		return UWG_EXT_RX_INVALID;
+
+	/* Account every ext frame for BBR/ACK feedback. FEC shards are real
+	 * transport packets and must be acknowledged; CAPS/ACK frames update
+	 * the bitmap but must not trigger another ACK (no ACK-on-ACK).
+	 */
+	if (likely(PACKET_CB(skb)->keypair))
+		uwg_ext_data_received(peer,
+				      PACKET_CB(skb)->keypair->internal_id,
+				      PACKET_CB(skb)->nonce,
+				      header.kind == UWG_EXT_KIND_FEC_SHARD);
 
 	switch (header.kind) {
 	case UWG_EXT_KIND_CAPS:

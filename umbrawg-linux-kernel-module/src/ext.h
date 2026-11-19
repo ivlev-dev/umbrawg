@@ -147,7 +147,8 @@ int uwg_ext_build_fec_shard_header(u8 *buf, size_t len,
 				   const struct uwg_ext_fec_shard *shard);
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer);
 void uwg_ext_caps_changed(struct uwg_device *uwg);
-void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce);
+void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce,
+			   bool count_for_ack);
 void uwg_ext_ack_timeout(struct uwg_peer *peer);
 
 #endif /* _UWG_EXT_H */

@@ -889,6 +889,15 @@ void uwg_bbr_on_loss(struct uwg_bbr *b, u64 counter, u64 now_ns)
  * datagram is registered through uwg_bbr_on_send(), so querying twice for
  * the same datagram yields the same delay and never starves the bucket.
  */
+void uwg_bbr_on_sent(struct uwg_bbr *b, u64 counter, u64 now_ns)
+{
+	struct uwg_bbr_sent *slot = &b->ring[counter & UWG_BBR_RING_MASK];
+
+	if (slot->counter == counter &&
+	    uwg_slot_state(slot) == UWG_BBR_SLOT_INFLIGHT)
+		slot->sent_ns = now_ns;
+}
+
 u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns)
 {
 	const struct uwg_bbr_pacer *p = &b->pacer;

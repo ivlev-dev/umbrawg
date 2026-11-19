@@ -261,6 +261,9 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 		PACKET_CB(skb)->ds = 0;
 		PACKET_CB(skb)->is_keepalive = false;
 		PACKET_CB(skb)->is_fec = true;
+		PACKET_CB(skb)->pace_len = i ? 0 :
+			total * (UWG_EXT_HEADER_LEN +
+				 UWG_EXT_FEC_HEADER_LEN + shard_len);
 		__skb_queue_tail(out, skb);
 	}
 

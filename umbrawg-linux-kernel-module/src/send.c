@@ -370,6 +370,7 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 		PACKET_CB(skb)->mtu = skb->dev->mtu;
 		PACKET_CB(skb)->is_keepalive = true;
 		PACKET_CB(skb)->is_fec = false;
+		PACKET_CB(skb)->pace_len = 0;
 		skb_queue_tail(&peer->staged_packet_queue, skb);
 		net_dbg_ratelimited("%s: Sending keepalive packet to peer %llu (%pISpfsc)\n",
 				    peer->device->dev->name, peer->internal_id,
@@ -453,15 +454,32 @@ static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
 				bool *data_sent)
 {
 	bool is_keepalive = PACKET_CB(skb)->is_keepalive;
+	u32 pace_len = PACKET_CB(skb)->pace_len;
 	u8 ds = PACKET_CB(skb)->ds;
 
-	/* FEC shards are an expansion of the pre-FEC stream: pacing every shard
-	 * applies the token bucket to k+m packets instead of k and collapses
-	 * the rate. Pacing for FEC traffic is therefore skipped until the BBR
-	 * delivery-rate sampler stops charging the pacing delay to the sample.
+	/* FEC blocks are paced as a whole: only the first shard carries the
+	 * block length in pace_len, the rest are sent right after it.
 	 */
-	if (!is_keepalive && !PACKET_CB(skb)->is_fec)
-		uwg_packet_pace(peer, skb->len);
+	if (!is_keepalive) {
+		if (pace_len)
+			uwg_packet_pace(peer, pace_len);
+		else if (!PACKET_CB(skb)->is_fec)
+			uwg_packet_pace(peer, skb->len);
+	}
+
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_ON) {
+		struct uwg_bbr *bbr;
+
+		rcu_read_lock();
+		bbr = uwg_peer_bbr_lookup(peer);
+		if (bbr) {
+			spin_lock_bh(&peer->bbr_lock);
+			uwg_bbr_on_sent(bbr, PACKET_CB(skb)->nonce,
+					ktime_get_ns());
+			spin_unlock_bh(&peer->bbr_lock);
+		}
+		rcu_read_unlock();
+	}
 
 	if (likely(!uwg_socket_send_skb_to_peer(peer, skb, ds) && !is_keepalive))
 		*data_sent = true;
@@ -720,6 +738,7 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 	PACKET_CB(skb)->ds = 0;
 	PACKET_CB(skb)->is_keepalive = false;
 	PACKET_CB(skb)->is_fec = false;
+	PACKET_CB(skb)->pace_len = 0;
 	PACKET_CB(skb)->nonce =
 		atomic64_inc_return(&keypair->sending_counter) - 1;
 	if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES)) {

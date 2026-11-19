@@ -580,7 +580,7 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 	}
 
 	uwg_ext_data_received(peer, PACKET_CB(skb)->keypair->internal_id,
-			      PACKET_CB(skb)->nonce);
+			      PACKET_CB(skb)->nonce, true);
 
 	/* A packet with length 0, or with all zeroes (content padding)
 	 * is a keepalive packet
