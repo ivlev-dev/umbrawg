@@ -12,7 +12,7 @@
 use core::fmt;
 use std::net::SocketAddr;
 use std::os::fd::{AsFd, AsRawFd, BorrowedFd, RawFd};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use crate::addr::{address_for_socket, normalize_ipv4_mapped, AddressFamily, Endpoint};
 use crate::batch::{Outgoing, RecvQueue, SendQueue};
@@ -569,9 +569,130 @@ pub fn interface_mtu(interface: &str) -> Result<u32> {
     sys::interface_mtu(socket.as_raw_fd(), interface)
 }
 
+/// Source of outbound UDP sockets for the data path.
+///
+/// A single [`Socket`] and a [`SocketSet`] both implement it, so callers can
+/// stay generic over the number of external UDP flows.
+pub trait SocketSource: Send + Sync {
+    /// Socket used for buffer limits, polling and the first datagram.
+    fn primary(&self) -> &Socket;
+    /// Next socket in round-robin order.
+    fn next(&self) -> &Socket;
+    /// All sockets, in bind order. Never empty.
+    fn all(&self) -> &[Socket];
+}
+
+impl SocketSource for Socket {
+    fn primary(&self) -> &Socket {
+        self
+    }
+
+    fn next(&self) -> &Socket {
+        self
+    }
+
+    fn all(&self) -> &[Socket] {
+        std::slice::from_ref(self)
+    }
+}
+
+/// Several external UDP sockets of one device.
+///
+/// Sending rotates over the set so a peer spreads across several 4-tuples and
+/// RPS fans the receive softirq out over multiple CPUs. Receive paths iterate
+/// [`SocketSource::all`] and drain every socket.
+pub struct SocketSet {
+    sockets: Vec<Socket>,
+    next: AtomicUsize,
+}
+
+impl SocketSet {
+    /// Builds a set from at least one socket.
+    pub fn new(sockets: Vec<Socket>) -> Result<Self> {
+        if sockets.is_empty() {
+            return Err(TransportError::EmptySocketSet);
+        }
+        Ok(Self {
+            sockets,
+            next: AtomicUsize::new(0),
+        })
+    }
+
+    /// Number of sockets in the set.
+    pub fn len(&self) -> usize {
+        self.sockets.len()
+    }
+
+    /// Always `false`: a set contains at least one socket.
+    pub fn is_empty(&self) -> bool {
+        self.sockets.is_empty()
+    }
+
+    /// Socket bound to the configured listen port.
+    pub fn primary(&self) -> &Socket {
+        &self.sockets[0]
+    }
+}
+
+impl SocketSource for SocketSet {
+    fn primary(&self) -> &Socket {
+        &self.sockets[0]
+    }
+
+    fn next(&self) -> &Socket {
+        let index = self.next.fetch_add(1, Ordering::Relaxed) % self.sockets.len();
+        &self.sockets[index]
+    }
+
+    fn all(&self) -> &[Socket] {
+        &self.sockets
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn socket_set_round_robins_and_exposes_all() {
+        let first = Socket::bind(AddressFamily::Ipv4, 0).unwrap();
+        let second = Socket::bind(AddressFamily::Ipv4, 0).unwrap();
+        let first_port = first.local_addr().port();
+        let second_port = second.local_addr().port();
+        let set = SocketSet::new(vec![first, second]).unwrap();
+        assert_eq!(set.len(), 2);
+        assert!(!set.is_empty());
+        assert_eq!(set.all().len(), 2);
+        assert_eq!(set.primary().local_addr().port(), first_port);
+        let ports: Vec<u16> = (0..4).map(|_| set.next().local_addr().port()).collect();
+        assert_eq!(
+            ports,
+            vec![first_port, second_port, first_port, second_port]
+        );
+    }
+
+    #[test]
+    fn socket_set_rejects_empty_input() {
+        let Err(error) = SocketSet::new(Vec::new()) else {
+            panic!("empty socket set must be rejected");
+        };
+        assert!(matches!(error, TransportError::EmptySocketSet));
+        assert!(error.to_string().contains("at least one socket"));
+    }
+
+    #[test]
+    fn single_socket_is_a_source_of_itself() {
+        let socket = Socket::bind(AddressFamily::Ipv4, 0).unwrap();
+        assert_eq!(
+            socket.primary().local_addr().port(),
+            socket.local_addr().port()
+        );
+        assert_eq!(socket.all().len(), 1);
+        assert_eq!(
+            socket.next().local_addr().port(),
+            socket.local_addr().port()
+        );
+    }
 
     #[test]
     fn mtu_discover_values_match_uapi() {

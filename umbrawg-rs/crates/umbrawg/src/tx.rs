@@ -3,7 +3,9 @@
 use std::net::SocketAddr;
 
 use umbrawg_device::{BatchLayout, GsoGroup};
-use umbrawg_transport::{Endpoint, GsoSize, Outgoing, SendQueue, Socket, TransportError};
+use umbrawg_transport::{
+    Endpoint, GsoSize, Outgoing, SendQueue, Socket, SocketSource, TransportError,
+};
 
 /// Максимальное число датаграмм в одном вызове `sendmmsg`.
 pub const MAX_OUTGOING: usize = 64;
@@ -146,21 +148,25 @@ impl TxBatch {
     /// Короткий результат `sendmmsg` досылается повтором остатка. Если сокет
     /// остаётся неготовым после нескольких попыток, остаток отбрасывается:
     /// дейтаграммы UDP и так не гарантируют доставку.
-    pub fn flush(&mut self, socket: &Socket, buffer: &[u8]) -> usize {
-        self.flush_tracked(socket, buffer).0
+    ///
+    /// Пакеты разных пиров уходят через разные сокеты набора по кругу, чтобы
+    /// внешний поток одного пира раскладывался по нескольким 4-tuple.
+    pub fn flush(&mut self, sockets: &dyn SocketSource, buffer: &[u8]) -> usize {
+        self.flush_tracked(sockets, buffer).0
     }
 
-    pub fn flush_tracked(&mut self, socket: &Socket, buffer: &[u8]) -> (usize, usize) {
+    pub fn flush_tracked(&mut self, sockets: &dyn SocketSource, buffer: &[u8]) -> (usize, usize) {
         if self.groups.is_empty() {
             self.clear();
             return (0, 0);
         }
-        let limits = SegmentLimits::from_socket(socket);
-        let gso = socket.gso_enabled();
+        let limits = SegmentLimits::from_socket(sockets.primary());
+        let gso = sockets.primary().gso_enabled();
         let mut sent = 0;
         let mut outgoings = [Outgoing::new(&[]); MAX_OUTGOING];
         for index in 0..self.peers.len() {
             let peer = self.peers[index];
+            let socket = sockets.next();
             let mut pending = 0usize;
             for offset in 0..peer.group_count {
                 let group = self.groups[peer.first_group + offset];

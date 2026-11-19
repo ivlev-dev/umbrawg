@@ -29,14 +29,14 @@ use umbrawg_device::{
     PreparedTransport,
 };
 use umbrawg_proto::obf::{DetectedPacket, MessageKind};
-use umbrawg_transport::{RecvQueue, Socket, MAX_BATCH_SIZE};
+use umbrawg_transport::{RecvQueue, SocketSet, SocketSource, MAX_BATCH_SIZE};
 use umbrawg_tun::Tun;
 
 use crate::ring::SpscRing;
 use crate::rx::RxBatch;
 use crate::tx::TxBatch;
 use crate::{
-    is_socket_would_block, open_socket, pump_tun_tx, shutdown_requested, IDLE_TIMEOUT_MS,
+    is_socket_would_block, open_socket_set, pump_tun_tx, shutdown_requested, IDLE_TIMEOUT_MS,
     MAX_PACKET, RECV_BATCH, TUN_BATCH, TUN_PACKET_MARGIN,
 };
 
@@ -559,7 +559,7 @@ impl WorkerChannel {
 
 /// Общее состояние потока приёма и крипто-воркеров.
 pub(crate) struct SharedRx {
-    socket: RwLock<Option<Arc<Socket>>>,
+    socket: RwLock<Option<Arc<SocketSet>>>,
     channels: Vec<WorkerChannel>,
     controls: ControlQueue,
     sched: RxSchedule,
@@ -603,19 +603,19 @@ impl SharedRx {
         }
     }
 
-    fn set_socket(&self, socket: Option<Arc<Socket>>) {
+    fn set_socket(&self, socket: Option<Arc<SocketSet>>) {
         if let Ok(mut guard) = self.socket.write() {
             *guard = socket;
         }
     }
 
-    fn socket(&self) -> Option<Arc<Socket>> {
+    fn socket(&self) -> Option<Arc<SocketSet>> {
         self.socket.read().ok().and_then(|guard| guard.clone())
     }
 }
 
 struct ControlIo<'a> {
-    socket: &'a Socket,
+    socket: &'a dyn SocketSource,
 }
 
 impl DatagramSink for ControlIo<'_> {
@@ -629,6 +629,7 @@ impl DatagramSink for ControlIo<'_> {
         let gso = gso_size.and_then(|size| umbrawg_transport::GsoSize::from_usize(size).ok());
         if let Err(error) =
             self.socket
+                .next()
                 .send_to(umbrawg_transport::Endpoint::new(endpoint), payload, gso)
         {
             log::debug!("control send to {endpoint} failed: {error}");
@@ -647,6 +648,7 @@ pub(crate) fn rx_loop(
     device: Arc<Device>,
     shared: Arc<SharedRx>,
     socket_buffer: usize,
+    extra_ports: usize,
     underlay: crate::mtu::Underlay,
 ) -> io::Result<()> {
     let mut rng = BufferedRng::new(OsRng);
@@ -658,7 +660,7 @@ pub(crate) fn rx_loop(
         .iter_mut()
         .map(|buffer| buffer.as_mut_slice())
         .collect();
-    let mut socket: Option<Arc<Socket>> = None;
+    let mut socket: Option<Arc<SocketSet>> = None;
     let mut cursor = 0usize;
     let mut stats_at = Instant::now();
     let mut housekeeping_at = Instant::now();
@@ -668,17 +670,22 @@ pub(crate) fn rx_loop(
         let want_port = device.listen_port();
         let rebind = match socket.as_ref() {
             None => true,
-            Some(current) => want_port != 0 && current.local_addr().port() != want_port,
+            Some(current) => want_port != 0 && current.primary().local_addr().port() != want_port,
         };
         if rebind {
-            match open_socket(
+            match open_socket_set(
                 want_port,
+                extra_ports,
                 device.fwmark(),
                 socket_buffer,
                 underlay.gso_limits(),
             ) {
                 Ok(new_socket) => {
-                    log::info!("parallel rx listening on {}", new_socket.local_addr());
+                    log::info!(
+                        "parallel rx listening on {} ({} sockets)",
+                        new_socket.primary().local_addr(),
+                        new_socket.len()
+                    );
                     let new_socket = Arc::new(new_socket);
                     shared.set_socket(Some(Arc::clone(&new_socket)));
                     socket = Some(new_socket);
@@ -690,46 +697,48 @@ pub(crate) fn rx_loop(
                 }
             }
         }
-        let active = socket.as_ref().expect("socket is bound");
+        let active = socket.as_ref().expect("socket is bound").as_ref();
         let mut busy = false;
 
-        loop {
-            match active.recv_batch(&mut recv_queue, &mut recv_slices) {
-                Ok(0) => break,
-                Ok(count) => {
-                    busy = true;
-                    let snapshot = device.incoming_snapshot();
-                    let now = Instant::now();
-                    for (index, buffer) in recv_slices.iter_mut().enumerate().take(count) {
-                        let Some(meta) = recv_queue.meta(index) else {
-                            continue;
-                        };
-                        let Some(endpoint) = meta.endpoint else {
-                            shared.stats.drops_endpoint.fetch_add(1, Ordering::Relaxed);
-                            continue;
-                        };
-                        if meta.truncated || meta.size == 0 {
-                            shared.stats.drops_detect.fetch_add(1, Ordering::Relaxed);
-                            continue;
+        for listener in active.all() {
+            loop {
+                match listener.recv_batch(&mut recv_queue, &mut recv_slices) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        busy = true;
+                        let snapshot = device.incoming_snapshot();
+                        let now = Instant::now();
+                        for (index, buffer) in recv_slices.iter_mut().enumerate().take(count) {
+                            let Some(meta) = recv_queue.meta(index) else {
+                                continue;
+                            };
+                            let Some(endpoint) = meta.endpoint else {
+                                shared.stats.drops_endpoint.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            };
+                            if meta.truncated || meta.size == 0 {
+                                shared.stats.drops_detect.fetch_add(1, Ordering::Relaxed);
+                                continue;
+                            }
+                            shared.stats.datagrams.fetch_add(1, Ordering::Relaxed);
+                            enqueue_segments(
+                                &device,
+                                &shared,
+                                &mut cursor,
+                                &snapshot,
+                                now,
+                                buffer,
+                                meta.size,
+                                meta.gro_size.map(|size| size.as_usize()),
+                                endpoint.dst(),
+                            );
                         }
-                        shared.stats.datagrams.fetch_add(1, Ordering::Relaxed);
-                        enqueue_segments(
-                            &device,
-                            &shared,
-                            &mut cursor,
-                            &snapshot,
-                            now,
-                            buffer,
-                            meta.size,
-                            meta.gro_size.map(|size| size.as_usize()),
-                            endpoint.dst(),
-                        );
                     }
-                }
-                Err(error) if is_socket_would_block(&error) => break,
-                Err(error) => {
-                    log::debug!("recv failed: {error}");
-                    break;
+                    Err(error) if is_socket_would_block(&error) => break,
+                    Err(error) => {
+                        log::debug!("recv failed: {error}");
+                        break;
+                    }
                 }
             }
         }
@@ -775,13 +784,17 @@ pub(crate) fn rx_loop(
         if !busy {
             let wait = housekeeping_at.saturating_duration_since(Instant::now());
             let timeout = wait.as_millis().min(IDLE_TIMEOUT_MS as u128) as i32;
-            let mut fds = [libc::pollfd {
-                fd: active.fd(),
-                events: libc::POLLIN,
-                revents: 0,
-            }];
+            let mut fds: Vec<libc::pollfd> = active
+                .all()
+                .iter()
+                .map(|socket| libc::pollfd {
+                    fd: socket.fd(),
+                    events: libc::POLLIN,
+                    revents: 0,
+                })
+                .collect();
             unsafe {
-                libc::poll(fds.as_mut_ptr(), 1, timeout.max(1));
+                libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout.max(1));
             }
         }
     }
@@ -810,7 +823,9 @@ pub(crate) fn control_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Re
             };
             let now = Instant::now();
             let snapshot = device.incoming_snapshot();
-            let mut control = ControlIo { socket: &socket };
+            let mut control = ControlIo {
+                socket: socket.as_ref(),
+            };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut control);
             let prepared = PreparedIncoming::Control(job.detected);
             if let Err(error) = device.handle_prepared(
@@ -1098,7 +1113,7 @@ fn enqueue_segments(
 
 fn housekeeping<R: RngCore>(
     device: &Device,
-    socket: &Socket,
+    socket: &dyn SocketSource,
     now: Instant,
     rng: &mut R,
     scratch: &mut [u8],
@@ -1145,7 +1160,7 @@ fn execute_job<R: RngCore>(
     now: Instant,
     rng: &mut R,
     scratch: &mut [u8],
-    socket: &Socket,
+    socket: &dyn SocketSource,
     tun: &Tun,
     rx: &mut RxBatch,
     stats: &RxStats,

@@ -16,8 +16,8 @@ use umbrawg_device::{
     DEFAULT_UNDER_LOAD_PPS,
 };
 use umbrawg_transport::{
-    AddressFamily, Endpoint, GsoLimits, GsoSize, OpenOptions, RecvQueue, Socket, TransportError,
-    MAX_BATCH_SIZE,
+    AddressFamily, Endpoint, GsoLimits, GsoSize, OpenOptions, RecvQueue, Socket, SocketSet,
+    SocketSource, TransportError, MAX_BATCH_SIZE,
 };
 use umbrawg_tun::{Tun, TunConfig, TunError, TunSet, VirtioNetHdr};
 use umbrawg_uapi::{socket_dir, ServerHandle, UapiListener};
@@ -43,6 +43,7 @@ const SOCKET_BUFFER_BYTES: usize = 8 * 1024 * 1024;
 const SOCKET_BUFFER_MIN_BYTES: usize = 212 * 1024;
 const SOCKET_BUFFER_MAX_BYTES: usize = 64 * 1024 * 1024;
 const SOCKET_BUFFER_TOLERANCE_BYTES: usize = 4096;
+const EXTRA_PORTS_MAX: usize = 8;
 
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -158,7 +159,7 @@ extern "C" fn signal_handler(_signal: libc::c_int) {
 }
 
 struct WorkerIo<'a> {
-    socket: &'a Socket,
+    socket: &'a dyn SocketSource,
     tun: &'a Tun,
     rx: &'a mut RxBatch,
     stats: Option<&'a parallel::RxStats>,
@@ -177,7 +178,11 @@ impl DatagramSink for WorkerIo<'_> {
             "tx {} bytes to {endpoint} (gso {gso_size:?})",
             payload.len()
         );
-        if let Err(error) = self.socket.send_to(Endpoint::new(endpoint), payload, gso) {
+        if let Err(error) = self
+            .socket
+            .next()
+            .send_to(Endpoint::new(endpoint), payload, gso)
+        {
             log::debug!("send to {endpoint} failed: {error}");
         }
     }
@@ -232,6 +237,25 @@ fn socket_buffer_bytes(value: Option<&str>) -> Result<usize, String> {
         ));
     }
     Ok(size)
+}
+
+fn extra_ports(value: Option<&str>) -> Result<usize, String> {
+    let Some(raw) = value else {
+        return Ok(0);
+    };
+    let text = raw.trim();
+    if text.is_empty() {
+        return Ok(0);
+    }
+    let count = text
+        .parse::<usize>()
+        .map_err(|_| format!("UMBRAWG_EXTRA_PORTS: ожидается целое число, получено {text:?}"))?;
+    if count > EXTRA_PORTS_MAX {
+        return Err(format!(
+            "UMBRAWG_EXTRA_PORTS: {count} вне диапазона 0..={EXTRA_PORTS_MAX}"
+        ));
+    }
+    Ok(count)
 }
 
 fn effective_socket_buffer(actual: usize) -> usize {
@@ -319,6 +343,52 @@ fn open_socket(port: u16, fwmark: u32, buffer: usize, limits: GsoLimits) -> io::
     Ok(socket)
 }
 
+fn open_socket_set(
+    port: u16,
+    extra: usize,
+    fwmark: u32,
+    buffer: usize,
+    limits: GsoLimits,
+) -> io::Result<SocketSet> {
+    let mut sockets = Vec::with_capacity(extra + 1);
+    let primary = open_socket(port, fwmark, buffer, limits)?;
+    log::info!("listening on {}", primary.local_addr());
+    sockets.push(primary);
+    for index in 0..extra {
+        match open_socket(0, fwmark, buffer, limits) {
+            Ok(socket) => {
+                log::info!("extra udp port {}: {}", index + 1, socket.local_addr());
+                sockets.push(socket);
+            }
+            Err(error) => {
+                log::warn!(
+                    "cannot bind extra UDP socket {index} of {extra}: {error}; \
+                     continuing with {} port(s)",
+                    sockets.len()
+                );
+                break;
+            }
+        }
+    }
+    SocketSet::new(sockets).map_err(|error| io::Error::other(error.to_string()))
+}
+
+fn poll_inputs(source: &dyn SocketSource, tun: &Tun, fds: &mut Vec<libc::pollfd>) {
+    fds.clear();
+    fds.push(libc::pollfd {
+        fd: tun.fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    });
+    for socket in source.all() {
+        fds.push(libc::pollfd {
+            fd: socket.fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        });
+    }
+}
+
 fn is_tun_would_block(error: &TunError) -> bool {
     matches!(error, TunError::Io(source) if source.kind() == io::ErrorKind::WouldBlock)
 }
@@ -334,7 +404,7 @@ fn batch_flush_needed(used: usize, packets: usize, record: usize, capacity: usiz
 #[allow(clippy::too_many_arguments)]
 fn send_run<R: rand_core::RngCore>(
     device: &Device,
-    socket: &Socket,
+    socket: &dyn SocketSource,
     tun: &Tun,
     rng: &mut R,
     now: Instant,
@@ -434,7 +504,7 @@ fn send_run<R: rand_core::RngCore>(
 #[allow(clippy::too_many_arguments)]
 fn pump_tun_tx<R: rand_core::RngCore>(
     device: &Device,
-    socket: &Socket,
+    socket: &dyn SocketSource,
     tun: &mut Tun,
     rng: &mut R,
     now: Instant,
@@ -551,6 +621,7 @@ fn worker_loop(
     device: Arc<Device>,
     mut tun: Tun,
     socket_buffer: usize,
+    extra_ports: usize,
     underlay: Underlay,
 ) -> io::Result<()> {
     let mut rng = BufferedRng::new(rand_core::OsRng);
@@ -575,7 +646,7 @@ fn worker_loop(
         TxBatch::new(MAX_BATCH_SIZE).map_err(|error| io::Error::other(error.to_string()))?;
     let mut rx = RxBatch::new(slot);
     let mut rekey: Vec<Arc<Peer>> = Vec::with_capacity(TUN_BATCH);
-    let mut socket: Option<Socket> = None;
+    let mut socket: Option<SocketSet> = None;
 
     while !shutdown_requested() {
         let now = Instant::now();
@@ -583,19 +654,17 @@ fn worker_loop(
         let want_port = device.listen_port();
         let rebind = match socket.as_ref() {
             None => true,
-            Some(current) => want_port != 0 && current.local_addr().port() != want_port,
+            Some(current) => want_port != 0 && current.primary().local_addr().port() != want_port,
         };
         if rebind {
-            match open_socket(
+            match open_socket_set(
                 want_port,
+                extra_ports,
                 device.fwmark(),
                 socket_buffer,
                 underlay.gso_limits(),
             ) {
-                Ok(new_socket) => {
-                    log::info!("listening on {}", new_socket.local_addr());
-                    socket = Some(new_socket);
-                }
+                Ok(new_socket) => socket = Some(new_socket),
                 Err(error) => {
                     log::error!("cannot bind UDP socket: {error}");
                     thread::sleep(Duration::from_millis(200));
@@ -637,47 +706,51 @@ fn worker_loop(
             }
         }
 
-        loop {
-            match active.recv_batch(&mut recv_queue, &mut recv_slices) {
-                Ok(0) => break,
-                Ok(count) => {
-                    busy = true;
-                    log::debug!("rx batch of {count} datagrams");
-                    let snapshot = device.incoming_snapshot();
-                    for (index, buffer) in recv_slices.iter_mut().enumerate().take(count) {
-                        let Some(meta) = recv_queue.meta(index) else {
-                            continue;
-                        };
-                        let Some(endpoint) = meta.endpoint else {
-                            continue;
-                        };
-                        if meta.truncated || meta.size == 0 {
-                            continue;
-                        }
-                        let gro_size = meta.gro_size.map(GsoSize::as_usize);
-                        let slice = &mut buffer[..meta.size];
-                        let mut io = WorkerIo {
-                            socket: active,
-                            tun: &tun,
-                            rx: &mut rx,
-                            stats: None,
-                        };
-                        let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
-                        match device.handle_incoming_with(
-                            slice,
-                            IncomingMeta::new(endpoint.dst(), gro_size),
-                            &snapshot,
-                            &mut context,
-                        ) {
-                            Ok(outcome) => log::debug!("incoming {} bytes: {outcome:?}", meta.size),
-                            Err(error) => log::debug!("incoming failed: {error}"),
+        for listener in active.all() {
+            loop {
+                match listener.recv_batch(&mut recv_queue, &mut recv_slices) {
+                    Ok(0) => break,
+                    Ok(count) => {
+                        busy = true;
+                        log::debug!("rx batch of {count} datagrams");
+                        let snapshot = device.incoming_snapshot();
+                        for (index, buffer) in recv_slices.iter_mut().enumerate().take(count) {
+                            let Some(meta) = recv_queue.meta(index) else {
+                                continue;
+                            };
+                            let Some(endpoint) = meta.endpoint else {
+                                continue;
+                            };
+                            if meta.truncated || meta.size == 0 {
+                                continue;
+                            }
+                            let gro_size = meta.gro_size.map(GsoSize::as_usize);
+                            let slice = &mut buffer[..meta.size];
+                            let mut io = WorkerIo {
+                                socket: active,
+                                tun: &tun,
+                                rx: &mut rx,
+                                stats: None,
+                            };
+                            let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
+                            match device.handle_incoming_with(
+                                slice,
+                                IncomingMeta::new(endpoint.dst(), gro_size),
+                                &snapshot,
+                                &mut context,
+                            ) {
+                                Ok(outcome) => {
+                                    log::debug!("incoming {} bytes: {outcome:?}", meta.size)
+                                }
+                                Err(error) => log::debug!("incoming failed: {error}"),
+                            }
                         }
                     }
-                }
-                Err(error) if is_socket_would_block(&error) => break,
-                Err(error) => {
-                    log::debug!("recv failed: {error}");
-                    break;
+                    Err(error) if is_socket_would_block(&error) => break,
+                    Err(error) => {
+                        log::debug!("recv failed: {error}");
+                        break;
+                    }
                 }
             }
         }
@@ -719,18 +792,8 @@ fn worker_loop(
         }
 
         if !busy {
-            let mut fds = [
-                libc::pollfd {
-                    fd: tun.fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-                libc::pollfd {
-                    fd: active.fd(),
-                    events: libc::POLLIN,
-                    revents: 0,
-                },
-            ];
+            let mut fds = Vec::with_capacity(active.all().len() + 1);
+            poll_inputs(active, &tun, &mut fds);
             unsafe {
                 libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, IDLE_TIMEOUT_MS);
             }
@@ -768,6 +831,8 @@ fn daemonize() -> io::Result<()> {
 pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Error>> {
     let socket_buffer = socket_buffer_bytes(env::var("UMBRAWG_SOCKET_BUFFER").ok().as_deref())
         .map_err(io::Error::other)?;
+    let extra_ports =
+        extra_ports(env::var("UMBRAWG_EXTRA_PORTS").ok().as_deref()).map_err(io::Error::other)?;
     let underlay = Underlay::from_env().map_err(io::Error::other)?;
 
     if let Ok(value) = env::var("UMBRAWG_RUNTIME_DIR") {
@@ -801,7 +866,15 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
             parallel.queue_depth,
             parallel::queue_bytes(parallel.queue_depth).div_ceil(1024 * 1024)
         );
-        return run_parallel(device, ifname, parallel, socket_buffer, underlay, guard);
+        return run_parallel(
+            device,
+            ifname,
+            parallel,
+            socket_buffer,
+            extra_ports,
+            underlay,
+            guard,
+        );
     }
 
     let requested = env::var("UMBRAWG_THREADS").ok();
@@ -834,7 +907,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         let handle = thread::Builder::new()
             .name("umbrawg-worker".to_owned())
             .spawn(move || {
-                if let Err(error) = worker_loop(device, tun, socket_buffer, underlay) {
+                if let Err(error) = worker_loop(device, tun, socket_buffer, extra_ports, underlay) {
                     log::error!("worker stopped: {error}");
                 }
             })?;
@@ -863,6 +936,7 @@ fn run_parallel(
     ifname: &str,
     parallel: parallel::ParallelConfig,
     socket_buffer: usize,
+    extra_ports: usize,
     underlay: Underlay,
     guard: Arc<MtuGuard>,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -899,7 +973,9 @@ fn run_parallel(
     let rx_handle = thread::Builder::new()
         .name("umbrawg-rx".to_owned())
         .spawn(move || {
-            if let Err(error) = parallel::rx_loop(rx_device, rx_shared, socket_buffer, underlay) {
+            if let Err(error) =
+                parallel::rx_loop(rx_device, rx_shared, socket_buffer, extra_ports, underlay)
+            {
                 rx_failure.register_failure(format!("rx thread stopped: {error}"));
             }
         })?;
@@ -1081,6 +1157,40 @@ mod tests {
     fn socket_buffer_defaults_to_8_mib() {
         assert_eq!(socket_buffer_bytes(None), Ok(SOCKET_BUFFER_BYTES));
         assert_eq!(SOCKET_BUFFER_BYTES, 8 * 1024 * 1024);
+    }
+
+    #[test]
+    fn extra_ports_defaults_to_zero_and_parses_boundaries() {
+        assert_eq!(extra_ports(None), Ok(0));
+        assert_eq!(extra_ports(Some("")), Ok(0));
+        assert_eq!(extra_ports(Some(" 0 ")), Ok(0));
+        assert_eq!(extra_ports(Some("8")), Ok(EXTRA_PORTS_MAX));
+        assert_eq!(
+            extra_ports(Some("9")),
+            Err("UMBRAWG_EXTRA_PORTS: 9 вне диапазона 0..=8".to_owned())
+        );
+        assert!(extra_ports(Some("-1")).is_err());
+        assert!(extra_ports(Some("abc")).is_err());
+        assert!(extra_ports(Some("abc"))
+            .unwrap_err()
+            .starts_with("UMBRAWG_EXTRA_PORTS:"));
+    }
+
+    #[test]
+    fn socket_set_sends_over_all_sockets() {
+        let limits = Underlay::new(1500, 1).unwrap().gso_limits();
+        let first = open_socket(0, 0, SOCKET_BUFFER_BYTES, limits).expect("first socket");
+        let second = open_socket(0, 0, SOCKET_BUFFER_BYTES, limits).expect("second socket");
+        let first_port = first.local_addr().port();
+        let second_port = second.local_addr().port();
+        let set = SocketSet::new(vec![first, second]).expect("socket set");
+        assert_eq!(set.len(), 2);
+        assert_eq!(set.primary().local_addr().port(), first_port);
+        let ports: Vec<u16> = (0..4).map(|_| set.next().local_addr().port()).collect();
+        assert_eq!(
+            ports,
+            vec![first_port, second_port, first_port, second_port]
+        );
     }
 
     #[test]

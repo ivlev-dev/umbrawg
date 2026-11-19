@@ -46,6 +46,9 @@ pub enum TransportError {
         /// Maximum supported number of datagrams.
         max: usize,
     },
+    /// A socket set was created without sockets.
+    #[error("socket set must contain at least one socket")]
+    EmptySocketSet,
     /// An empty batch was passed to a batch operation.
     #[error("batch must contain at least one datagram")]
     EmptyBatch,

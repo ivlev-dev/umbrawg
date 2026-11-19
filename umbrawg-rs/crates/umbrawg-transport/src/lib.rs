@@ -57,7 +57,9 @@ pub use gso::{
     IPV4_HEADER_LEN, IPV6_HEADER_LEN, MAX_SEGMENTS, MAX_UDP_PAYLOAD_V4, MAX_UDP_PAYLOAD_V6,
     UDP_HEADER_LEN,
 };
-pub use socket::{interface_mtu, Features, Incoming, MtuDiscover, OpenOptions, Socket};
+pub use socket::{
+    interface_mtu, Features, Incoming, MtuDiscover, OpenOptions, Socket, SocketSet, SocketSource,
+};
 pub use sticky::SourceAddr;
 
 /// Maximum number of datagrams handled by one batch call.
