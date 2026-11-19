@@ -439,6 +439,13 @@ fn send_run<R: rand_core::RngCore>(
     if plaintexts.is_empty() {
         return;
     }
+    {
+        let bytes: usize = plaintexts.iter().map(|packet| packet.len()).sum();
+        let delay = device.pacing_delay(peer, bytes, now);
+        if delay > Duration::from_millis(2) && plaintexts.len() > 1 {
+            thread::sleep(delay.min(Duration::from_millis(50)));
+        }
+    }
     if let Some(limit) = device.fec_packet_limit(peer) {
         for chunk in plaintexts.chunks(limit.max(1)) {
             send_run_inner(

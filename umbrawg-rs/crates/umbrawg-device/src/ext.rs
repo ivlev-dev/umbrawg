@@ -341,9 +341,7 @@ impl PeerExtension {
     }
 
     pub(crate) fn fec_tx_active(&self) -> bool {
-        self.fec_active
-            && self.peer_caps.contains(CapsFlags::FEC)
-            && self.fec_tx.is_some()
+        self.fec_active && self.peer_caps.contains(CapsFlags::FEC) && self.fec_tx.is_some()
     }
 
     pub(crate) fn fec_active(&self) -> bool {
@@ -367,11 +365,10 @@ impl PeerExtension {
                 let since = *self.adaptive_clean_since.get_or_insert(now);
                 if now.saturating_duration_since(since) >= Duration::from_secs(5) {
                     self.fec_active = false;
-                    self.fec_tx = self
-                        .config
-                        .fec
-                        .config()
-                        .map(|fec| FecEncoder::new(fec, usize::from(self.config.max_shard_len)));
+                    self.fec_tx =
+                        self.config.fec.config().map(|fec| {
+                            FecEncoder::new(fec, usize::from(self.config.max_shard_len))
+                        });
                 }
             } else {
                 self.adaptive_clean_since = None;
