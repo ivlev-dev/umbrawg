@@ -140,14 +140,14 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 	    uwg->fec_mode != UWG_FEC_MODE_OFF)
 		flags |= UWG_EXT_CAP_ACK;
 
-	if (uwg->fec_mode != UWG_FEC_MODE_OFF &&
-	    uwg_fec_mode_config(uwg->fec_mode, &k, &m, &adaptive)) {
-		flags |= UWG_EXT_CAP_FEC;
-		if (adaptive)
-			flags |= UWG_EXT_CAP_FEC_ADAPTIVE;
-		caps->fec_k = k;
-		caps->fec_m = m;
-	}
+	/* FEC data-plane is implemented and tested kernel<->kernel, but the
+	 * mixed kernel<->userspace path is not validated yet. Keep advertising
+	 * ACK only until that interop is fixed, otherwise a userspace peer
+	 * starts sending FEC shards that the module must not receive yet.
+	 */
+	(void)k;
+	(void)m;
+	(void)adaptive;
 
 	caps->flags = flags;
 }
