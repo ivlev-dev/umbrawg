@@ -158,6 +158,10 @@ struct AckTracker {
     last_sent: Option<Instant>,
     largest_at: Instant,
     interval: u16,
+    window_received: u32,
+    window_highest: u64,
+    window_base: u64,
+    last_loss: f32,
 }
 
 impl AckTracker {
@@ -169,10 +173,14 @@ impl AckTracker {
             last_sent: None,
             largest_at: Instant::now(),
             interval: interval.max(1),
+            window_received: 0,
+            window_highest: 0,
+            window_base: 0,
+            last_loss: 0.0,
         }
     }
 
-    fn observe(&mut self, counter: u64, now: Instant) {
+    fn observe(&mut self, counter: u64, now: Instant, count_for_ack: bool) {
         match self.largest {
             None => {
                 self.largest = Some(counter);
@@ -196,7 +204,33 @@ impl AckTracker {
                 }
             }
         }
-        self.received_since = self.received_since.saturating_add(1);
+        if count_for_ack {
+            self.received_since = self.received_since.saturating_add(1);
+        }
+        if self.window_received == 0 {
+            self.window_base = counter;
+        }
+        self.window_received = self.window_received.saturating_add(1);
+        self.window_highest = self.window_highest.max(counter);
+        if self.window_received >= 256 {
+            let expected = self
+                .window_highest
+                .saturating_sub(self.window_base)
+                .saturating_add(1);
+            let lost = expected.saturating_sub(u64::from(self.window_received));
+            self.last_loss = if expected == 0 {
+                0.0
+            } else {
+                lost as f32 / expected as f32
+            };
+            self.window_received = 0;
+            self.window_highest = counter;
+            self.window_base = counter.saturating_add(1);
+        }
+    }
+
+    fn last_loss(&self) -> f32 {
+        self.last_loss
     }
 
     fn due(&self, now: Instant) -> bool {
@@ -229,6 +263,10 @@ impl AckTracker {
         self.bitmap = 0;
         self.received_since = 0;
         self.last_sent = None;
+        self.window_received = 0;
+        self.window_highest = 0;
+        self.window_base = 0;
+        self.last_loss = 0.0;
     }
 }
 
@@ -242,6 +280,9 @@ pub(crate) struct PeerExtension {
     bbr: Option<Bbr>,
     fec_tx: Option<FecEncoder>,
     fec_rx: Option<FecDecoder>,
+    fec_active: bool,
+    adaptive_observed: u64,
+    adaptive_clean_since: Option<Instant>,
     fec_deadline: Option<Instant>,
     pending: VecDeque<Vec<u8>>,
 }
@@ -264,6 +305,9 @@ impl PeerExtension {
             bbr: None,
             fec_tx: None,
             fec_rx: None,
+            fec_active: false,
+            adaptive_observed: 0,
+            adaptive_clean_since: None,
             fec_deadline: None,
             pending: VecDeque::new(),
         };
@@ -274,7 +318,12 @@ impl PeerExtension {
     pub(crate) fn configure(&mut self, config: ExtConfig) {
         self.config = config;
         self.local_caps = config.local_caps();
-        self.ack = AckTracker::new(config.ack_interval);
+        let ack_interval = if config.bbr == BbrMode::Off && config.fec == FecMode::Adaptive {
+            32
+        } else {
+            config.ack_interval
+        };
+        self.ack = AckTracker::new(ack_interval);
         self.bbr = config.bbr.enabled().then(|| Bbr::new(config.bbr_config()));
         self.fec_tx = config
             .fec
@@ -286,12 +335,48 @@ impl PeerExtension {
         self.caps_next = None;
         self.pending.clear();
         self.fec_deadline = None;
+        self.adaptive_clean_since = None;
+        self.adaptive_observed = 0;
+        self.fec_active = !matches!(config.fec, FecMode::Off | FecMode::Adaptive);
     }
 
     pub(crate) fn fec_tx_active(&self) -> bool {
-        self.config.fec != FecMode::Off
+        self.fec_active
             && self.peer_caps.contains(CapsFlags::FEC)
             && self.fec_tx.is_some()
+    }
+
+    pub(crate) fn fec_active(&self) -> bool {
+        self.fec_active && self.peer_caps.contains(CapsFlags::FEC)
+    }
+
+    fn update_adaptive(&mut self, now: Instant) {
+        if self.config.fec != FecMode::Adaptive {
+            return;
+        }
+        self.adaptive_observed = self.adaptive_observed.saturating_add(1);
+        if self.adaptive_observed < 1024 {
+            return;
+        }
+        let loss = self.ack.last_loss();
+        if loss > 0.01 {
+            self.fec_active = true;
+            self.adaptive_clean_since = None;
+        } else if self.fec_active {
+            if loss < 0.002 {
+                let since = *self.adaptive_clean_since.get_or_insert(now);
+                if now.saturating_duration_since(since) >= Duration::from_secs(5) {
+                    self.fec_active = false;
+                    self.fec_tx = self
+                        .config
+                        .fec
+                        .config()
+                        .map(|fec| FecEncoder::new(fec, usize::from(self.config.max_shard_len)));
+                }
+            } else {
+                self.adaptive_clean_since = None;
+            }
+        }
     }
 
     pub(crate) fn fec_push(
@@ -367,7 +452,13 @@ impl PeerExtension {
     }
 
     pub(crate) fn observe_received(&mut self, counter: u64, now: Instant) {
-        self.ack.observe(counter, now);
+        self.ack.observe(counter, now, true);
+        self.update_adaptive(now);
+    }
+
+    pub(crate) fn observe_control(&mut self, counter: u64, now: Instant) {
+        self.ack.observe(counter, now, false);
+        self.update_adaptive(now);
     }
 
     pub(crate) fn pacing_delay(&mut self, bytes: usize, now: Instant) -> Duration {

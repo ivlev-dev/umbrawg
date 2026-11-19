@@ -439,11 +439,6 @@ fn send_run<R: rand_core::RngCore>(
     if plaintexts.is_empty() {
         return;
     }
-    let bytes: usize = plaintexts.iter().map(|packet| packet.len()).sum();
-    let delay = device.pacing_delay(peer, bytes, now);
-    if delay > Duration::ZERO {
-        thread::sleep(delay.min(Duration::from_millis(1)));
-    }
     if let Some(limit) = device.fec_packet_limit(peer) {
         for chunk in plaintexts.chunks(limit.max(1)) {
             send_run_inner(
@@ -735,6 +730,7 @@ fn worker_loop(
     let mut socket: Option<SocketSet> = None;
     let mut bound_extra: Option<usize> = None;
     let mut bound_mark: Option<u32> = None;
+    let mut bound_gso_limit = usize::MAX;
     let mut rebind_after = Instant::now();
 
     while !shutdown_requested() {
@@ -769,6 +765,13 @@ fn worker_loop(
             }
         }
         let active = socket.as_ref().expect("socket is bound");
+        let want_gso_limit = device.fec_gso_segments().unwrap_or(usize::MAX);
+        if bound_gso_limit != want_gso_limit {
+            for listener in active.all() {
+                listener.limit_gso_segments(want_gso_limit);
+            }
+            bound_gso_limit = want_gso_limit;
+        }
         if bound_mark != Some(want_mark) && apply_socket_mark(active, want_mark) {
             bound_mark = Some(want_mark);
         }

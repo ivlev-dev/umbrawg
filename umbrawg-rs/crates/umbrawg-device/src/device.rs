@@ -338,8 +338,17 @@ impl Device {
     #[must_use]
     pub fn fec_gso_segments(&self) -> Option<usize> {
         let config = self.ext_config();
-        let fec = config.fec.config()?;
-        Some(fec.m().max(1))
+        match config.fec {
+            crate::FecMode::Off => None,
+            crate::FecMode::Fixed { .. } => config.fec.config().map(|fec| fec.m().max(1)),
+            crate::FecMode::Adaptive => self
+                .peers
+                .load()
+                .values()
+                .any(|peer| peer.extension().fec_active())
+                .then(|| config.fec.config().map(|fec| fec.m().max(1)))
+                .flatten(),
+        }
     }
 
     #[must_use]
@@ -1525,6 +1534,7 @@ impl Device {
     ) -> Result<IncomingOutcome> {
         match kind {
             ControlKind::Caps => {
+                peer.extension().observe_control(counter, ctx.now);
                 let Ok(caps) = Caps::decode(plaintext) else {
                     return Ok(IncomingOutcome::Dropped);
                 };
@@ -1532,6 +1542,7 @@ impl Device {
                 Ok(IncomingOutcome::Keepalive)
             }
             ControlKind::Ack => {
+                peer.extension().observe_control(counter, ctx.now);
                 let Ok(ack) = Ack::decode(plaintext) else {
                     return Ok(IncomingOutcome::Dropped);
                 };
