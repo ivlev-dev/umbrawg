@@ -3,6 +3,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod control;
 mod error;
 pub mod header_protection;
 mod hex;
@@ -11,6 +12,7 @@ pub mod obf;
 pub mod params;
 pub mod special;
 
+pub use control::{Ack, Caps, CapsFlags, ControlKind, FecShardHeader};
 pub use error::{ProtoError, Result};
 pub use messages::{
     CookieReply, HandshakeInitiation, HandshakeResponse, MessageType, TransportPacket,

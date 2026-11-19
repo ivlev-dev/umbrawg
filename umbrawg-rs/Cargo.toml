@@ -10,6 +10,8 @@ members = [
     "crates/umbrawg-uapi",
     "crates/umbrawg",
     "crates/umbrawg-bench",
+    "crates/umbrawg-cc",
+    "crates/umbrawg-fec",
 ]
 
 [workspace.package]
@@ -27,6 +29,8 @@ umbrawg-device = { path = "crates/umbrawg-device" }
 umbrawg-transport = { path = "crates/umbrawg-transport" }
 umbrawg-tun = { path = "crates/umbrawg-tun" }
 umbrawg-uapi = { path = "crates/umbrawg-uapi" }
+umbrawg-cc = { path = "crates/umbrawg-cc" }
+umbrawg-fec = { path = "crates/umbrawg-fec" }
 
 thiserror = "2"
 log = "0.4"
