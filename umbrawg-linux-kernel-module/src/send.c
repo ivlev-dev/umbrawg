@@ -72,7 +72,7 @@ static void uwg_packet_send_handshake_initiation(struct uwg_peer *peer)
 		junk_packet_count = uwg->jc;
 		buffer = kzalloc(uwg->jmax, GFP_KERNEL);
 
-		while (junk_packet_count-- > 0) {
+		while (buffer && junk_packet_count-- > 0) {
 			junk_packet_size = (u16) get_random_u32_inclusive(uwg->jmin, uwg->jmax);
 
 			get_random_bytes(buffer, junk_packet_size);
@@ -389,8 +389,14 @@ static struct sk_buff *uwg_packet_gso_alloc(struct sk_buff **pkts,
 		return NULL;
 
 	skb_reserve(skb, DATA_PACKET_HEAD_ROOM);
-	for (i = 0; i < count; ++i)
-		skb_put_data(skb, pkts[i]->data, len);
+	for (i = 0; i < count; ++i) {
+		void *dst = skb_put(skb, len);
+
+		if (unlikely(skb_copy_bits(pkts[i], 0, dst, len))) {
+			kfree_skb(skb);
+			return NULL;
+		}
+	}
 
 	/* The UDP header is pushed by the tunnel xmit path right at the
 	 * current data pointer, so advertise the checksum start relative

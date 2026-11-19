@@ -146,7 +146,7 @@ static int uwg_aead_crypt(struct uwg_aead *aead, struct sk_buff *skb,
 	op->result = -EINPROGRESS;
 	ret = encrypt ? crypto_aead_encrypt(op->req) :
 			crypto_aead_decrypt(op->req);
-	if (ret == -EINPROGRESS || ret == -EBUSY) {
+	if (ret == -EINPROGRESS) {
 		wait_for_completion(&op->completion);
 		ret = op->result;
 	}

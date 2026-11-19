@@ -46,7 +46,7 @@ struct uwg_device {
 	struct crypt_queue encrypt_queue, decrypt_queue, handshake_queue;
 	struct sock __rcu *sock4, *sock6;
 #define UWG_EXTRA_PORTS_MAX 8
-#define UWG_EXTRA_PORTS_DEFAULT 4
+#define UWG_EXTRA_PORTS_DEFAULT 0
 	struct sock __rcu *sock4_extra[UWG_EXTRA_PORTS_MAX];
 	struct sock __rcu *sock6_extra[UWG_EXTRA_PORTS_MAX];
 	u8 sock4_extra_count, sock6_extra_count;

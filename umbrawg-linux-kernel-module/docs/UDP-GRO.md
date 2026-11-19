@@ -84,7 +84,7 @@ EXPORT_SYMBOL_GPL(udp_read_skb);
 ## 6. Альтернативы без патча
 
 - несколько внешних UDP-потоков на пира: **реализовано** через
-  per-device `extra_ports` (0…8, по умолчанию 4; netlink/UAPI/конфиг):
+  per-device `extra_ports` (0…8, по умолчанию 0; netlink/UAPI/конфиг):
   базовый + N эфемерных encap-сокетов, round-robin отправка, приём на
   всех; см. PERFORMANCE.md. Даёт паритет с `go` на obf0 и плюс на obf1;
   меняет SourcePort/roaming.

@@ -254,7 +254,7 @@ int jp_spec_setup(struct jp_spec *spec, const char* str) {
     int pkt_size, mods_size;
     struct jp_tag *tag, *tmp;
     struct jp_modifier *mod;
-    char* buf, *desc;
+    char* buf = NULL, *desc = NULL;
     LIST_HEAD(head);
 
     if (str == NULL)

@@ -20,12 +20,18 @@
 
 static struct sock *uwg_socket_pick(struct uwg_device *uwg, bool v6)
 {
-	unsigned int count = v6 ? READ_ONCE(uwg->sock6_extra_count) :
-				  READ_ONCE(uwg->sock4_extra_count);
-	unsigned int idx = atomic_inc_return(v6 ? &uwg->sock6_rr :
-						  &uwg->sock4_rr) % (count + 1);
+	unsigned int count = v6 ? smp_load_acquire(&uwg->sock6_extra_count) :
+				  smp_load_acquire(&uwg->sock4_extra_count);
+	unsigned int idx;
 	struct sock *sock;
 
+	if (!count) {
+		if (v6)
+			return rcu_dereference_bh(uwg->sock6);
+		return rcu_dereference_bh(uwg->sock4);
+	}
+	idx = atomic_inc_return(v6 ? &uwg->sock6_rr :
+				     &uwg->sock4_rr) % (count + 1);
 	if (idx) {
 		if (v6)
 			sock = rcu_dereference_bh(uwg->sock6_extra[idx - 1]);
@@ -201,7 +207,7 @@ int uwg_socket_send_skb_to_peer(struct uwg_peer *peer, struct sk_buff *skb, u8 d
 	else
 		dev_kfree_skb(skb);
 	if (likely(!ret))
-		peer->tx_bytes += skb_len;
+		atomic64_add(skb_len, &peer->tx_bytes);
 	read_unlock_bh(&peer->endpoint_lock);
 
 	return ret;
@@ -563,8 +569,8 @@ static void uwg_socket_extra_reinit(struct uwg_device *uwg,
 		rcu_assign_pointer(uwg->sock4_extra[i], i < n4 ? new4[i] : NULL);
 		rcu_assign_pointer(uwg->sock6_extra[i], i < n6 ? new6[i] : NULL);
 	}
-	WRITE_ONCE(uwg->sock4_extra_count, n4);
-	WRITE_ONCE(uwg->sock6_extra_count, n6);
+	smp_store_release(&uwg->sock4_extra_count, n4);
+	smp_store_release(&uwg->sock6_extra_count, n6);
 	mutex_unlock(&uwg->socket_update_lock);
 	synchronize_net();
 	for (i = 0; i < old4n; i++)

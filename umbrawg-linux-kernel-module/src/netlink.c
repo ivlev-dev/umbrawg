@@ -205,6 +205,8 @@ static inline int generate_ipv4_address_with_prefix(const struct ipv4_prefix *pr
 
 	if (prefix->prefix_len == 32) {
 		suffix_mask = 0;
+	} else if (prefix->prefix_len == 0) {
+		suffix_mask = ~0U;
 	} else {
 		suffix_mask = (1U << (32 - prefix->prefix_len)) - 1;
 	}
@@ -330,9 +332,9 @@ get_peer(struct uwg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 			    sizeof(last_handshake), &last_handshake) ||
 		    nla_put_u32(skb, UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL,
 				peer->persistent_keepalive_interval) ||
-		    nla_put_u64_64bit(skb, UWGPEER_A_TX_BYTES, peer->tx_bytes,
+		    nla_put_u64_64bit(skb, UWGPEER_A_TX_BYTES, atomic64_read(&peer->tx_bytes),
 				      UWGPEER_A_UNSPEC) ||
-		    nla_put_u64_64bit(skb, UWGPEER_A_RX_BYTES, peer->rx_bytes,
+		    nla_put_u64_64bit(skb, UWGPEER_A_RX_BYTES, atomic64_read(&peer->rx_bytes),
 				      UWGPEER_A_UNSPEC) ||
 		    nla_put_u32(skb, UWGPEER_A_PROTOCOL_VERSION, 1) ||
 		    nla_put_u32(skb, UWGPEER_A_CIPHER, peer->cipher))
@@ -345,8 +347,10 @@ get_peer(struct uwg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 
 			if (bogus_endpoints) {
 				ret = generate_ipv4_address_with_prefix(&prefix, &addr4.sin_addr.s_addr);
-				if (ret < 0)
+				if (ret < 0) {
+					read_unlock_bh(&peer->endpoint_lock);
 					goto err;
+				}
 			}
 
 			fail = nla_put(skb, UWGPEER_A_ENDPOINT, sizeof(addr4), &addr4);
@@ -355,8 +359,10 @@ get_peer(struct uwg_peer *peer, struct sk_buff *skb, struct dump_ctx *ctx)
 
 			if (bogus_endpoints) {
 				ret = generate_ipv6_address_with_prefix(&prefix6, addr6.sin6_addr.s6_addr);
-				if (ret < 0)
+				if (ret < 0) {
+					read_unlock_bh(&peer->endpoint_lock);
 					goto err;
+				}
 			}
 
 			fail = nla_put(skb, UWGPEER_A_ENDPOINT, sizeof(addr6), &addr6);

@@ -608,7 +608,7 @@ uwg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 {
 	struct uwg_peer *peer = NULL, *ret_peer = NULL;
 	struct noise_handshake *handshake;
-	struct endpoint *endpoint = kzalloc(sizeof(*endpoint), GFP_KERNEL);
+	struct endpoint endpoint;
 	bool replay_attack, flood_attack;
 	u8 key[NOISE_SYMMETRIC_KEY_LEN];
 	u8 chaining_key[NOISE_HASH_LEN];
@@ -639,11 +639,11 @@ uwg_noise_handshake_consume_initiation(struct message_handshake_initiation *src,
 	/* Lookup which peer we're actually talking to */
 	peer = uwg_pubkey_hashtable_lookup(uwg->peer_hashtable, s);
 	if (!peer) {
-		if (unlikely(uwg_socket_endpoint_from_skb(endpoint, skb)))
+		if (unlikely(uwg_socket_endpoint_from_skb(&endpoint, skb)))
 			goto out;
 
 		net_dbg_skb_ratelimited("%s: unknown peer from %pISpfsc\n", uwg->dev->name, skb);
-		uwg_genl_mcast_peer_unknown(uwg, s, endpoint);
+		uwg_genl_mcast_peer_unknown(uwg, s, &endpoint);
 		goto out;
 	}
 	handshake = &peer->handshake;
@@ -689,7 +689,6 @@ out:
 	memzero_explicit(chaining_key, NOISE_HASH_LEN);
 	up_read(&uwg->static_identity.lock);
 
-	kfree(endpoint);
 
 	if (!ret_peer)
 		uwg_peer_put(peer);
