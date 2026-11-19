@@ -39,6 +39,8 @@ const MAX_SWEEP_AGE_NS: u64 = 2 * NS_PER_SEC;
 const MAX_DELAY_NS: u64 = NS_PER_SEC;
 /// Minimum accepted RTT sample.
 const MIN_RTT_SAMPLE_NS: u64 = 1_000;
+/// Bounded time in DRAIN for a tunnel whose application queue never empties.
+const DRAIN_MAX_NS: u64 = 100_000_000;
 /// Divisor of the `inflight_hi` additive growth step.
 const HI_GROWTH_DIVISOR: u64 = 64;
 /// Bound on rate samples relative to `cwnd / min_rtt`.
@@ -138,6 +140,7 @@ pub struct Bbr {
 
     cycle_idx: usize,
     cycle_start_ns: u64,
+    drain_start_ns: u64,
 
     probe_rtt_start_ns: u64,
     probe_rtt_done_ns: u64,
@@ -193,6 +196,7 @@ impl Bbr {
             bw_hi: 0,
             cycle_idx: 0,
             cycle_start_ns: 0,
+            drain_start_ns: 0,
             probe_rtt_start_ns: 0,
             probe_rtt_done_ns: 0,
             probe_rtt_round: 0,
@@ -552,6 +556,7 @@ impl Bbr {
         self.inflight_lo = self.inflight_lo.min(self.inflight_hi);
         self.bw_hi = self.btl_bw;
         self.mode = Mode::Drain;
+        self.drain_start_ns = 0;
     }
 
     fn update_mode(&mut self, now_ns: u64) {
@@ -562,8 +567,14 @@ impl Bbr {
                 }
             }
             Mode::Drain => {
+                if self.drain_start_ns == 0 {
+                    self.drain_start_ns = now_ns;
+                }
                 let target = self.bdp().max(self.min_cwnd);
-                if self.inflight <= target {
+                let drained = self.inflight <= target
+                    || now_ns.saturating_sub(self.drain_start_ns) >= DRAIN_MAX_NS;
+                if drained {
+                    self.drain_start_ns = 0;
                     self.mode = Mode::ProbeBw;
                     self.cycle_idx = 0;
                     self.cycle_start_ns = now_ns;
