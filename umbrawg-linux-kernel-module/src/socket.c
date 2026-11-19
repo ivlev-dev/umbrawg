@@ -18,6 +18,30 @@
 #include <net/udp_tunnel.h>
 #include <net/ipv6.h>
 
+static unsigned int uwg_extra_ports;
+module_param_named(extra_ports, uwg_extra_ports, uint, 0400);
+
+static struct sock *uwg_socket_pick(struct uwg_device *uwg, bool v6)
+{
+	unsigned int count = v6 ? READ_ONCE(uwg->sock6_extra_count) :
+				  READ_ONCE(uwg->sock4_extra_count);
+	unsigned int idx = atomic_inc_return(v6 ? &uwg->sock6_rr :
+						  &uwg->sock4_rr) % (count + 1);
+	struct sock *sock;
+
+	if (idx) {
+		if (v6)
+			sock = rcu_dereference_bh(uwg->sock6_extra[idx - 1]);
+		else
+			sock = rcu_dereference_bh(uwg->sock4_extra[idx - 1]);
+		if (sock)
+			return sock;
+	}
+	if (v6)
+		return rcu_dereference_bh(uwg->sock6);
+	return rcu_dereference_bh(uwg->sock4);
+}
+
 static int send4(struct uwg_device *uwg, struct sk_buff *skb,
 		 struct endpoint *endpoint, u8 ds, struct dst_cache *cache)
 {
@@ -37,7 +61,7 @@ static int send4(struct uwg_device *uwg, struct sk_buff *skb,
 	skb->mark = uwg->fwmark;
 
 	rcu_read_lock_bh();
-	sock = rcu_dereference_bh(uwg->sock4);
+	sock = uwg_socket_pick(uwg, false);
 
 	if (unlikely(!sock)) {
 		ret = -ENONET;
@@ -117,7 +141,7 @@ static int send6(struct uwg_device *uwg, struct sk_buff *skb,
 	skb->mark = uwg->fwmark;
 
 	rcu_read_lock_bh();
-	sock = rcu_dereference_bh(uwg->sock6);
+	sock = uwg_socket_pick(uwg, true);
 
 	if (unlikely(!sock)) {
 		ret = -ENONET;
@@ -387,6 +411,10 @@ static void set_sock_opts(struct socket *sock)
 	sk_set_memalloc(sock->sk);
 }
 
+static void uwg_socket_extra_reinit(struct uwg_device *uwg,
+				    struct sock **new4, unsigned int n4,
+				    struct sock **new6, unsigned int n6);
+
 int uwg_socket_init(struct uwg_device *uwg, u16 port)
 {
 	struct net *net;
@@ -397,6 +425,9 @@ int uwg_socket_init(struct uwg_device *uwg, u16 port)
 		.encap_rcv = uwg_receive
 	};
 	struct socket *new4 = NULL, *new6 = NULL;
+	struct sock *extra4[UWG_EXTRA_PORTS_MAX] = {};
+	struct sock *extra6[UWG_EXTRA_PORTS_MAX] = {};
+	unsigned int n4 = 0, n6 = 0;
 	struct udp_port_cfg port4 = {
 		.family = AF_INET,
 		.local_ip.s_addr = htonl(INADDR_ANY),
@@ -450,11 +481,91 @@ retry:
 	}
 #endif
 
+	{
+		unsigned int want = min_t(unsigned int, uwg_extra_ports,
+					  UWG_EXTRA_PORTS_MAX);
+		unsigned int i;
+
+		for (i = 0; i < want; i++) {
+			struct udp_port_cfg p4 = port4;
+			struct socket *extra = NULL;
+
+			p4.local_udp_port = 0;
+			ret = udp_sock_create(net, &p4, &extra);
+			if (ret < 0)
+				goto err_extras;
+			set_sock_opts(extra);
+			setup_udp_tunnel_sock(net, extra->sk, &cfg);
+			extra4[n4++] = extra->sk;
+		}
+#if IS_ENABLED(CONFIG_IPV6)
+		if (ipv6_mod_enabled()) {
+			for (i = 0; i < want; i++) {
+				struct udp_port_cfg p6 = port6;
+				struct socket *extra = NULL;
+
+				p6.local_udp_port = 0;
+				ret = udp_sock_create(net, &p6, &extra);
+				if (ret < 0)
+					goto err_extras;
+				set_sock_opts(extra);
+				setup_udp_tunnel_sock(net, extra->sk, &cfg);
+				extra6[n6++] = extra->sk;
+			}
+		}
+#endif
+	}
+
 	uwg_socket_reinit(uwg, new4->sk, new6 ? new6->sk : NULL);
+	uwg_socket_extra_reinit(uwg, extra4, n4, extra6, n6);
 	ret = 0;
+	goto out;
+
+err_extras:
+	while (n4)
+		sock_free(extra4[--n4]);
+	while (n6)
+		sock_free(extra6[--n6]);
+	udp_tunnel_sock_release(new4->sk);
+	if (new6)
+		udp_tunnel_sock_release(new6->sk);
+	goto out;
 out:
 	put_net(net);
 	return ret;
+}
+
+static void uwg_socket_extra_reinit(struct uwg_device *uwg,
+				    struct sock **new4, unsigned int n4,
+				    struct sock **new6, unsigned int n6)
+{
+	struct sock *old4[UWG_EXTRA_PORTS_MAX];
+	struct sock *old6[UWG_EXTRA_PORTS_MAX];
+	unsigned int old4n, old6n, i;
+
+	mutex_lock(&uwg->socket_update_lock);
+	old4n = uwg->sock4_extra_count;
+	old6n = uwg->sock6_extra_count;
+	for (i = 0; i < old4n; i++)
+		old4[i] = rcu_dereference_protected(
+			uwg->sock4_extra[i],
+			lockdep_is_held(&uwg->socket_update_lock));
+	for (i = 0; i < old6n; i++)
+		old6[i] = rcu_dereference_protected(
+			uwg->sock6_extra[i],
+			lockdep_is_held(&uwg->socket_update_lock));
+	for (i = 0; i < UWG_EXTRA_PORTS_MAX; i++) {
+		rcu_assign_pointer(uwg->sock4_extra[i], i < n4 ? new4[i] : NULL);
+		rcu_assign_pointer(uwg->sock6_extra[i], i < n6 ? new6[i] : NULL);
+	}
+	WRITE_ONCE(uwg->sock4_extra_count, n4);
+	WRITE_ONCE(uwg->sock6_extra_count, n6);
+	mutex_unlock(&uwg->socket_update_lock);
+	synchronize_net();
+	for (i = 0; i < old4n; i++)
+		sock_free(old4[i]);
+	for (i = 0; i < old6n; i++)
+		sock_free(old6[i]);
 }
 
 void uwg_socket_reinit(struct uwg_device *uwg, struct sock *new4,
@@ -462,6 +573,8 @@ void uwg_socket_reinit(struct uwg_device *uwg, struct sock *new4,
 {
 	struct sock *old4, *old6;
 
+	if (!new4)
+		uwg_socket_extra_reinit(uwg, NULL, 0, NULL, 0);
 	mutex_lock(&uwg->socket_update_lock);
 	old4 = rcu_dereference_protected(uwg->sock4,
 				lockdep_is_held(&uwg->socket_update_lock));
