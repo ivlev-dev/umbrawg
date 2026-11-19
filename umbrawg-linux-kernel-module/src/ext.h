@@ -32,7 +32,21 @@ struct uwg_peer;
 	(UWG_EXT_HEADER_LEN + UWG_EXT_ACK_HEADER_LEN + UWG_EXT_ACK_BITMAP_MAX)
 
 #define UWG_EXT_ACK_BITMAP_BITS (UWG_EXT_ACK_BITMAP_MAX * 8)
-#define UWG_EXT_ACK_MIN_INTERVAL_MS 1
+
+/* CAPS still advertises UWG_EXT_DEFAULT_ACK_INTERVAL for wire compatibility;
+ * the cadence actually used for our own ACKs is randomised per ACK so that it
+ * does not look like a metronome.
+ */
+#define UWG_EXT_ACK_INTERVAL_MIN 8
+#define UWG_EXT_ACK_INTERVAL_MAX 16
+#define UWG_EXT_ACK_DELAY_MIN_US 2000
+#define UWG_EXT_ACK_DELAY_MAX_US 5000
+
+/* Upper bound of the random tail appended to CAPS/ACK frames. Control frames
+ * must stay small: padding them up to the transport window would turn every
+ * ACK into a ~1 KB packet.
+ */
+#define UWG_EXT_CONTROL_PADDING_MAX 15
 
 #define UWG_EXT_CAPS_MAX_ATTEMPTS 3
 #define UWG_EXT_CAPS_RETRY_MS 2000
@@ -109,10 +123,13 @@ struct uwg_peer_ack_state {
 	u64 bitmap;
 	u64 keypair_id;
 	u32 pending;
+	/* Threshold and deadline of the current ACK cycle; both are drawn
+	 * anew whenever a cycle starts.
+	 */
+	u32 ack_target;
+	unsigned long ack_deadline;
 	ktime_t largest_ktime;
-	ktime_t last_ack_ktime;
 	bool valid;
-	bool sent;
 	spinlock_t lock;
 };
 

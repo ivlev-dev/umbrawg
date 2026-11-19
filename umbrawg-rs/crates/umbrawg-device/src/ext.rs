@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use rand_core::RngCore;
 use umbrawg_cc::{Ack as BbrAck, Bbr, BbrConfig};
 use umbrawg_fec::{FecConfig, FecDecoder, FecEncoder, FecShard};
 use umbrawg_proto::control::{Ack, Caps, CapsFlags, ControlKind};
@@ -13,6 +14,74 @@ const CAPS_MAX_ATTEMPTS: u8 = 3;
 const CAPS_FAST_RETRY: Duration = Duration::from_millis(250);
 /// Spacing of the last CAPS retry before the attempts are exhausted.
 const CAPS_SLOW_RETRY: Duration = Duration::from_secs(2);
+
+/// Lower bound of the randomized ACK interval, in received datagrams.
+const ACK_INTERVAL_MIN: u16 = 8;
+/// Upper bound of the randomized ACK interval, in received datagrams.
+const ACK_INTERVAL_MAX: u16 = 16;
+/// Lower bound of the randomized ACK timeout.
+const ACK_TIMEOUT_MIN_US: u64 = 2_000;
+/// Upper bound of the randomized ACK timeout.
+const ACK_TIMEOUT_MAX_US: u64 = 5_000;
+/// Lower bound of the randomized partial FEC block deadline.
+const FEC_DEADLINE_MIN_US: u64 = 500;
+/// Upper bound of the randomized partial FEC block deadline.
+const FEC_DEADLINE_MAX_US: u64 = 2_000;
+
+/// Small, fast, non-cryptographic PRNG used for traffic-shape jitter.
+///
+/// Randomness here only has to defeat simple periodicity detectors; it is not
+/// a security boundary. The state is seeded from the OS CSPRNG once per
+/// tracker so that two peers started with identical configuration do not
+/// produce identical schedules.
+struct Jitter {
+    state: u64,
+}
+
+impl Jitter {
+    fn seeded() -> Self {
+        Self {
+            state: umbrawg_crypto::random::u64() | 1,
+        }
+    }
+
+    /// Returns a value in `low..=high`. `low` must not exceed `high`.
+    fn range_inclusive(&mut self, low: u64, high: u64) -> u64 {
+        let span = high.saturating_sub(low).saturating_add(1);
+        if span <= 1 {
+            return low;
+        }
+        let value = (u128::from(self.next_u64()) * u128::from(span)) >> 64;
+        low.saturating_add(u64::try_from(value).unwrap_or(0))
+    }
+}
+
+impl RngCore for Jitter {
+    fn next_u32(&mut self) -> u32 {
+        (self.next_u64() >> 32) as u32
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut value = self.state;
+        value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        value ^ (value >> 31)
+    }
+
+    fn fill_bytes(&mut self, dst: &mut [u8]) {
+        for chunk in dst.chunks_mut(8) {
+            let bytes = self.next_u64().to_le_bytes();
+            let length = chunk.len();
+            chunk.copy_from_slice(&bytes[..length]);
+        }
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), rand_core::Error> {
+        self.fill_bytes(dst);
+        Ok(())
+    }
+}
 
 /// BBRv3 mode configured for the device.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -118,7 +187,11 @@ pub struct ExtConfig {
     pub bbr: BbrMode,
     /// FEC mode.
     pub fec: FecMode,
-    /// ACK interval in received datagrams.
+    /// Nominal ACK interval in received datagrams.
+    ///
+    /// The actual cadence is drawn from `ack_interval..=16` packets on every
+    /// ACK, and the value advertised in CAPS is clamped into `8..=16`. The
+    /// default of `8` yields the full `8..=16` distribution.
     pub ack_interval: u16,
     /// Maximum FEC shard payload (including the two-byte length prefix).
     pub max_shard_len: u16,
@@ -129,7 +202,7 @@ impl Default for ExtConfig {
         Self {
             bbr: BbrMode::Off,
             fec: FecMode::Off,
-            ack_interval: 2,
+            ack_interval: ACK_INTERVAL_MIN,
             max_shard_len: 1900,
         }
     }
@@ -175,7 +248,10 @@ struct AckTracker {
     received_since: u16,
     last_sent: Option<Instant>,
     largest_at: Instant,
+    base_interval: u16,
     interval: u16,
+    timeout: Duration,
+    jitter: Jitter,
     window_received: u32,
     window_highest: u64,
     window_base: u64,
@@ -184,13 +260,20 @@ struct AckTracker {
 
 impl AckTracker {
     fn new(interval: u16) -> Self {
+        let base_interval = interval.clamp(ACK_INTERVAL_MIN, ACK_INTERVAL_MAX);
+        let mut jitter = Jitter::seeded();
+        let interval = draw_interval(&mut jitter, base_interval);
+        let timeout = draw_timeout(&mut jitter);
         Self {
             largest: None,
             bitmap: 0,
             received_since: 0,
             last_sent: None,
             largest_at: Instant::now(),
-            interval: interval.max(1),
+            base_interval,
+            interval,
+            timeout,
+            jitter,
             window_received: 0,
             window_highest: 0,
             window_base: 0,
@@ -255,9 +338,9 @@ impl AckTracker {
         self.largest.is_some()
             && self.received_since > 0
             && (self.received_since >= self.interval
-                || self.last_sent.is_none_or(|sent| {
-                    now.saturating_duration_since(sent) >= Duration::from_millis(1)
-                }))
+                || self
+                    .last_sent
+                    .is_none_or(|sent| now.saturating_duration_since(sent) >= self.timeout))
     }
 
     fn make(&mut self, now: Instant) -> Option<Ack> {
@@ -274,6 +357,8 @@ impl AckTracker {
         };
         self.received_since = 0;
         self.last_sent = Some(now);
+        self.interval = draw_interval(&mut self.jitter, self.base_interval);
+        self.timeout = draw_timeout(&mut self.jitter);
         Some(ack)
     }
 
@@ -287,6 +372,20 @@ impl AckTracker {
         self.window_base = 0;
         self.last_loss = 0.0;
     }
+
+    /// Returns the interval advertised in CAPS frames.
+    fn advertised_interval(&self) -> u16 {
+        self.base_interval
+    }
+}
+
+fn draw_interval(jitter: &mut Jitter, base: u16) -> u16 {
+    u16::try_from(jitter.range_inclusive(u64::from(base), u64::from(ACK_INTERVAL_MAX)))
+        .unwrap_or(ACK_INTERVAL_MAX)
+}
+
+fn draw_timeout(jitter: &mut Jitter) -> Duration {
+    Duration::from_micros(jitter.range_inclusive(ACK_TIMEOUT_MIN_US, ACK_TIMEOUT_MAX_US))
 }
 
 /// One encoded control frame waiting for transmission.
@@ -327,6 +426,7 @@ pub(crate) struct PeerExtension {
     adaptive_observed: u64,
     adaptive_clean_since: Option<Instant>,
     fec_deadline: Option<Instant>,
+    jitter: Jitter,
     pending: VecDeque<ControlFrame>,
     bbr_queue: VecDeque<Vec<u8>>,
     bbr_queued_bytes: usize,
@@ -358,6 +458,7 @@ impl PeerExtension {
             adaptive_observed: 0,
             adaptive_clean_since: None,
             fec_deadline: None,
+            jitter: Jitter::seeded(),
             pending: VecDeque::new(),
             bbr_queue: VecDeque::new(),
             bbr_queued_bytes: 0,
@@ -369,14 +470,10 @@ impl PeerExtension {
     pub(crate) fn configure(&mut self, config: ExtConfig) {
         self.config = config;
         self.local_caps = config.local_caps();
-        // With BBR off and adaptive FEC on, ACKs only feed the loss
-        // estimator, so they are sent every 32 datagrams instead of every 2.
-        let ack_interval = if config.bbr == BbrMode::Off && config.fec == FecMode::Adaptive {
-            32
-        } else {
-            config.ack_interval
-        };
-        self.ack = AckTracker::new(ack_interval);
+        // ACKs are sent every 8..=16 datagrams or after a 2..=5 ms timeout,
+        // whichever comes first. The cadence is re-drawn after every ACK so
+        // that the feedback stream does not look like a perfect clock.
+        self.ack = AckTracker::new(config.ack_interval);
         self.bbr = config.bbr.enabled().then(|| Bbr::new(config.bbr_config()));
         self.fec_tx = config
             .fec
@@ -457,14 +554,18 @@ impl PeerExtension {
         if !self.fec_tx_active() {
             return Ok(None);
         }
+        let jitter = &mut self.jitter;
         let result = self
             .fec_tx
             .as_mut()
-            .map_or(Ok(None), |encoder| encoder.push(packet));
+            .map_or(Ok(None), |encoder| encoder.push_with_rng(packet, jitter));
         match &result {
             Ok(Some(_)) => self.fec_deadline = None,
             Ok(None) if self.fec_deadline.is_none() => {
-                self.fec_deadline = Some(now + Duration::from_millis(1));
+                let delay = self
+                    .jitter
+                    .range_inclusive(FEC_DEADLINE_MIN_US, FEC_DEADLINE_MAX_US);
+                self.fec_deadline = Some(now + Duration::from_micros(delay));
             }
             _ => {}
         }
@@ -479,7 +580,10 @@ impl PeerExtension {
             return None;
         }
         self.fec_deadline = None;
-        self.fec_tx.as_mut().and_then(FecEncoder::flush)
+        let jitter = &mut self.jitter;
+        self.fec_tx
+            .as_mut()
+            .and_then(|encoder| encoder.flush_with_rng(jitter))
     }
 
     pub(crate) fn fec_packet_limit(&self) -> Option<usize> {
@@ -657,7 +761,7 @@ impl PeerExtension {
         }
         let caps = Caps {
             flags: self.local_caps,
-            ack_interval_packets: self.config.ack_interval,
+            ack_interval_packets: self.ack.advertised_interval(),
             fec_k,
             fec_m,
         };
@@ -787,6 +891,47 @@ mod tests {
     }
 
     #[test]
+    fn acks_are_neither_per_packet_nor_perfectly_paced() {
+        let base = Instant::now();
+        let mut tracker = AckTracker::new(2);
+        let mut now = base;
+        let mut intervals = Vec::new();
+        let mut timeouts = Vec::new();
+        let mut counter = 0u64;
+        for _ in 0..512 {
+            now += Duration::from_micros(250);
+            counter += 1;
+            tracker.observe(counter, now, true);
+            if tracker.make(now).is_some() {
+                intervals.push(tracker.interval);
+                timeouts.push(tracker.timeout);
+            }
+        }
+        assert!(intervals.len() > 8, "ACKs must still flow");
+        for interval in &intervals {
+            assert!((ACK_INTERVAL_MIN..=ACK_INTERVAL_MAX).contains(interval));
+        }
+        for timeout in &timeouts {
+            assert!(*timeout >= Duration::from_micros(ACK_TIMEOUT_MIN_US));
+            assert!(*timeout <= Duration::from_micros(ACK_TIMEOUT_MAX_US));
+        }
+        intervals.sort_unstable();
+        intervals.dedup();
+        timeouts.sort_unstable();
+        timeouts.dedup();
+        assert!(intervals.len() > 1, "ACK packet interval must vary");
+        assert!(timeouts.len() > 1, "ACK timeout must vary");
+    }
+
+    #[test]
+    fn ack_interval_is_clamped_into_the_jitter_window() {
+        let small = AckTracker::new(0);
+        assert_eq!(small.advertised_interval(), ACK_INTERVAL_MIN);
+        let large = AckTracker::new(u16::MAX);
+        assert_eq!(large.advertised_interval(), ACK_INTERVAL_MAX);
+    }
+
+    #[test]
     fn control_frames_are_typed_by_kind() {
         let base = Instant::now();
         let mut ext = PeerExtension::new(BBR_CONFIG);
@@ -896,6 +1041,36 @@ mod tests {
     }
 
     #[test]
+    fn fec_partial_block_deadline_is_jittered() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 12,
+            max_shard_len: 1900,
+        });
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+        let mut delays = Vec::new();
+        let mut now = base;
+        for _ in 0..64 {
+            assert!(ext.fec_push(&[9u8; 20], now).unwrap().is_none());
+            let deadline = ext.fec_deadline.expect("deadline is armed");
+            delays.push(deadline.saturating_duration_since(now));
+            now += Duration::from_millis(3);
+            let block = ext.fec_flush_due(now).expect("partial block is due");
+            assert_eq!(block.m, 0);
+            assert!(usize::from(block.shard_len) >= 22);
+        }
+        for delay in &delays {
+            assert!(*delay >= Duration::from_micros(FEC_DEADLINE_MIN_US));
+            assert!(*delay <= Duration::from_micros(FEC_DEADLINE_MAX_US));
+        }
+        delays.sort_unstable();
+        delays.dedup();
+        assert!(delays.len() > 1, "partial block deadline must vary");
+    }
+
+    #[test]
     fn adaptive_profile_is_advertised_as_two_to_one() {
         let now = Instant::now();
         let mut ext = PeerExtension::new(ExtConfig {
@@ -908,7 +1083,8 @@ mod tests {
         assert_eq!(kinds(&frames), vec![ControlKind::Caps]);
         let decoded = Caps::decode(frames[0].bytes()).expect("caps frame decodes");
         assert_eq!((decoded.fec_k, decoded.fec_m), (2, 1));
-        assert_eq!(ext.ack.interval, 32);
+        assert!((ACK_INTERVAL_MIN..=ACK_INTERVAL_MAX).contains(&ext.ack.interval));
+        assert!((ACK_INTERVAL_MIN..=ACK_INTERVAL_MAX).contains(&decoded.ack_interval_packets));
 
         ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::FEC_ADAPTIVE, 2, 1), now);
         ext.fec_active = true;

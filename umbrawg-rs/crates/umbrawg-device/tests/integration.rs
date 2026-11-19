@@ -1257,21 +1257,22 @@ fn prepared_gro_segments_are_delivered_independently() {
     let now = Instant::now();
     complete_handshake(&mut pair, now);
 
-    let mut payloads = Vec::new();
-    for index in 0..3u8 {
-        let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[b'A' + index; 100]);
-        let mut output = vec![0u8; 65_535];
-        {
-            let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
-            pair.a
-                .send_data(&pair.peer_b, &packet, &mut output, &mut ctx)
-                .unwrap();
-        }
-        payloads.push(pair.io_a.take_sent().remove(0).payload);
-    }
-    let gro_size = payloads[0].len();
-    assert!(payloads.iter().all(|payload| payload.len() == gro_size));
-    let mut datagram: Vec<u8> = payloads.concat();
+    let packets: Vec<Vec<u8>> = (0..3u8)
+        .map(|index| ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[b'A' + index; 100]))
+        .collect();
+    let plaintexts: Vec<&[u8]> = packets.iter().map(Vec::as_slice).collect();
+    let mut output = vec![0u8; 65_535];
+    let layout = {
+        let mut rng = TestRng::new(19);
+        pair.a
+            .encrypt_batch(&pair.peer_b, &plaintexts, &mut output, &mut rng, now)
+            .unwrap()
+    };
+    assert_eq!(layout.len(), 1);
+    let group = layout.groups()[0];
+    assert_eq!(group.segments, 3);
+    let gro_size = group.segment_len;
+    let mut datagram = output[..layout.total_len()].to_vec();
     let snapshot = pair.b.incoming_snapshot();
 
     for offset in (0..datagram.len()).step_by(gro_size) {
@@ -1286,4 +1287,77 @@ fn prepared_gro_segments_are_delivered_independently() {
         assert!(matches!(outcome, IncomingOutcome::Delivered(_)));
     }
     assert_eq!(pair.io_b.delivered.len(), 3);
+}
+
+#[test]
+fn control_frames_get_bounded_padding() {
+    let params = ObfParams {
+        random_trailers: true,
+        ..ObfParams::default()
+    };
+    let mut pair = pair(params);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let big = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[7u8; 1200]);
+    let mut output = vec![0u8; 65_535];
+    {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_data(&pair.peer_b, &big, &mut output, &mut ctx)
+            .unwrap();
+    }
+    pair.io_a.take_sent();
+
+    let frame = [0u8; 32];
+    let base = 16 + frame.len() + 16;
+    let mut lengths = std::collections::HashSet::new();
+    for _ in 0..96 {
+        let mut dst = vec![0u8; 1024];
+        let length = pair
+            .a
+            .encrypt_control_packet(&pair.peer_b, &frame, &mut dst, &mut pair.rng, now)
+            .unwrap();
+        assert!(length >= base);
+        assert!(length <= base + 15, "control frame grew to {length} bytes");
+        lengths.insert(length);
+    }
+    assert!(lengths.len() > 1, "control padding must vary");
+}
+
+#[test]
+fn full_mtu_random_trailers_keep_a_small_reserve() {
+    let params = ObfParams {
+        random_trailers: true,
+        ..ObfParams::default()
+    };
+    let mut pair = pair(params);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[3u8; 1400]);
+    let base = 16 + packet.len() + 16;
+    let mut lengths = std::collections::HashSet::new();
+    for _ in 0..96 {
+        let mut output = vec![0u8; 65_535];
+        {
+            let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+            pair.a
+                .send_data(&pair.peer_b, &packet, &mut output, &mut ctx)
+                .unwrap();
+        }
+        let sent = pair.io_a.take_sent();
+        assert_eq!(sent.len(), 1);
+        let length = sent[0].payload.len();
+        assert!(length >= base);
+        assert!(
+            length <= base + 15,
+            "full-MTU trailer grew to {length} bytes"
+        );
+        lengths.insert(length);
+    }
+    assert!(
+        lengths.len() > 1,
+        "full-MTU packets must not share one length"
+    );
 }

@@ -11,6 +11,7 @@
 #include <linux/errno.h>
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
+#include <linux/random.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
@@ -331,8 +332,22 @@ static void uwg_ext_ack_observe(struct uwg_peer_ack_state *state, u64 keypair_id
 		if (shift < UWG_EXT_ACK_BITMAP_BITS)
 			state->bitmap |= (u64)1 << shift;
 	}
-	if (count_for_ack)
+	if (count_for_ack) {
+		/* A new ACK cycle: draw both the packet threshold and the
+		 * delayed-ACK deadline, so neither the count nor the timing
+		 * is predictable.
+		 */
+		if (!state->pending) {
+			state->ack_target = get_random_u32_inclusive(
+				UWG_EXT_ACK_INTERVAL_MIN,
+				UWG_EXT_ACK_INTERVAL_MAX);
+			state->ack_deadline = jiffies + max_t(unsigned long, 1,
+				usecs_to_jiffies(get_random_u32_inclusive(
+					UWG_EXT_ACK_DELAY_MIN_US,
+					UWG_EXT_ACK_DELAY_MAX_US)));
+		}
 		++state->pending;
+	}
 }
 
 static int uwg_ext_ack_build(const struct uwg_peer_ack_state *state,
@@ -350,15 +365,12 @@ static int uwg_ext_ack_build(const struct uwg_peer_ack_state *state,
 	return uwg_ext_build_ack(frame, len, &ack);
 }
 
-static bool uwg_ext_ack_due(const struct uwg_peer_ack_state *state,
-			    u32 interval, ktime_t now)
+static bool uwg_ext_ack_due(const struct uwg_peer_ack_state *state)
 {
 	if (!state->pending)
 		return false;
-	if (!state->sent || state->pending >= interval)
-		return true;
-	return ktime_after(now, ktime_add_ms(state->last_ack_ktime,
-					     UWG_EXT_ACK_MIN_INTERVAL_MS));
+	return state->pending >= state->ack_target ||
+	       time_after_eq(jiffies, state->ack_deadline);
 }
 
 static bool uwg_ext_peer_answers(const struct uwg_peer *peer)
@@ -369,7 +381,16 @@ static bool uwg_ext_peer_answers(const struct uwg_peer *peer)
 
 static void uwg_ext_ack_armed(struct uwg_peer *peer)
 {
-	timer_reduce(&peer->timer_send_ack, jiffies + 1);
+	unsigned long deadline;
+
+	/* Nothing to acknowledge: stay silent and do not burn a timer. */
+	if (!READ_ONCE(peer->ack_state.pending))
+		return;
+
+	deadline = READ_ONCE(peer->ack_state.ack_deadline);
+	if (time_before(deadline, jiffies + 1))
+		deadline = jiffies + 1;
+	timer_reduce(&peer->timer_send_ack, deadline);
 }
 
 void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce,
@@ -378,7 +399,6 @@ void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce,
 	struct uwg_peer_ack_state *state = &peer->ack_state;
 	struct noise_keypair *keypair;
 	u8 frame[UWG_EXT_MAX_FRAME_LEN];
-	u32 interval;
 	ktime_t now;
 	int len = -ENOENT;
 
@@ -396,17 +416,11 @@ void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce,
 	rcu_read_unlock_bh();
 
 	now = ktime_get();
-	interval = READ_ONCE(peer->caps.local.ack_interval);
-	if (!interval)
-		interval = UWG_EXT_DEFAULT_ACK_INTERVAL;
-
 	spin_lock_bh(&state->lock);
 	uwg_ext_ack_observe(state, keypair_id, nonce, now, count_for_ack);
-	if (uwg_ext_ack_due(state, interval, now)) {
+	if (uwg_ext_ack_due(state)) {
 		len = uwg_ext_ack_build(state, now, frame, sizeof(frame));
 		state->pending = 0;
-		state->sent = true;
-		state->last_ack_ktime = now;
 	}
 	spin_unlock_bh(&state->lock);
 
@@ -436,13 +450,10 @@ void uwg_ext_ack_timeout(struct uwg_peer *peer)
 	now = ktime_get();
 	spin_lock_bh(&state->lock);
 	if (state->valid && state->pending) {
-		if (ktime_after(now, ktime_add_ms(state->last_ack_ktime,
-						   UWG_EXT_ACK_MIN_INTERVAL_MS))) {
+		if (time_after_eq(jiffies, state->ack_deadline)) {
 			len = uwg_ext_ack_build(state, now, frame,
 						sizeof(frame));
 			state->pending = 0;
-			state->sent = true;
-			state->last_ack_ktime = now;
 		} else {
 			again = true;
 		}

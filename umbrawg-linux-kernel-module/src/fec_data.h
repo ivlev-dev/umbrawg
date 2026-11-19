@@ -17,7 +17,12 @@ struct uwg_fec_rx;
 #define UWG_FEC_DATA_SHARD_CAP 1900
 #define UWG_FEC_DATA_SLOTS 16
 #define UWG_FEC_DATA_BLOCK_TIMEOUT_US 5000
-#define UWG_FEC_DATA_TX_DELAY_US 1000
+#define UWG_FEC_DATA_TX_DELAY_MIN_US 500
+#define UWG_FEC_DATA_TX_DELAY_MAX_US 2000
+/* Random tail added to every shard of a block: it has to stay below the tx
+ * limit and is the same for all shards, as Reed-Solomon requires.
+ */
+#define UWG_FEC_DATA_SHARD_SLACK 32
 
 void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter);
 

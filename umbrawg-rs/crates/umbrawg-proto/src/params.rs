@@ -310,6 +310,57 @@ impl ObfParams {
         }
         align(last_unit).min(mtu) - last_unit
     }
+
+    /// Returns how many random bytes fit after the 16-byte alignment padding
+    /// without exceeding the MTU.
+    #[must_use]
+    pub fn mtu_padding_headroom(payload_len: usize, mtu: usize) -> usize {
+        if payload_len == 0 {
+            return 0;
+        }
+        let padding = Self::mtu_padding(payload_len, mtu);
+        if mtu == 0 {
+            return MESSAGE_PADDING_MULTIPLE - 1;
+        }
+        let unit = if payload_len > mtu {
+            payload_len % mtu
+        } else {
+            payload_len
+        };
+        mtu.saturating_sub(unit).saturating_sub(padding)
+    }
+
+    /// Returns a random reserve of `0..=15` bytes bounded by `space`.
+    ///
+    /// Used to break the 16-byte quantum of outer packet sizes without ever
+    /// exceeding the caller's budget.
+    #[must_use]
+    pub fn random_reserve_len(rng: &mut impl RngCore, space: usize) -> usize {
+        let limit = space.min(MESSAGE_PADDING_MULTIPLE - 1);
+        if limit == 0 {
+            return 0;
+        }
+        let upper = u32::try_from(limit.saturating_add(1)).unwrap_or(u32::MAX);
+        usize::try_from(random::below_with(rng, upper)).unwrap_or(0)
+    }
+
+    /// Returns the 16-byte alignment padding plus a random addition in
+    /// `0..=15` that still fits the MTU.
+    ///
+    /// `budget` bounds the additional bytes available in the caller's buffer
+    /// beyond the alignment padding. Empty payloads (keepalives) keep their
+    /// exact length because the receiver treats an empty plaintext specially.
+    #[must_use]
+    pub fn mtu_padding_random(
+        rng: &mut impl RngCore,
+        payload_len: usize,
+        mtu: usize,
+        budget: usize,
+    ) -> usize {
+        let padding = Self::mtu_padding(payload_len, mtu);
+        let room = Self::mtu_padding_headroom(payload_len, mtu).min(budget.saturating_sub(padding));
+        padding.saturating_add(Self::random_reserve_len(rng, room))
+    }
 }
 
 fn parse_special_packet(value: &str) -> Result<Option<SpecialPacket>> {
@@ -657,5 +708,60 @@ mod tests {
         assert_eq!(ObfParams::mtu_padding(100, 1500), 12);
         assert_eq!(ObfParams::mtu_padding(1500, 1500), 0);
         assert_eq!(ObfParams::mtu_padding(10, 8), 6);
+    }
+
+    #[test]
+    fn random_reserve_stays_within_budget() {
+        let mut rng = FixedRng(1);
+        assert_eq!(ObfParams::random_reserve_len(&mut rng, 0), 0);
+        for _ in 0..256 {
+            assert!(ObfParams::random_reserve_len(&mut rng, 5) <= 5);
+        }
+        let mut seen = [false; 16];
+        for _ in 0..4096 {
+            let value = ObfParams::random_reserve_len(&mut rng, usize::MAX);
+            assert!(value <= 15);
+            seen[value] = true;
+        }
+        assert!(seen.iter().all(|hit| *hit), "reserve must cover 0..=15");
+    }
+
+    #[test]
+    fn mtu_padding_random_breaks_the_alignment() {
+        let mut rng = FixedRng(3);
+        let base = ObfParams::mtu_padding(100, 1500);
+        let mut additions = [false; 16];
+        let mut non_aligned = false;
+        for _ in 0..256 {
+            let padding = ObfParams::mtu_padding_random(&mut rng, 100, 1500, 1024);
+            assert!(padding >= base);
+            let extra = padding - base;
+            assert!(extra <= 15);
+            additions[extra] = true;
+            let total = 100 + padding;
+            assert!(total <= 1500);
+            non_aligned |= !total.is_multiple_of(MESSAGE_PADDING_MULTIPLE);
+        }
+        assert!(
+            additions.iter().skip(1).any(|hit| *hit),
+            "random addition must vary the total size"
+        );
+        assert!(
+            non_aligned,
+            "outer size must not always be a 16-byte multiple"
+        );
+    }
+
+    #[test]
+    fn mtu_padding_random_respects_mtu_and_budget() {
+        let mut rng = FixedRng(4);
+        assert_eq!(ObfParams::mtu_padding_random(&mut rng, 0, 1500, 1024), 0);
+        assert_eq!(ObfParams::mtu_padding_random(&mut rng, 1500, 1500, 1024), 0);
+        for _ in 0..256 {
+            assert_eq!(ObfParams::mtu_padding_random(&mut rng, 100, 1500, 12), 12);
+            let padding = ObfParams::mtu_padding_random(&mut rng, 1400, 1420, 1024);
+            assert!((8..=20).contains(&padding));
+            assert!(1400 + padding <= 1420);
+        }
     }
 }

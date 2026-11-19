@@ -11,6 +11,7 @@
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/netdevice.h>
+#include <linux/random.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -100,15 +101,16 @@ bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive)
 
 static unsigned int uwg_fec_tx_limit(const struct uwg_peer *peer)
 {
-	int limit = (int)READ_ONCE(peer->device->dev->mtu) + 2 -
-		    (UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN +
-		     MESSAGE_PADDING_MULTIPLE);
-
 	/* The shard budget has to cover the two byte packet length prefix,
 	 * the ext and FEC shard headers, the payload, and the encryption
 	 * padding, all of which are sent inside one underlay datagram sized
-	 * by the TUN MTU.
+	 * by the TUN MTU. Two padding blocks are reserved: the 16 byte
+	 * alignment and the random tail added by the transport sender.
 	 */
+	int limit = (int)READ_ONCE(peer->device->dev->mtu) + 2 -
+		    (UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN +
+		     2 * MESSAGE_PADDING_MULTIPLE);
+
 	if (limit > UWG_FEC_DATA_SHARD_CAP)
 		limit = UWG_FEC_DATA_SHARD_CAP;
 	if (limit < 64)
@@ -211,8 +213,8 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 {
 	struct uwg_peer *peer = tx->peer;
 	struct net_device *dev = peer->device->dev;
-	unsigned int i, n = tx->count, shard_len = 0, total;
-	u8 block_k, block_m;
+	unsigned int i, n = tx->count, shard_len = 0, total, limit;
+	u8 block_k, block_m, order[UWG_FEC_DATA_MAX_SHARDS];
 	u32 block_id = tx->block_id;
 
 	if (!n)
@@ -226,6 +228,17 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 	}
 	if (shard_len < 2 || shard_len > UWG_FEC_DATA_SHARD_CAP)
 		goto out;
+
+	/* Add a random tail to the whole block. All shards keep the same
+	 * length for Reed-Solomon, but the length no longer pins down the
+	 * largest inner packet, and it may stay below the MTU budget.
+	 */
+	limit = uwg_fec_tx_limit(peer);
+	if (limit > shard_len) {
+		unsigned int extra = get_random_u32_below(UWG_FEC_DATA_SHARD_SLACK);
+
+		shard_len += min(extra, limit - shard_len);
+	}
 
 	for (i = 0; i < n; i++) {
 		unsigned int copy = (unsigned int)tx->lens[i] + 2;
@@ -247,17 +260,32 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 	}
 	total = (unsigned int)block_k + block_m;
 
+	/* Shuffle the send order: indexes and the parity bit stay correct, but
+	 * parity no longer always arrives last and the block is not a single
+	 * constant-size burst.
+	 */
+	for (i = 0; i < total; i++)
+		order[i] = (u8)i;
+	for (i = total; i > 1; i--) {
+		unsigned int j = get_random_u32_below(i);
+		u8 tmp = order[i - 1];
+
+		order[i - 1] = order[j];
+		order[j] = tmp;
+	}
+
 	for (i = 0; i < total; i++) {
 		struct uwg_ext_fec_shard shard;
 		struct sk_buff *skb;
+		unsigned int index = order[i];
 		u8 *hdr;
 
 		memset(&shard, 0, sizeof(shard));
 		shard.block_id = block_id;
-		shard.index = (u8)i;
+		shard.index = (u8)index;
 		shard.k = block_k;
 		shard.m = block_m;
-		shard.flags = i >= block_k ? UWG_EXT_FEC_FLAG_PARITY : 0;
+		shard.flags = index >= block_k ? UWG_EXT_FEC_FLAG_PARITY : 0;
 		shard.shard_len = (u16)shard_len;
 
 		skb = alloc_skb(DATA_PACKET_HEAD_ROOM + UWG_EXT_HEADER_LEN +
@@ -278,7 +306,7 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 			DEV_STATS_INC(dev, tx_dropped);
 			continue;
 		}
-		skb_put_data(skb, tx->block + (size_t)i * shard_len,
+		skb_put_data(skb, tx->block + (size_t)index * shard_len,
 			     shard_len);
 		skb->dev = dev;
 		/* Zero MTU makes the sender pad to the 16 byte block only
@@ -324,7 +352,9 @@ static bool uwg_fec_tx_push_locked(struct uwg_fec_tx *tx,
 		mod_timer(&tx->timer,
 			  jiffies + max_t(unsigned long, 1,
 					  usecs_to_jiffies(
-						  UWG_FEC_DATA_TX_DELAY_US)));
+						  get_random_u32_inclusive(
+							UWG_FEC_DATA_TX_DELAY_MIN_US,
+							UWG_FEC_DATA_TX_DELAY_MAX_US))));
 	if (tx->count == tx->k)
 		uwg_fec_tx_emit(tx, true, out);
 	return true;

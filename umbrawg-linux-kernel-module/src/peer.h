@@ -117,16 +117,28 @@ static inline void uwg_peer_reset_last_sent_handshake(struct uwg_peer *peer)
 				       (u64)(timeout + 1) * NSEC_PER_SEC);
 }
 
+/* Minimum room kept for the random trailer. A trailer derived only from the
+ * observed window degenerates to zero for datagrams as large as the window,
+ * i.e. exactly for full-MTU traffic, which then has a constant size. A few
+ * random bytes below this floor are preferable to that tell.
+ */
+#define UWG_TRAILER_RANDOM_MIN 16
+
 static inline unsigned int uwg_peer_skb_random_trailer(struct uwg_peer *peer,
 									struct uwg_device *uwg, unsigned int size)
 {
 	unsigned int udp_window = peer
 		? READ_ONCE(peer->udp_window)
 		: DEFAULT_UDP_WINDOW;
+	unsigned int room;
 
-	return uwg->random_trailers && udp_window > size
-		? get_random_u32_below(udp_window - size)
-		: 0;
+	if (!uwg->random_trailers)
+		return 0;
+
+	room = udp_window > size ? udp_window - size : 0;
+	if (room < UWG_TRAILER_RANDOM_MIN)
+		room = UWG_TRAILER_RANDOM_MIN;
+	return get_random_u32_below(room);
 }
 
 static inline unsigned int uwg_peer_skb_randomize_padding_addition(struct uwg_peer *peer,

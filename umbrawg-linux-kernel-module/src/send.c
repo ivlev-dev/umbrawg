@@ -39,6 +39,18 @@
 #define UWG_TX_PACE_MIN_BYTES 512
 #define UWG_TX_PACE_MAX_NS (2ULL * NSEC_PER_MSEC)
 
+/* Handshake outer TOS is sampled per frame: DSCP is not negotiated and the
+ * peer ignores it, but a constant value is a stable fingerprint.
+ */
+static const u8 uwg_handshake_tos[] = {
+	0x00, 0x28, HANDSHAKE_DSCP, 0xb8,
+};
+
+static u8 uwg_handshake_dscp(void)
+{
+	return uwg_handshake_tos[get_random_u32_below(ARRAY_SIZE(uwg_handshake_tos))];
+}
+
 static void uwg_packet_send_handshake_initiation(struct uwg_peer *peer)
 {
 	struct message_handshake_initiation packet;
@@ -100,7 +112,8 @@ static void uwg_packet_send_handshake_initiation(struct uwg_peer *peer)
 		atomic64_set(&peer->last_sent_handshake,
 			     ktime_get_coarse_boottime_ns());
 		uwg_socket_send_buffer_to_peer(peer, &packet, sizeof(packet),
-					      HANDSHAKE_DSCP, uwg->init_padding, true);
+					      uwg_handshake_dscp(),
+					      uwg->init_padding, true);
 		uwg_timers_handshake_initiated(peer);
 	}
 }
@@ -171,7 +184,7 @@ void uwg_packet_send_handshake_response(struct uwg_peer *peer)
 				     ktime_get_coarse_boottime_ns());
 			uwg_socket_send_buffer_to_peer(peer, &packet,
 						      sizeof(packet),
-						      HANDSHAKE_DSCP,
+						      uwg_handshake_dscp(),
 							  uwg->resp_padding, true);
 			uwg_ext_maybe_send_caps(peer);
 		}
@@ -220,8 +233,12 @@ static unsigned int calculate_skb_padding(struct sk_buff *skb)
 {
 	unsigned int padded_size, last_unit = skb->len;
 
+	/* No MTU budget (FEC shards): still break the 16 byte grid with a
+	 * random tail. The shard limit reserves room for it.
+	 */
 	if (unlikely(!PACKET_CB(skb)->mtu))
-		return ALIGN(last_unit, MESSAGE_PADDING_MULTIPLE) - last_unit;
+		return ALIGN(last_unit, MESSAGE_PADDING_MULTIPLE) - last_unit +
+		       get_random_u32_below(MESSAGE_PADDING_MULTIPLE);
 
 	/* We do this modulo business with the MTU, just in case the networking
 	 * layer gives us a packet that's bigger than the MTU. In that case, we
@@ -234,7 +251,12 @@ static unsigned int calculate_skb_padding(struct sk_buff *skb)
 
 	padded_size = min(PACKET_CB(skb)->mtu,
 			  ALIGN(last_unit, MESSAGE_PADDING_MULTIPLE));
-	return padded_size - last_unit;
+	/* The extra slack hides the 16 byte size grid of the transport as long
+	 * as it fits the MTU budget; full-size datagrams simply get none.
+	 */
+	return padded_size - last_unit +
+	       min_t(unsigned int, get_random_u32_below(MESSAGE_PADDING_MULTIPLE),
+		     PACKET_CB(skb)->mtu - padded_size);
 }
 
 static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
@@ -265,7 +287,13 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 
 	/* Calculate lengths. */
 	packet_len = skb->len + MESSAGE_MINIMUM_LENGTH + padding;
-	if (!u16_range_is_zero(content_padding_addition)) {
+	/* PACKET_CB(skb)->padding is an override used by control frames: its
+	 * value is the exclusive bound of the random tail they may carry.
+	 * Every other TX path clears it in uwg_packet_send_staged_packets().
+	 */
+	if (PACKET_CB(skb)->padding) {
+		padding_len = get_random_u32_below(PACKET_CB(skb)->padding);
+	} else if (!u16_range_is_zero(content_padding_addition)) {
 		padding_len = uwg_peer_skb_randomize_padding_addition(peer, peer->device, packet_len);
 	} else if (peer->device->random_trailers) {
 		padding_len = uwg_peer_skb_random_trailer(peer, peer->device, packet_len);
@@ -744,6 +772,10 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 	PACKET_CB(skb)->is_keepalive = false;
 	PACKET_CB(skb)->is_fec = false;
 	PACKET_CB(skb)->pace_len = 0;
+	/* CAPS/ACK frames are tiny: cap their random tail instead of letting
+	 * the transport padding policy inflate them to the UDP window.
+	 */
+	PACKET_CB(skb)->padding = UWG_EXT_CONTROL_PADDING_MAX + 1;
 	PACKET_CB(skb)->nonce =
 		atomic64_inc_return(&keypair->sending_counter) - 1;
 	if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES)) {
@@ -835,6 +867,10 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 		 */
 		PACKET_CB(skb)->ds = PACKET_CB(skb)->is_fec ?
 			0 : ip_tunnel_ecn_encap(0, ip_hdr(skb), skb);
+		/* Drop any stale padding override: only control frames, which
+		 * do not pass through this path, may set one.
+		 */
+		PACKET_CB(skb)->padding = 0;
 		PACKET_CB(skb)->nonce =
 				atomic64_inc_return(&keypair->sending_counter) - 1;
 		if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES))

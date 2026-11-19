@@ -60,7 +60,7 @@ use core::time::Duration;
 
 pub use config::FecConfig;
 pub use decoder::{DecodedBlock, FecDecoder, FecShard};
-pub use encoder::{EncodedBlock, FecEncoder};
+pub use encoder::{EncodedBlock, FecEncoder, MAX_SHARD_PADDING};
 pub use error::FecError;
 
 /// Maximum number of shards in one Reed-Solomon block (`k + m`).

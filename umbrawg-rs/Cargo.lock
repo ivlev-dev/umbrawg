@@ -1110,6 +1110,9 @@ dependencies = [
 [[package]]
 name = "umbrawg-fec"
 version = "0.1.0"
+dependencies = [
+ "rand_core",
+]
 
 [[package]]
 name = "umbrawg-noise"

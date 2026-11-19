@@ -7,5 +7,6 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+rand_core.workspace = true
 
 [dev-dependencies]

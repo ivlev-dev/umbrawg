@@ -9,7 +9,7 @@ use parking_lot::{Mutex, RwLock};
 use rand_core::{OsRng, RngCore};
 
 use umbrawg_crypto::tai64n::Tai64N;
-use umbrawg_crypto::{aead, Key, PrivateKey, PublicKey};
+use umbrawg_crypto::{aead, random, Key, PrivateKey, PublicKey};
 use umbrawg_fec::{EncodedBlock, FecShard};
 use umbrawg_noise::{CookieChecker, StaticIdentity};
 use umbrawg_proto::control::{Ack, Caps, ControlKind, FecShardHeader};
@@ -19,7 +19,7 @@ use umbrawg_proto::messages::limits::{
 use umbrawg_proto::messages::{
     COOKIE_REPLY_SIZE, INITIATION_SIZE, MAX_PACKET_SIZE, MESSAGE_HANDSHAKE_COOKIE,
     MESSAGE_HANDSHAKE_INITIATION, MESSAGE_HANDSHAKE_RESPONSE, MESSAGE_MINIMUM_LENGTH,
-    RESPONSE_SIZE, TRANSPORT_HEADER_SIZE,
+    MESSAGE_PADDING_MULTIPLE, RESPONSE_SIZE, TRANSPORT_HEADER_SIZE,
 };
 use umbrawg_proto::obf::{DetectedPacket, MessageKind, Obfuscator};
 use umbrawg_proto::{CookieReply, HandshakeInitiation, HandshakeResponse, ObfParams};
@@ -841,7 +841,9 @@ impl Device {
         let mut frame = [0u8; 4096];
         let mut dst = [0u8; 4096];
         let mut sent = 0usize;
-        for (index, shard) in block.shards.iter().enumerate() {
+        let block_padding = ObfParams::random_reserve_len(ctx.rng, MESSAGE_PADDING_MULTIPLE - 1);
+        for index in shard_order(block.shards.len(), ctx.rng) {
+            let shard = block.shards.get(index).ok_or(DeviceError::PacketTooLarge)?;
             let header = umbrawg_proto::control::FecShardHeader {
                 block_id: block.block_id,
                 index: u8::try_from(index).map_err(|_| DeviceError::PacketTooLarge)?,
@@ -858,7 +860,14 @@ impl Device {
                 return Err(DeviceError::PacketTooLarge);
             }
             frame[header_len..end].copy_from_slice(shard);
-            let length = self.encrypt_packet(peer, &frame[..end], &mut dst, ctx.rng, ctx.now)?;
+            let length = self.encrypt_control_inner(
+                peer,
+                &frame[..end],
+                &mut dst,
+                ctx.rng,
+                ctx.now,
+                Some(block_padding),
+            )?;
             ctx.io
                 .send_datagram(endpoint, Some(peer), &dst[..length], None);
             peer.add_tx(length as u64);
@@ -882,7 +891,9 @@ impl Device {
         layout: &mut BatchLayout,
     ) -> Result<usize> {
         let mut frame = [0u8; 2048];
-        for (index, shard) in block.shards.iter().enumerate() {
+        let block_padding = ObfParams::random_reserve_len(rng, MESSAGE_PADDING_MULTIPLE - 1);
+        for index in shard_order(block.shards.len(), rng) {
+            let shard = block.shards.get(index).ok_or(DeviceError::PacketTooLarge)?;
             let header = umbrawg_proto::control::FecShardHeader {
                 block_id: block.block_id,
                 index: u8::try_from(index).map_err(|_| DeviceError::PacketTooLarge)?,
@@ -910,6 +921,8 @@ impl Device {
                 keypair,
                 params,
                 timings,
+                PaddingMode::Control,
+                Some(block_padding),
                 &frame[..end],
                 &mut dst[offset..],
                 rng,
@@ -934,7 +947,63 @@ impl Device {
     ) -> Result<usize> {
         let timings = self.timings();
         let params = self.obfuscation.load();
-        self.encrypt_with_keypair_ctx(peer, keypair, &params, &timings, plaintext, dst, rng, now)
+        self.encrypt_with_keypair_ctx(
+            peer,
+            keypair,
+            &params,
+            &timings,
+            PaddingMode::Data,
+            None,
+            plaintext,
+            dst,
+            rng,
+            now,
+        )
+    }
+
+    /// Encrypts a control frame (ACK, CAPS or FEC shard).
+    ///
+    /// Control frames use a bounded `0..=15` random trailer instead of the
+    /// configured `random_trailers` budget: inflating a 32-byte ACK up to the
+    /// whole UDP window both wastes bandwidth and makes the frame trivially
+    /// identifiable by size.
+    pub fn encrypt_control_packet<R: RngCore>(
+        &self,
+        peer: &Peer,
+        plaintext: &[u8],
+        dst: &mut [u8],
+        rng: &mut R,
+        now: Instant,
+    ) -> Result<usize> {
+        self.encrypt_control_inner(peer, plaintext, dst, rng, now, None)
+    }
+
+    fn encrypt_control_inner<R: RngCore>(
+        &self,
+        peer: &Peer,
+        plaintext: &[u8],
+        dst: &mut [u8],
+        rng: &mut R,
+        now: Instant,
+        batch_padding: Option<usize>,
+    ) -> Result<usize> {
+        let Some(keypair) = peer.current_keypair() else {
+            return Err(DeviceError::NoKeypair);
+        };
+        let timings = self.timings();
+        let params = self.obfuscation.load();
+        self.encrypt_with_keypair_ctx(
+            peer,
+            &keypair,
+            &params,
+            &timings,
+            PaddingMode::Control,
+            batch_padding,
+            plaintext,
+            dst,
+            rng,
+            now,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -944,6 +1013,8 @@ impl Device {
         keypair: &Keypair,
         params: &ObfParams,
         timings: &Timings,
+        mode: PaddingMode,
+        batch_padding: Option<usize>,
         plaintext: &[u8],
         dst: &mut [u8],
         rng: &mut R,
@@ -965,12 +1036,44 @@ impl Device {
             .saturating_add(plaintext.len())
             .saturating_add(aead::TAG_LEN);
         let udp_window = (peer.udp_window() as usize).max(base_len);
-        let content_padding = if params.content_padding_addition_enabled() {
-            params.content_padding_len(rng, base_len, udp_window)
-        } else if params.random_trailers {
-            params.random_trailer_len(rng, base_len, udp_window)
-        } else {
-            ObfParams::mtu_padding(plaintext.len(), usize::from(self.mtu()))
+        let budget = MAX_PACKET_SIZE.min(dst.len()).saturating_sub(base_len);
+        let mtu = usize::from(self.mtu());
+        let content_padding = match mode {
+            PaddingMode::Control => batch_padding.map_or_else(
+                || ObfParams::random_reserve_len(rng, budget),
+                |extra| extra.min(budget),
+            ),
+            PaddingMode::Data => {
+                if params.content_padding_addition_enabled() {
+                    params
+                        .content_padding_len(rng, base_len, udp_window)
+                        .min(budget)
+                } else if params.random_trailers {
+                    // Keep a small reserve even when the observed UDP window
+                    // is already exhausted, otherwise full-size packets all
+                    // leave with an identical length. The reserve is bounded
+                    // by 15 bytes and, once the window grows past the packet
+                    // size, the regular trailer takes over, so the window
+                    // cannot creep upwards without bound.
+                    let trailer = params
+                        .random_trailer_len(rng, base_len, udp_window)
+                        .min(budget);
+                    if trailer > 0 {
+                        trailer
+                    } else {
+                        ObfParams::random_reserve_len(rng, budget.min(MESSAGE_PADDING_MULTIPLE - 1))
+                    }
+                } else {
+                    let aligned = ObfParams::mtu_padding(plaintext.len(), mtu);
+                    let room = ObfParams::mtu_padding_headroom(plaintext.len(), mtu)
+                        .min(budget.saturating_sub(aligned));
+                    let extra = batch_padding.map_or_else(
+                        || ObfParams::random_reserve_len(rng, room),
+                        |extra| extra.min(room),
+                    );
+                    aligned.saturating_add(extra)
+                }
+            }
         };
         let total = base_len.saturating_add(content_padding);
         if total > MAX_PACKET_SIZE {
@@ -1120,7 +1223,7 @@ impl Device {
         let frames = peer.extension().pending_control(ctx.now);
         for frame in frames {
             let mut dst = [0u8; 1024];
-            match self.encrypt_packet(peer, frame.bytes(), &mut dst, ctx.rng, ctx.now) {
+            match self.encrypt_control_packet(peer, frame.bytes(), &mut dst, ctx.rng, ctx.now) {
                 Ok(length) => {
                     let Some(endpoint) = peer.endpoint() else {
                         peer.extension().push_control(frame);
@@ -1151,7 +1254,21 @@ impl Device {
         now: Instant,
     ) -> Result<BatchLayout> {
         let mut layout = BatchLayout::new();
+        if plaintexts.is_empty() {
+            return Ok(layout);
+        }
+        let timings = self.timings();
+        let params = self.obfuscation.load();
+        let Some(keypair) = peer
+            .current_keypair()
+            .filter(|keypair| !keypair.is_expired(now, timings.keychain_expire()))
+        else {
+            return Err(DeviceError::NoKeypair);
+        };
         let mut offset = 0;
+        // One random padding value per batch keeps equal-size packets at
+        // equal wire lengths so that UDP GSO can still coalesce them.
+        let batch_padding = ObfParams::random_reserve_len(rng, MESSAGE_PADDING_MULTIPLE - 1);
         for plaintext in plaintexts {
             if offset >= dst.len() {
                 return Err(DeviceError::BufferTooSmall {
@@ -1159,7 +1276,18 @@ impl Device {
                     available: dst.len(),
                 });
             }
-            let length = self.encrypt_packet(peer, plaintext, &mut dst[offset..], rng, now)?;
+            let length = self.encrypt_with_keypair_ctx(
+                peer,
+                &keypair,
+                &params,
+                &timings,
+                PaddingMode::Data,
+                Some(batch_padding),
+                plaintext,
+                &mut dst[offset..],
+                rng,
+                now,
+            )?;
             if !layout.push(offset, length) {
                 return Err(DeviceError::PacketTooLarge);
             }
@@ -1216,6 +1344,7 @@ impl Device {
                 endpoint,
             });
         };
+        let batch_padding = ObfParams::random_reserve_len(ctx.rng, MESSAGE_PADDING_MULTIPLE - 1);
         if peer.extension().fec_tx_active() {
             let mut offset = 0usize;
             for plaintext in plaintexts {
@@ -1250,6 +1379,8 @@ impl Device {
                             &keypair,
                             &params,
                             &timings,
+                            PaddingMode::Data,
+                            Some(batch_padding),
                             plaintext,
                             &mut dst[offset..],
                             ctx.rng,
@@ -1285,6 +1416,8 @@ impl Device {
                 &keypair,
                 &params,
                 &timings,
+                PaddingMode::Data,
+                Some(batch_padding),
                 plaintext,
                 &mut dst[offset..],
                 ctx.rng,
@@ -2121,6 +2254,31 @@ fn read_u32(buffer: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes(bytes)
 }
 
+/// How much padding a transport packet may carry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PaddingMode {
+    /// Regular data packets keep the configured obfuscation padding.
+    Data,
+    /// ACK, CAPS and FEC shard frames use a bounded random trailer so that a
+    /// 32-byte ACK is not inflated to the whole UDP window.
+    Control,
+}
+
+/// Returns the transmission order of a FEC block's shards.
+///
+/// The order is a uniformly shuffled permutation, so the block's shards do
+/// not leave the interface in the systematic `data..parity` order. The shard
+/// header still carries the real index, which is what the receiver uses.
+fn shard_order(count: usize, rng: &mut impl RngCore) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..count).collect();
+    for index in (1..count).rev() {
+        let upper = u32::try_from(index.saturating_add(1)).unwrap_or(u32::MAX);
+        let swap = usize::try_from(random::below_with(rng, upper)).unwrap_or(0);
+        order.swap(index, swap);
+    }
+    order
+}
+
 fn read_u64(buffer: &[u8], offset: usize) -> u64 {
     let mut bytes = [0u8; 8];
     if let Some(slice) = buffer.get(offset..offset + 8) {
@@ -2159,5 +2317,67 @@ fn ip_packet_info(packet: &[u8]) -> Option<(usize, IpAddr)> {
             Some((total, IpAddr::V6(Ipv6Addr::from(address))))
         }
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestRng(u64);
+
+    impl RngCore for TestRng {
+        fn next_u32(&mut self) -> u32 {
+            (self.next_u64() >> 32) as u32
+        }
+
+        fn next_u64(&mut self) -> u64 {
+            self.0 = self.0.wrapping_add(0x9e37_79b9_7f4a_7c15);
+            let mut value = self.0;
+            value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+            value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+            value ^ (value >> 31)
+        }
+
+        fn fill_bytes(&mut self, dst: &mut [u8]) {
+            for chunk in dst.chunks_mut(8) {
+                let bytes = self.next_u64().to_le_bytes();
+                let length = chunk.len();
+                chunk.copy_from_slice(&bytes[..length]);
+            }
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> std::result::Result<(), rand_core::Error> {
+            self.fill_bytes(dst);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn shard_order_is_a_permutation() {
+        let mut rng = TestRng(1);
+        for count in 0..=16usize {
+            let mut order = shard_order(count, &mut rng);
+            assert_eq!(order.len(), count);
+            order.sort_unstable();
+            assert_eq!(order, (0..count).collect::<Vec<_>>());
+        }
+    }
+
+    #[test]
+    fn shard_order_is_not_fixed() {
+        let mut orders = std::collections::HashSet::new();
+        for seed in 0..64u64 {
+            let mut rng = TestRng(seed.wrapping_mul(0x9e37_79b9_7f4a_7c15));
+            orders.insert(shard_order(6, &mut rng));
+        }
+        assert!(
+            orders.len() > 1,
+            "shard transmission order must not be constant"
+        );
+        assert!(
+            orders.iter().any(|order| order != &vec![0, 1, 2, 3, 4, 5]),
+            "some blocks must leave systematic order"
+        );
     }
 }
