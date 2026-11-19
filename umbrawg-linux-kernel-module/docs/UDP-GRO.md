@@ -84,9 +84,10 @@ EXPORT_SYMBOL_GPL(udp_read_skb);
 ## 6. Альтернативы без патча
 
 - несколько внешних UDP-потоков на пира: **реализовано** через
-  `extra_ports=N` (базовый + N эфемерных encap-сокетов, round-robin
-  отправка, приём на всех); см. PERFORMANCE.md. Даёт паритет с `go`
-  на obf0 и плюс на obf1; меняет SourcePort/roaming.
+  per-device `extra_ports` (0…8, по умолчанию 4; netlink/UAPI/конфиг):
+  базовый + N эфемерных encap-сокетов, round-robin отправка, приём на
+  всех; см. PERFORMANCE.md. Даёт паритет с `go` на obf0 и плюс на obf1;
+  меняет SourcePort/roaming.
 - zero-copy TX: `skb_shift` не экспортируется; альтернатива —
   шифровать сразу в слот GSO-агрегата (переделка data-path, 2–5%);
 - оставить encap-путь и оптимизировать batching/очереди (сделано:

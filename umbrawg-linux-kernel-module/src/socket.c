@@ -18,9 +18,6 @@
 #include <net/udp_tunnel.h>
 #include <net/ipv6.h>
 
-static unsigned int uwg_extra_ports;
-module_param_named(extra_ports, uwg_extra_ports, uint, 0400);
-
 static struct sock *uwg_socket_pick(struct uwg_device *uwg, bool v6)
 {
 	unsigned int count = v6 ? READ_ONCE(uwg->sock6_extra_count) :
@@ -428,6 +425,7 @@ int uwg_socket_init(struct uwg_device *uwg, u16 port)
 	struct sock *extra4[UWG_EXTRA_PORTS_MAX] = {};
 	struct sock *extra6[UWG_EXTRA_PORTS_MAX] = {};
 	unsigned int n4 = 0, n6 = 0;
+	bool reuse_base;
 	struct udp_port_cfg port4 = {
 		.family = AF_INET,
 		.local_ip.s_addr = htonl(INADDR_ANY),
@@ -448,6 +446,8 @@ int uwg_socket_init(struct uwg_device *uwg, u16 port)
 	rcu_read_lock();
 	net = rcu_dereference(uwg->creating_net);
 	net = net ? maybe_get_net(net) : NULL;
+	reuse_base = net && port && port == READ_ONCE(uwg->incoming_port) &&
+		     !!rcu_access_pointer(uwg->sock4);
 	rcu_read_unlock();
 	if (unlikely(!net))
 		return -ENONET;
@@ -456,33 +456,36 @@ int uwg_socket_init(struct uwg_device *uwg, u16 port)
 retry:
 #endif
 
-	ret = udp_sock_create(net, &port4, &new4);
-	if (ret < 0) {
-		pr_err("%s: Could not create IPv4 socket\n", uwg->dev->name);
-		goto out;
-	}
-	set_sock_opts(new4);
-	setup_udp_tunnel_sock(net, new4->sk, &cfg);
-
-#if IS_ENABLED(CONFIG_IPV6)
-	if (ipv6_mod_enabled()) {
-		port6.local_udp_port = inet_sk(new4->sk)->inet_sport;
-		ret = udp_sock_create(net, &port6, &new6);
+	if (!reuse_base) {
+		ret = udp_sock_create(net, &port4, &new4);
 		if (ret < 0) {
-			udp_tunnel_sock_release(new4->sk);
-			if (ret == -EADDRINUSE && !port && retries++ < 100)
-				goto retry;
-			pr_err("%s: Could not create IPv6 socket\n",
-			       uwg->dev->name);
+			pr_err("%s: Could not create IPv4 socket\n", uwg->dev->name);
 			goto out;
 		}
-		set_sock_opts(new6);
-		setup_udp_tunnel_sock(net, new6->sk, &cfg);
-	}
+		set_sock_opts(new4);
+		setup_udp_tunnel_sock(net, new4->sk, &cfg);
+
+#if IS_ENABLED(CONFIG_IPV6)
+		if (ipv6_mod_enabled()) {
+			port6.local_udp_port = inet_sk(new4->sk)->inet_sport;
+			ret = udp_sock_create(net, &port6, &new6);
+			if (ret < 0) {
+				udp_tunnel_sock_release(new4->sk);
+				new4 = NULL;
+				if (ret == -EADDRINUSE && !port && retries++ < 100)
+					goto retry;
+				pr_err("%s: Could not create IPv6 socket\n",
+				       uwg->dev->name);
+				goto out;
+			}
+			set_sock_opts(new6);
+			setup_udp_tunnel_sock(net, new6->sk, &cfg);
+		}
 #endif
+	}
 
 	{
-		unsigned int want = min_t(unsigned int, uwg_extra_ports,
+		unsigned int want = min_t(unsigned int, READ_ONCE(uwg->extra_ports),
 					  UWG_EXTRA_PORTS_MAX);
 		unsigned int i;
 
@@ -516,7 +519,8 @@ retry:
 #endif
 	}
 
-	uwg_socket_reinit(uwg, new4->sk, new6 ? new6->sk : NULL);
+	if (new4)
+		uwg_socket_reinit(uwg, new4->sk, new6 ? new6->sk : NULL);
 	uwg_socket_extra_reinit(uwg, extra4, n4, extra6, n6);
 	ret = 0;
 	goto out;
@@ -526,7 +530,8 @@ err_extras:
 		sock_free(extra4[--n4]);
 	while (n6)
 		sock_free(extra6[--n6]);
-	udp_tunnel_sock_release(new4->sk);
+	if (new4)
+		udp_tunnel_sock_release(new4->sk);
 	if (new6)
 		udp_tunnel_sock_release(new6->sk);
 	goto out;

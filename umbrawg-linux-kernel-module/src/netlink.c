@@ -69,6 +69,7 @@ static const struct nla_policy device_policy[UWGDEVICE_A_MAX + 1] = {
 	[UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS] = { .type = NLA_U32 },
 	[UWGDEVICE_A_RANDOM_TRAILERS] = { .type = NLA_U8 },
 	[UWGDEVICE_A_DISABLE_COOKIES] = { .type = NLA_U8 },
+	[UWGDEVICE_A_EXTRA_PORTS] = { .type = NLA_U8 },
 };
 
 static const struct nla_policy peer_policy[UWGPEER_A_MAX + 1] = {
@@ -440,6 +441,7 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 		if (nla_put_u16(skb, UWGDEVICE_A_LISTEN_PORT,
 				uwg->incoming_port) ||
 		    nla_put_u32(skb, UWGDEVICE_A_FWMARK, uwg->fwmark) ||
+		    nla_put_u8(skb, UWGDEVICE_A_EXTRA_PORTS, uwg->extra_ports) ||
 		    nla_put_u32(skb, UWGDEVICE_A_IFINDEX, uwg->dev->ifindex) ||
 		    nla_put_string(skb, UWGDEVICE_A_IFNAME, uwg->dev->name) ||
 		    nla_put_u16(skb, UWGDEVICE_A_JC, uwg->jc) ||
@@ -573,6 +575,27 @@ static int set_port(struct uwg_device *uwg, u16 port)
 		return 0;
 	}
 	return uwg_socket_init(uwg, port);
+}
+
+static int set_extra_ports(struct uwg_device *uwg, u8 extra_ports)
+{
+	struct uwg_peer *peer;
+	u8 old_extra_ports = uwg->extra_ports;
+	int ret;
+
+	if (old_extra_ports == extra_ports)
+		return 0;
+	list_for_each_entry(peer, &uwg->peer_list, peer_list)
+		uwg_socket_clear_peer_endpoint_src(peer);
+	uwg->extra_ports = extra_ports;
+	if (!netif_running(uwg->dev))
+		return 0;
+	ret = uwg_socket_init(uwg, uwg->incoming_port);
+	if (ret < 0) {
+		uwg->extra_ports = old_extra_ports;
+		return ret;
+	}
+	return 0;
 }
 
 static int set_allowedip(struct uwg_peer *peer, struct nlattr **attrs)
@@ -786,7 +809,9 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 	if (info->attrs[UWGDEVICE_A_FLAGS])
 		flags = nla_get_u32(info->attrs[UWGDEVICE_A_FLAGS]);
 
-	if (info->attrs[UWGDEVICE_A_LISTEN_PORT] || info->attrs[UWGDEVICE_A_FWMARK]) {
+	if (info->attrs[UWGDEVICE_A_LISTEN_PORT] ||
+	    info->attrs[UWGDEVICE_A_FWMARK] ||
+	    info->attrs[UWGDEVICE_A_EXTRA_PORTS]) {
 		struct net *net;
 		rcu_read_lock();
 		net = rcu_dereference(uwg->creating_net);
@@ -809,6 +834,21 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 	if (info->attrs[UWGDEVICE_A_LISTEN_PORT]) {
 		ret = set_port(uwg,
 			nla_get_u16(info->attrs[UWGDEVICE_A_LISTEN_PORT]));
+		if (ret)
+			goto out;
+	}
+
+	if (info->attrs[UWGDEVICE_A_EXTRA_PORTS]) {
+		u8 val8 = nla_get_u8(info->attrs[UWGDEVICE_A_EXTRA_PORTS]);
+
+		if (val8 > UWG_EXTRA_PORTS_MAX) {
+			net_dbg_ratelimited(
+				"%s: ExtraPorts must not exceed %d\n",
+				uwg->dev->name, UWG_EXTRA_PORTS_MAX);
+			ret = -EINVAL;
+			goto out;
+		}
+		ret = set_extra_ports(uwg, val8);
 		if (ret)
 			goto out;
 	}
