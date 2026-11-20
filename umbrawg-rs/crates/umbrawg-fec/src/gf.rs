@@ -78,8 +78,7 @@ mod tests {
     fn exp_table_is_a_full_cycle() {
         let table = tables();
         let mut seen = [false; 256];
-        for power in 0..ORDER {
-            let value = table.exp[power];
+        for (power, &value) in table.exp.iter().enumerate().take(ORDER) {
             assert_ne!(value, 0, "exp[{power}] must be non-zero");
             assert!(!seen[usize::from(value)], "exp table repeats at {power}");
             seen[usize::from(value)] = true;
@@ -90,8 +89,8 @@ mod tests {
     #[test]
     fn log_and_exp_are_inverse() {
         let table = tables();
-        for power in 0..ORDER {
-            assert_eq!(usize::from(table.log[usize::from(table.exp[power])]), power);
+        for (power, &value) in table.exp.iter().enumerate().take(ORDER) {
+            assert_eq!(usize::from(table.log[usize::from(value)]), power);
         }
         assert_eq!(mul(1, 1), 1);
         assert_eq!(mul(1, 0x53), 0x53);
