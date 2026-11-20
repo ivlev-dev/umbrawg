@@ -1,4 +1,4 @@
-umbrawg-linux-kmod (0.3.0) unstable; urgency=medium
+umbrawg-linux-kmod (1:0.3.0-1) unstable; urgency=medium
 
   * Add BBRv3 pacing and Reed-Solomon FEC for kernel data-plane.
   * Add CAPS/ACK feedback, adaptive 2:1 FEC and netlink BBR/FEC attributes.
