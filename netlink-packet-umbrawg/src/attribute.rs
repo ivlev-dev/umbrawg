@@ -59,6 +59,7 @@ const UWGDEVICE_A_EXTRA_PORTS: u16 = 35;
 // UmbraWG BBR/FEC attributes
 const UWGDEVICE_A_BBR: u16 = 36;
 const UWGDEVICE_A_FEC: u16 = 37;
+const UWGDEVICE_A_UNDERLAY_MTU: u16 = 40;
 
 const HEADER_PROTECTION_KEY_LEN: usize = 32;
 
@@ -352,6 +353,15 @@ pub enum UmbrawgAttribute {
     /// and `K + M <= 255`. Use [`fec_pack`] and [`fec_unpack`] to convert
     /// between shard counts and the wire value.
     Fec(u32),
+    /// `UWGDEVICE_A_UNDERLAY_MTU`: `u16` MTU of the path between the peers
+    /// (`576..=65535`, `1500` by default).
+    ///
+    /// With FEC enabled the kernel derives the interface MTU from it so that
+    /// a full-size packet still fits one shard datagram; parsing only checks
+    /// the width, the range is enforced by
+    /// [`UmbrawgDeviceConfig`](crate::UmbrawgDeviceConfig) and by the
+    /// kernel.
+    UnderlayMtu(u16),
     /// `UWGDEVICE_A_FEC_STATS`: nested device-wide FEC counters.
     ///
     /// Read-only: the kernel fills it in `UWG_CMD_GET_DEVICE` replies and
@@ -410,6 +420,7 @@ impl Nla for UmbrawgAttribute {
             | Self::ExtraPorts(_)
             | Self::Bbr(_) => 1,
             Self::Fec(_) => 4,
+            Self::UnderlayMtu(_) => 2,
             Self::FecStats(v) => v.value_len(),
             Self::BbrStats(v) => v.value_len(),
             // Umbra Specific Fields
@@ -475,6 +486,7 @@ impl Nla for UmbrawgAttribute {
             Self::ExtraPorts(_) => UWGDEVICE_A_EXTRA_PORTS,
             Self::Bbr(_) => UWGDEVICE_A_BBR,
             Self::Fec(_) => UWGDEVICE_A_FEC,
+            Self::UnderlayMtu(_) => UWGDEVICE_A_UNDERLAY_MTU,
             Self::FecStats(_) => UWGDEVICE_A_FEC_STATS | NLA_F_NESTED,
             Self::BbrStats(_) => UWGDEVICE_A_BBR_STATS | NLA_F_NESTED,
             Self::Other(attr) => attr.kind(),
@@ -533,6 +545,7 @@ impl Nla for UmbrawgAttribute {
             Self::ExtraPorts(v) => buffer[0] = *v,
             Self::Bbr(v) => buffer[0] = *v,
             Self::Fec(v) => emit_u32(buffer, *v).unwrap(),
+            Self::UnderlayMtu(v) => emit_u16(buffer, *v).unwrap(),
             Self::FecStats(v) => v.emit_value(buffer),
             Self::BbrStats(v) => v.emit_value(buffer),
             Self::Other(attr) => attr.emit_value(buffer),
@@ -710,6 +723,10 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 }
                 Self::Fec(value)
             }
+            UWGDEVICE_A_UNDERLAY_MTU => Self::UnderlayMtu(
+                parse_u16(payload)
+                    .context("invalid UWGDEVICE_A_UNDERLAY_MTU value")?,
+            ),
             UWGDEVICE_A_FEC_STATS => Self::FecStats(
                 FecStats::parse(buf)
                     .context("invalid UWGDEVICE_A_FEC_STATS value")?,

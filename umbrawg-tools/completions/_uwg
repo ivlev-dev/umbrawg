@@ -17,7 +17,7 @@ commands=(
 )
 
 params=(
-  public-key private-key listen-port extra-ports fwmark bbr fec peers preshared-keys endpoints
+  public-key private-key listen-port extra-ports fwmark bbr fec underlay-mtu peers preshared-keys endpoints
   allowed-ips latest-handshakes persistent-keepalive advanced-security transfer
   dump jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5
   header-protection-key content-padding-addition rekey-after-time rekey-timeout
@@ -62,7 +62,7 @@ case $state in
         if (( CURRENT == 2 )); then
           _uwg_interfaces
         else
-          compadd listen-port extra-ports fwmark bbr fec private-key jc jmin jmax s1 s2 s3 s4 \
+          compadd listen-port extra-ports fwmark bbr fec underlay-mtu private-key jc jmin jmax s1 s2 s3 s4 \
             h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key \
             content-padding-addition rekey-after-time rekey-timeout \
             reject-after-time keepalive-timeout max-handshake-attempts \

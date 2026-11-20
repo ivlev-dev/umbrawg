@@ -30,6 +30,12 @@ const IFNAME_MAX_LEN: usize = 15;
 /// Largest accepted number of additional external UDP ports.
 pub const EXTRA_PORTS_MAX: u8 = 8;
 
+/// Smallest accepted `UWGDEVICE_A_UNDERLAY_MTU` value.
+///
+/// Mirrors `UWG_UNDERLAY_MTU_MIN` of the kernel module: below the classic
+/// IPv4 reassembly buffer the path MTU policy cannot be honoured.
+pub const UNDERLAY_MTU_MIN: u16 = 576;
+
 /// One of the four magic header ranges (`UWGDEVICE_A_H1`..`UWGDEVICE_A_H4`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -144,6 +150,7 @@ pub struct UmbrawgDeviceConfig {
     disable_cookies: Option<bool>,
     bbr: Option<BbrMode>,
     fec: Option<FecMode>,
+    underlay_mtu: Option<u16>,
     peers: Vec<UmbrawgPeerConfig>,
 }
 
@@ -186,6 +193,7 @@ impl UmbrawgDeviceConfig {
             disable_cookies: None,
             bbr: None,
             fec: None,
+            underlay_mtu: None,
             peers: Vec::new(),
         }
     }
@@ -518,6 +526,20 @@ impl UmbrawgDeviceConfig {
         self
     }
 
+    /// Sets the MTU of the path between the peers
+    /// (`UWGDEVICE_A_UNDERLAY_MTU`).
+    ///
+    /// While FEC is enabled the kernel lowers the interface MTU so that a
+    /// full-size packet still fits one shard datagram on that path, and
+    /// restores it when FEC is turned off. [`build`](Self::build) rejects
+    /// values below [`UNDERLAY_MTU_MIN`].
+    ///
+    /// [`UNDERLAY_MTU_MIN`]: crate::UNDERLAY_MTU_MIN
+    pub fn underlay_mtu(mut self, mtu: u16) -> Self {
+        self.underlay_mtu = Some(mtu);
+        self
+    }
+
     /// Adds a peer to the message.
     pub fn peer(mut self, peer: UmbrawgPeerConfig) -> Self {
         self.peers.push(peer);
@@ -672,6 +694,9 @@ impl UmbrawgDeviceConfig {
                     .ok_or(UmbrawgConfigError::InvalidFecShards { k, m })?,
             };
             attributes.push(UmbrawgAttribute::Fec(value));
+        }
+        if let Some(mtu) = self.underlay_mtu {
+            attributes.push(UmbrawgAttribute::UnderlayMtu(mtu));
         }
         if !self.peers.is_empty() {
             let peers = self
@@ -841,6 +866,9 @@ impl UmbrawgDeviceConfig {
                         UmbrawgConfigError::InvalidFecValue { value: *value },
                     )?);
                 }
+                UmbrawgAttribute::UnderlayMtu(value) => {
+                    config.underlay_mtu = Some(*value);
+                }
                 UmbrawgAttribute::PublicKey(_)
                 | UmbrawgAttribute::Peer(_)
                 | UmbrawgAttribute::FecStats(_)
@@ -907,6 +935,16 @@ impl UmbrawgDeviceConfig {
                     field: "UWGDEVICE_A_EXTRA_PORTS",
                     lo: 0,
                     hi: u32::from(EXTRA_PORTS_MAX),
+                });
+            }
+        }
+
+        if let Some(underlay_mtu) = self.underlay_mtu {
+            if underlay_mtu < UNDERLAY_MTU_MIN {
+                return Err(UmbrawgConfigError::InvalidRange {
+                    field: "UWGDEVICE_A_UNDERLAY_MTU",
+                    lo: u32::from(UNDERLAY_MTU_MIN),
+                    hi: u32::from(u16::MAX),
                 });
             }
         }

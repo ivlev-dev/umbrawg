@@ -131,6 +131,9 @@ pub fn build_set_request(config: &SetDevice) -> Result<String, Error> {
     if let Some(fec) = &device.fec {
         write_line(&mut output, "fec", fec)?;
     }
+    if let Some(underlay_mtu) = device.underlay_mtu {
+        write_line(&mut output, "underlay_mtu", &underlay_mtu.to_string())?;
+    }
     if config.replace_peers {
         write_line(&mut output, "replace_peers", "true")?;
     }
@@ -301,6 +304,7 @@ fn apply_device_line(device: &mut Device, key: &str, value: &str) -> Result<(), 
         "fwmark" => device.fwmark = parse_u32(key, value)?,
         "bbr" => device.bbr = Some(parse_mode_text(key, value)?),
         "fec" => device.fec = Some(parse_mode_text(key, value)?),
+        "underlay_mtu" => device.underlay_mtu = Some(parse_u16(key, value)?),
         "jc" => device.obfuscation.jc = Some(parse_u16(key, value)?),
         "jmin" => device.obfuscation.jmin = Some(parse_u16(key, value)?),
         "jmax" => device.obfuscation.jmax = Some(parse_u16(key, value)?),
@@ -660,6 +664,44 @@ errno=0
         );
         assert_eq!(peer.advanced_security, None);
         assert_eq!(peer.cipher, Some(Cipher::Aes256Gcm));
+    }
+
+    #[test]
+    fn sends_underlay_mtu_to_the_daemon() {
+        let mut config = set_device();
+        let request = build_set_request(&config).expect("valid request");
+        assert!(!request.contains("underlay_mtu="));
+        config.device.underlay_mtu = Some(1280);
+        let request = build_set_request(&config).expect("valid request");
+        assert!(request.contains("underlay_mtu=1280\n"));
+        assert!(!request.contains("underlay_mtu=576\n"));
+        config.device.underlay_mtu = None;
+        let request = build_set_request(&config).expect("valid request");
+        assert!(!request.contains("underlay_mtu="));
+    }
+
+    #[test]
+    fn parses_underlay_mtu_from_get_response() {
+        let device =
+            parse_get_response("underlay_mtu=9000\nerrno=0\n\n", "test0").expect("valid response");
+        assert_eq!(device.underlay_mtu, Some(9000));
+        let device =
+            parse_get_response("listen_port=51820\nerrno=0\n\n", "test0").expect("valid response");
+        assert_eq!(device.underlay_mtu, None);
+        for value in ["", "abc", "-1", "65536"] {
+            assert!(
+                parse_get_response(&format!("underlay_mtu={value}\nerrno=0\n\n"), "test0").is_err(),
+                "{value}"
+            );
+        }
+        assert_eq!(
+            parse_get_response("underlay_mtu=9000\nerrno=0\n\n", "test0")
+                .expect("valid response")
+                .to_config()
+                .device
+                .underlay_mtu,
+            Some(9000)
+        );
     }
 
     #[test]

@@ -267,6 +267,58 @@ fn test_device_config_extra_ports() {
 }
 
 #[test]
+fn test_device_config_underlay_mtu() {
+    let msg = UmbrawgDeviceConfig::by_name("uwg0")
+        .underlay_mtu(9000)
+        .fec(FecMode::Fixed { k: 2, m: 1 })
+        .build()
+        .expect("valid config");
+    assert!(msg
+        .attributes
+        .contains(&UmbrawgAttribute::UnderlayMtu(9000)));
+    let parsed = UmbrawgDeviceConfig::from_message(&msg).expect("parse");
+    assert_eq!(
+        parsed,
+        UmbrawgDeviceConfig::by_name("uwg0")
+            .underlay_mtu(9000)
+            .fec(FecMode::Fixed { k: 2, m: 1 })
+    );
+
+    // The kernel floor is 576: smaller paths would break IPv4 reassembly.
+    assert!(UmbrawgDeviceConfig::by_name("uwg0")
+        .underlay_mtu(575)
+        .build()
+        .is_err());
+    assert!(UmbrawgDeviceConfig::by_name("uwg0")
+        .underlay_mtu(crate::UNDERLAY_MTU_MIN)
+        .build()
+        .is_ok());
+}
+
+#[test]
+fn test_underlay_mtu_wire_format() {
+    use netlink_packet_core::NlaBuffer;
+
+    let attr = UmbrawgAttribute::UnderlayMtu(1500);
+    assert_eq!(attr.kind(), 40);
+    assert_eq!(attr.value_len(), 2);
+    let mut buf = vec![0; attr.buffer_len()];
+    attr.emit(&mut buf);
+    // NLA header: len = 6 (4 header + 2 payload), kind = 40, then the u16
+    // payload zero-padded to 4-byte alignment.
+    assert_eq!(buf, vec![0x06, 0x00, 0x28, 0x00, 0xdc, 0x05, 0x00, 0x00]);
+
+    let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(parsed, UmbrawgAttribute::UnderlayMtu(1500));
+
+    let attr = UmbrawgAttribute::UnderlayMtu(576);
+    let mut buf = vec![0; attr.buffer_len()];
+    attr.emit(&mut buf);
+    let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
+    assert_eq!(parsed, UmbrawgAttribute::UnderlayMtu(576));
+}
+
+#[test]
 fn test_uwg31_device_attributes_roundtrip() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,

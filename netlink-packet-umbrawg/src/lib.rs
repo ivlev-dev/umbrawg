@@ -149,6 +149,7 @@ pub use self::{
     device::{
         UmbrawgDeviceConfig, UmbrawgMagicHeader, EXTRA_PORTS_MAX,
         HEADER_PROTECTION_NONCE_LEN, INTERMEDIATE_SPEC_MAX_LEN,
+        UNDERLAY_MTU_MIN,
     },
     error::{UmbrawgConfigError, UmbrawgConfigResult},
     fec::FecMode,

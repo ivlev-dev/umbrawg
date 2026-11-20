@@ -216,6 +216,9 @@ fn device_attributes(config: &SetDevice, version: u32) -> Result<Vec<UmbrawgAttr
     if let Some(fec) = &device.fec {
         attributes.push(UmbrawgAttribute::Fec(fec_value(fec)?));
     }
+    if let Some(underlay_mtu) = device.underlay_mtu {
+        attributes.push(UmbrawgAttribute::UnderlayMtu(underlay_mtu));
+    }
     if let Some(fwmark) = device.fwmark {
         attributes.push(UmbrawgAttribute::Fwmark(fwmark));
     }
@@ -417,6 +420,9 @@ impl DeviceBuilder {
                 UmbrawgAttribute::ExtraPorts(value) => self.device.extra_ports = Some(*value),
                 UmbrawgAttribute::Bbr(value) => self.device.bbr = Some(bbr_text(*value)?),
                 UmbrawgAttribute::Fec(value) => self.device.fec = Some(fec_text(*value)?),
+                UmbrawgAttribute::UnderlayMtu(value) => {
+                    self.device.underlay_mtu = Some(*value);
+                }
                 UmbrawgAttribute::BbrStats(value) => self.device.bbr_stats = Some(*value),
                 UmbrawgAttribute::FecStats(value) => self.device.fec_stats = Some(*value),
                 UmbrawgAttribute::Fwmark(value) => self.device.fwmark = *value,
@@ -1155,6 +1161,31 @@ mod tests {
         let attributes = &messages[0].attributes;
         assert!(attributes.contains(&UmbrawgAttribute::Bbr(0)));
         assert!(attributes.contains(&UmbrawgAttribute::Fec(0)));
+    }
+
+    #[test]
+    fn sends_and_reads_underlay_mtu() {
+        let mut config = config();
+        assert_eq!(config.device.underlay_mtu, None);
+        let messages = build_set_messages(&config, 3).expect("valid");
+        assert!(!messages[0]
+            .attributes
+            .iter()
+            .any(|attribute| matches!(attribute, UmbrawgAttribute::UnderlayMtu(_))));
+
+        config.device.underlay_mtu = Some(9000);
+        let messages = build_set_messages(&config, 3).expect("valid");
+        assert!(messages[0]
+            .attributes
+            .contains(&UmbrawgAttribute::UnderlayMtu(9000)));
+
+        let builder = DeviceBuilder::new("test0");
+        assert_eq!(builder.finish().underlay_mtu, None);
+        let mut builder = DeviceBuilder::new("test0");
+        builder
+            .apply(&[UmbrawgAttribute::UnderlayMtu(1280)])
+            .expect("apply");
+        assert_eq!(builder.finish().underlay_mtu, Some(1280));
     }
 
     #[test]

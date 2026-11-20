@@ -40,7 +40,7 @@ prints one tab-separated value per line, intended for scripts. With
 .PP
 \fIPARAMETER\fP is one of:
 \fIpublic-key\fP, \fIprivate-key\fP, \fIlisten-port\fP, \fIextra-ports\fP, \fIfwmark\fP,
-\fIbbr\fP, \fIfec\fP, \fIbbr-stats\fP, \fIfec-stats\fP,
+\fIbbr\fP, \fIfec\fP, \fIunderlay-mtu\fP, \fIbbr-stats\fP, \fIfec-stats\fP,
 \fIpeers\fP, \fIpreshared-keys\fP, \fIendpoints\fP, \fIallowed-ips\fP,
 \fIlatest-handshakes\fP, \fIpersistent-keepalive\fP, \fItransfer\fP,
 \fIdump\fP, \fIjc\fP, \fIjmin\fP, \fIjmax\fP, \fIs1\fP, \fIs2\fP, \fIs3\fP,
@@ -89,6 +89,15 @@ loss above 1% and disabled after five seconds below 0.2%; \fBK:M\fP uses
 and \fIM\fP from 1 to 2; values outside these ranges are rejected with
 \fBEINVAL\fP. The userspace daemon accepts up to 255 total shards, but only
 the kernel ranges interoperate with the module.
+.TP
+\fBunderlay-mtu\fP \fI<mtu>\fP
+MTU of the path between the peers, from 576 to 65535; the default is 1500.
+While FEC is enabled the interface MTU is lowered so that a full-size packet
+plus the shard overhead still fits one underlay datagram, and restored when
+FEC is turned off. With the default 1500 byte path and the default 1420 byte
+interface MTU this lowers the interface to 1368 bytes. A manual
+\fBip link set mtu\fP is adopted as the new base by the next change that
+recomputes the policy.
 .TP
 \fBprivate-key\fP \fI<file>\fP
 Reads the private key from a file. A device or empty file removes the key.
@@ -155,7 +164,7 @@ output.
 The file is INI-like and case-insensitive. Comments start with \fB#\fP.
 The \fB[Interface]\fP section accepts:
 .PP
-\fBPrivateKey\fP, \fBListenPort\fP, \fBExtraPorts\fP, \fBFwMark\fP, \fBBBR\fP, \fBFEC\fP,
+\fBPrivateKey\fP, \fBListenPort\fP, \fBExtraPorts\fP, \fBFwMark\fP, \fBBBR\fP, \fBFEC\fP,\n\fBUnderlayMTU\fP,
 \fBJc\fP, \fBJmin\fP,
 \fBJmax\fP, \fBS1\fP, \fBS2\fP, \fBS3\fP, \fBS4\fP, \fBH1\fP, \fBH2\fP,
 \fBH3\fP, \fBH4\fP, \fBI1\fP, \fBI2\fP, \fBI3\fP, \fBI4\fP, \fBI5\fP,
@@ -165,8 +174,10 @@ The \fB[Interface]\fP section accepts:
 \fBDisableCookies\fP.
 \fBBBR\fP and \fBFEC\fP configure both backends: the module receives them
 through netlink attributes \fBUWGDEVICE_A_BBR\fP and \fBUWGDEVICE_A_FEC\fP,
-the userspace daemon through the UAPI keys \fBbbr=\fP and \fBfec=\fP. With
-both disabled, no extension frames or padding are added.
+the userspace daemon through the UAPI keys \fBbbr=\fP and \fBfec=\fP.
+\fBUnderlayMTU\fP goes to \fBUWGDEVICE_A_UNDERLAY_MTU\fP or the UAPI key
+\fBunderlay_mtu=\fP. With both BBR and FEC disabled, no extension frames or
+padding are added.
 .PP
 Each \fB[Peer]\fP section accepts \fBPublicKey\fP, \fBPresharedKey\fP,
 \fBAdvancedSecurity\fP, \fBCipher\fP, \fBAllowedIPs\fP, \fBEndpoint\fP, and
@@ -192,10 +203,12 @@ tunnel with these options is still more regular than plain traffic. Use
 .BR detect.py
 from the bench directory to estimate DPI-resistance before deploying.
 
-FEC transmits a packet as a shard only when it fits the kernel MTU budget
-(\fIMTU\fP minus 50 bytes); full-size TCP segments therefore fall back to
-the legacy path and stay unprotected. This avoids IP fragmentation on the
-underlay. Keep the underlay MTU at least 17 bytes above the TUN MTU.
+FEC transmits a packet as a shard only when it fits one underlay datagram.
+While FEC is enabled the kernel lowers the interface MTU to the largest inner
+packet that fits, so full-size TCP segments are protected too and stay below
+the underlay path MTU. With \fBunderlay-mtu 1500\fP the interface MTU becomes
+1368 bytes; raise \fBunderlay-mtu\fP if the path can carry larger datagrams.
+Packets above the shard budget still fall back to the legacy path.
 
 Adaptive FEC estimates loss from the incoming direction and assumes
 symmetric loss. One-way loss on the outgoing path does not enable FEC on the

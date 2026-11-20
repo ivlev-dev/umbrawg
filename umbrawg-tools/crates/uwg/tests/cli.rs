@@ -529,6 +529,44 @@ fn set_sends_bbr_and_fec_to_userspace() {
 }
 
 #[test]
+fn set_sends_underlay_mtu_to_userspace() {
+    let directory = runtime_dir();
+    let fake = FakeUapi::start(&directory, get_response());
+
+    let output = run(&directory, &["set", "uwg0", "underlay-mtu", "9000"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let requests = fake.set_requests();
+    let request = requests.last().expect("request");
+    assert!(request.contains("underlay_mtu=9000\n"), "{request}");
+
+    for value in ["575", "65536", "abc"] {
+        let output = run(&directory, &["set", "uwg0", "underlay-mtu", value]);
+        assert_eq!(output.status.code(), Some(1), "{value}");
+        assert!(!stderr(&output).is_empty(), "{value}");
+    }
+}
+
+#[test]
+fn show_prints_underlay_mtu_from_uapi() {
+    let directory = runtime_dir();
+    let _fake = FakeUapi::start(
+        &directory,
+        "private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n\
+         listen_port=51820\nunderlay_mtu=1280\nerrno=0\n\n"
+            .to_owned(),
+    );
+
+    let output = run(&directory, &["show", "uwg0", "underlay-mtu"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(String::from_utf8(output.stdout).expect("utf-8"), "1280\n");
+
+    let output = run(&directory, &["show", "uwg0"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(stdout.contains("underlay mtu: 1280"), "{stdout}");
+}
+
+#[test]
 fn set_rejects_invalid_bbr_and_fec() {
     let directory = runtime_dir();
     let fake = FakeUapi::start(&directory, get_response());

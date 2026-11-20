@@ -19,8 +19,8 @@ end
 complete -c uwg -n '__fish_seen_subcommand_from show' -a '(__uwg_interfaces) all interfaces' -d 'Interface'
 complete -c uwg -n '__fish_seen_subcommand_from showconf set setconf addconf syncconf' -a '(__uwg_interfaces)' -d 'Interface'
 
-complete -c uwg -n '__fish_seen_subcommand_from show; and not __fish_seen_subcommand_from interfaces' -a 'public-key private-key listen-port extra-ports fwmark bbr fec peers preshared-keys endpoints allowed-ips latest-handshakes persistent-keepalive advanced-security transfer dump jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key content-padding-addition rekey-after-time rekey-timeout reject-after-time keepalive-timeout max-handshake-attempts max_handshake_attempts random-trailers disable-cookies' -d 'Parameter'
+complete -c uwg -n '__fish_seen_subcommand_from show; and not __fish_seen_subcommand_from interfaces' -a 'public-key private-key listen-port extra-ports fwmark bbr fec underlay-mtu peers preshared-keys endpoints allowed-ips latest-handshakes persistent-keepalive advanced-security transfer dump jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key content-padding-addition rekey-after-time rekey-timeout reject-after-time keepalive-timeout max-handshake-attempts max_handshake_attempts random-trailers disable-cookies' -d 'Parameter'
 
 complete -c uwg -n '__fish_seen_subcommand_from setconf addconf syncconf' -F
 
-complete -c uwg -n '__fish_seen_subcommand_from set' -a 'listen-port extra-ports fwmark bbr fec private-key jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key content-padding-addition rekey-after-time rekey-timeout reject-after-time keepalive-timeout max-handshake-attempts random-trailers disable-cookies peer' -d 'Setting'
+complete -c uwg -n '__fish_seen_subcommand_from set' -a 'listen-port extra-ports fwmark bbr fec underlay-mtu private-key jc jmin jmax s1 s2 s3 s4 h1 h2 h3 h4 i1 i2 i3 i4 i5 header-protection-key content-padding-addition rekey-after-time rekey-timeout reject-after-time keepalive-timeout max-handshake-attempts random-trailers disable-cookies peer' -d 'Setting'

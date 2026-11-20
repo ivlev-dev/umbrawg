@@ -89,7 +89,7 @@ pub fn command() -> clap::Command {
 
 pub fn show_usage() -> String {
     format!(
-        "Usage: {PROGRAM} show {{ <interface> | all | interfaces }} [public-key | private-key | listen-port | extra-ports | fwmark | bbr | fec | bbr-stats | fec-stats | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | advanced-security | dump | jc | jmin | jmax | s1 | s2 | s3 | s4 | h1 | h2 | h3 | h4 | i1 | i2 | i3 | i4 | i5 | header-protection-key | content-padding-addition | rekey-after-time | rekey-timeout | reject-after-time | keepalive-timeout | max-handshake-attempts | max_handshake_attempts | random-trailers | disable-cookies]"
+        "Usage: {PROGRAM} show {{ <interface> | all | interfaces }} [public-key | private-key | listen-port | extra-ports | fwmark | bbr | fec | underlay-mtu | bbr-stats | fec-stats | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | advanced-security | dump | jc | jmin | jmax | s1 | s2 | s3 | s4 | h1 | h2 | h3 | h4 | i1 | i2 | i3 | i4 | i5 | header-protection-key | content-padding-addition | rekey-after-time | rekey-timeout | reject-after-time | keepalive-timeout | max-handshake-attempts | max_handshake_attempts | random-trailers | disable-cookies]"
     )
 }
 
@@ -99,7 +99,7 @@ pub fn setconf_usage(command: &str) -> String {
 
 pub fn set_usage() -> String {
     format!(
-        "Usage: {PROGRAM} set <interface> [listen-port <port>] [extra-ports <n>] [fwmark <mark>] [bbr <off|monitor|on>] [fec <off|adaptive|K:M>] [private-key <file path>] [jc <junk_count>] [jmin <min_value>] [jmax <max_value>] [s1 <init_junk>] [s2 <resp_junk>] [s3 <cookie_junk>] [s4 <trans_junk>] [h1 <init_header>] [h2 <resp_header>] [h3 <cookie_header>] [h4 <transp_header>] [i1 \"<taged_junk>\"] [i2 \"<taged_junk>\"] [i3 \"<taged_junk>\"] [i4 \"<taged_junk>\"] [i5 \"<taged_junk>\"] [header-protection-key \"<key>\"] [content-padding-addition \"<range>\"] [rekey-after-time \"<range>\"] [rekey-timeout \"<range>\"] [reject-after-time \"<range>\"] [keepalive-timeout \"<range>\"] [max-handshake-attempts \"<range>\"] [random-trailers <on|off>] [disable-cookies <on|off>] [peer <base64 public key> [remove] [preshared-key <file path>] [cipher chacha20-poly1305|aes-256-gcm] [endpoint <ip>:<port>] [persistent-keepalive <interval seconds>] [allowed-ips <ip1>/<cidr1>[,<ip2>/<cidr2>]...] [advanced-security <on|off>]]..."
+        "Usage: {PROGRAM} set <interface> [listen-port <port>] [extra-ports <n>] [fwmark <mark>] [bbr <off|monitor|on>] [fec <off|adaptive|K:M>] [underlay-mtu <mtu>] [private-key <file path>] [jc <junk_count>] [jmin <min_value>] [jmax <max_value>] [s1 <init_junk>] [s2 <resp_junk>] [s3 <cookie_junk>] [s4 <trans_junk>] [h1 <init_header>] [h2 <resp_header>] [h3 <cookie_header>] [h4 <transp_header>] [i1 \"<taged_junk>\"] [i2 \"<taged_junk>\"] [i3 \"<taged_junk>\"] [i4 \"<taged_junk>\"] [i5 \"<taged_junk>\"] [header-protection-key \"<key>\"] [content-padding-addition \"<range>\"] [rekey-after-time \"<range>\"] [rekey-timeout \"<range>\"] [reject-after-time \"<range>\"] [keepalive-timeout \"<range>\"] [max-handshake-attempts \"<range>\"] [random-trailers <on|off>] [disable-cookies <on|off>] [peer <base64 public key> [remove] [preshared-key <file path>] [cipher chacha20-poly1305|aes-256-gcm] [endpoint <ip>:<port>] [persistent-keepalive <interval seconds>] [allowed-ips <ip1>/<cidr1>[,<ip2>/<cidr2>]...] [advanced-security <on|off>]]..."
     )
 }
 
@@ -119,6 +119,12 @@ mod tests {
         assert!(show_usage().contains("| bbr | fec |"));
         assert!(set_usage().contains("[bbr <off|monitor|on>]"));
         assert!(set_usage().contains("[fec <off|adaptive|K:M>]"));
+    }
+
+    #[test]
+    fn usage_lists_underlay_mtu() {
+        assert!(show_usage().contains("| fec | underlay-mtu |"));
+        assert!(set_usage().contains("[underlay-mtu <mtu>]"));
     }
 
     #[test]

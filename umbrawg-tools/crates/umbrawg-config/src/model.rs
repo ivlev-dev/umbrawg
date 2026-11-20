@@ -178,6 +178,11 @@ pub struct DeviceConfig {
     pub bbr: Option<String>,
     /// FEC mode of the userspace daemon: `off`, `adaptive` or `K:M`.
     pub fec: Option<String>,
+    /// MTU of the path between the peers, in bytes.
+    ///
+    /// The kernel derives the interface MTU from it while FEC is enabled.
+    /// Missing means the kernel default, 1500.
+    pub underlay_mtu: Option<u16>,
     pub obfuscation: ObfuscationConfig,
     pub quick: QuickConfig,
 }
@@ -326,6 +331,10 @@ impl Config {
                 self.device.fec = Some(parse_fec(key, value)?);
                 2
             }
+            "underlay-mtu" => {
+                self.device.underlay_mtu = Some(parse_underlay_mtu(key, value)?);
+                2
+            }
             "private-key" => {
                 self.device.private_key = Some(Key::from_file(std::path::Path::new(value))?);
                 2
@@ -462,6 +471,9 @@ impl Config {
         }
         if let Some(value) = &self.device.fec {
             push_entry(&mut interface, "FEC", value.clone());
+        }
+        if let Some(value) = self.device.underlay_mtu {
+            push_entry(&mut interface, "UnderlayMTU", value.to_string());
         }
         let obfuscation = &self.device.obfuscation;
         if let Some(value) = obfuscation.jc {
@@ -644,6 +656,9 @@ impl DeviceConfig {
             "fwmark" => self.fwmark = Some(parse_fwmark_at(entry, &entry.value)?),
             "bbr" => self.bbr = Some(parse_bbr_at(entry, "BBR", &entry.value)?),
             "fec" => self.fec = Some(parse_fec_at(entry, "FEC", &entry.value)?),
+            "underlaymtu" => {
+                self.underlay_mtu = Some(parse_underlay_mtu_at(entry, "UnderlayMTU", &entry.value)?)
+            }
             "privatekey" => self.private_key = Some(Key::from_base64(&entry.value)?),
             "jc" => self.obfuscation.jc = Some(parse_u16_at(entry, "Jc", &entry.value)?),
             "jmin" => self.obfuscation.jmin = Some(parse_u16_at(entry, "Jmin", &entry.value)?),
@@ -857,6 +872,32 @@ fn parse_allowed_ips(value: &str, line: usize, key: &str) -> Result<Vec<AllowedI
 
 /// Largest accepted `ExtraPorts` value.
 pub const MAX_EXTRA_PORTS: u8 = 8;
+
+/// Smallest accepted `UnderlayMTU` value.
+///
+/// Mirrors `UWG_UNDERLAY_MTU_MIN` of the kernel module: below the classic
+/// IPv4 reassembly buffer a path MTU policy cannot be honoured.
+pub const MIN_UNDERLAY_MTU: u16 = 576;
+
+fn parse_underlay_mtu_at(entry: &Entry, key: &str, value: &str) -> Result<u16, Error> {
+    parse_underlay_mtu(key, value).map_err(|_| Error::InvalidValue {
+        line: entry.line,
+        key: key.to_owned(),
+        value: value.to_owned(),
+    })
+}
+
+fn parse_underlay_mtu(key: &str, value: &str) -> Result<u16, Error> {
+    let parsed = parse_u16(key, value)?;
+    if parsed < MIN_UNDERLAY_MTU {
+        return Err(Error::InvalidValue {
+            line: 0,
+            key: key.to_owned(),
+            value: value.to_owned(),
+        });
+    }
+    Ok(parsed)
+}
 
 fn parse_extra_ports_at(entry: &Entry, key: &str, value: &str) -> Result<u8, Error> {
     parse_extra_ports(key, value).map_err(|_| Error::InvalidValue {
@@ -1264,6 +1305,46 @@ PersistentKeepalive = 25
         assert!(emitted.contains("ExtraPorts = 8\n"));
         assert_eq!(Config::parse(&emitted).expect("valid"), config);
         assert!(!Config::default().to_ini(false).contains("ExtraPorts"));
+    }
+
+    #[test]
+    fn parses_underlay_mtu() {
+        let config = Config::parse("[Interface]\nUnderlayMTU = 9000\n").expect("valid config");
+        assert_eq!(config.device.underlay_mtu, Some(9000));
+        let config = Config::parse("[Interface]\nunderlaymtu = 576\n").expect("valid config");
+        assert_eq!(config.device.underlay_mtu, Some(576));
+        assert_eq!(Config::default().device.underlay_mtu, None);
+
+        let config = Config::from_args(["underlay-mtu", "1280"]).expect("valid arguments");
+        assert_eq!(config.device.underlay_mtu, Some(1280));
+        assert_eq!(
+            Config::from_args(["underlay-mtu", "65535"])
+                .expect("valid arguments")
+                .device
+                .underlay_mtu,
+            Some(65535)
+        );
+    }
+
+    #[test]
+    fn rejects_bad_underlay_mtu() {
+        for value in ["575", "0", "-1", "abc", "", "65536", "1.5"] {
+            let input = format!("[Interface]\nUnderlayMTU = {value}\n");
+            assert!(Config::parse(&input).is_err(), "{value}");
+            assert!(
+                Config::from_args(["underlay-mtu", value]).is_err(),
+                "{value}"
+            );
+        }
+    }
+
+    #[test]
+    fn round_trips_underlay_mtu() {
+        let config = Config::parse("[Interface]\nUnderlayMTU = 9000\n").expect("valid config");
+        let emitted = config.to_ini(false);
+        assert!(emitted.contains("UnderlayMTU = 9000\n"), "{emitted}");
+        assert_eq!(Config::parse(&emitted).expect("valid"), config);
+        assert!(!Config::default().to_ini(false).contains("UnderlayMTU"));
     }
 
     #[test]

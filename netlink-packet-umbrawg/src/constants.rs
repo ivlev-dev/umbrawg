@@ -143,6 +143,15 @@ pub const UWGDEVICE_A_FEC_STATS: u16 = 38;
 /// [`BbrStats`](crate::BbrStats).
 pub const UWGDEVICE_A_BBR_STATS: u16 = 39;
 
+/// `UWGDEVICE_A_UNDERLAY_MTU`: `u16` MTU of the path between the peers,
+/// `576..=65535`, `1500` by default.
+///
+/// While FEC is enabled the kernel lowers the interface MTU so that one
+/// full-size packet still fits a single FEC shard datagram on that path, and
+/// restores it when FEC is turned off. The smallest accepted value is
+/// [`UNDERLAY_MTU_MIN`](crate::UNDERLAY_MTU_MIN).
+pub const UWGDEVICE_A_UNDERLAY_MTU: u16 = 40;
+
 /// `UWGDEVICE_FEC_STATS_A_BLOCKS_ENCODED`: `u64` count of encoded blocks.
 pub const UWGDEVICE_FEC_STATS_A_BLOCKS_ENCODED: u16 = 1;
 

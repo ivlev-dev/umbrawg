@@ -115,6 +115,9 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
     if let Some(extra_ports) = device.extra_ports.filter(|ports| *ports != 0) {
         let _ = writeln!(output, "  {}: {extra_ports}", style.bold("extra udp ports"));
     }
+    if let Some(underlay_mtu) = device.underlay_mtu {
+        let _ = writeln!(output, "  {}: {underlay_mtu}", style.bold("underlay mtu"));
+    }
     let obfuscation = &device.obfuscation;
     for (name, value) in [
         ("jc", obfuscation.jc),
@@ -440,6 +443,16 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
         }
         "fec" => {
             let _ = writeln!(output, "{prefix}{}", option_text(&device.fec, "(none)"));
+        }
+        "underlay-mtu" => {
+            let _ = writeln!(
+                output,
+                "{prefix}{}",
+                device
+                    .underlay_mtu
+                    .map(|mtu| mtu.to_string())
+                    .unwrap_or_else(|| "(none)".to_owned())
+            );
         }
         "bbr-stats" => match &device.bbr_stats {
             Some(stats) => output.push_str(&bbr_stats_text(stats, &prefix)),
@@ -885,6 +898,7 @@ mod tests {
         device.fwmark = 0x1234;
         device.bbr = Some("monitor".to_owned());
         device.fec = Some("10:3".to_owned());
+        device.underlay_mtu = Some(9000);
         device.bbr_stats = Some(BbrStats {
             mode: 2,
             cwnd: 131_072,
@@ -939,6 +953,29 @@ mod tests {
         let output = showconf(&device);
         assert!(!output.contains("BBR"), "{output}");
         assert!(!output.contains("FEC"), "{output}");
+    }
+
+    #[test]
+    fn shows_underlay_mtu() {
+        let device = sample_device();
+        assert_eq!(
+            ugly(&device, "underlay-mtu", false).expect("valid"),
+            "9000\n"
+        );
+        assert_eq!(
+            ugly(&device, "underlay-mtu", true).expect("valid"),
+            "uwg0\t9000\n"
+        );
+        let rendered = pretty(&device, false);
+        assert!(rendered.contains("underlay mtu: 9000"), "{rendered}");
+
+        let mut device = sample_device();
+        device.underlay_mtu = None;
+        assert_eq!(
+            ugly(&device, "underlay-mtu", false).expect("valid"),
+            "(none)\n"
+        );
+        assert!(!pretty(&device, false).contains("underlay mtu"));
     }
 
     #[test]
