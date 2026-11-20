@@ -7,6 +7,7 @@
 #include "device.h"
 #include "header_protection.h"
 #include "peer.h"
+#include "bbr.h"
 #include "socket.h"
 #include "queueing.h"
 #include "messages.h"
@@ -78,6 +79,8 @@ static const struct nla_policy device_policy[UWGDEVICE_A_MAX + 1] = {
 	[UWGDEVICE_A_EXTRA_PORTS] = { .type = NLA_U8 },
 	[UWGDEVICE_A_BBR] = { .type = NLA_U8 },
 	[UWGDEVICE_A_FEC] = { .type = NLA_U32 },
+	[UWGDEVICE_A_FEC_STATS] = { .type = NLA_NESTED },
+	[UWGDEVICE_A_BBR_STATS] = { .type = NLA_NESTED },
 };
 
 static const struct nla_policy peer_policy[UWGPEER_A_MAX + 1] = {
@@ -418,6 +421,124 @@ err:
 	return -EMSGSIZE;
 }
 
+struct uwg_bbr_stats {
+	u8 mode;
+	u32 peers;
+	u64 cwnd;
+	u64 inflight;
+	u64 pacing_rate;
+	u64 btl_bw;
+	u64 min_rtt_ns;
+	u64 round_lost;
+};
+
+/*
+ * Collects one snapshot per peer. Called with device_update_lock held, which
+ * keeps peer_list stable; the BBR state itself is read under RCU and
+ * peer->bbr_lock, the same order the data path uses. No lock is taken in the
+ * opposite direction anywhere, so mutex -> RCU -> bbr_lock nests safely.
+ * The aggregates are summed only after the spinlock is dropped.
+ */
+static void uwg_bbr_stats_fill_device(struct uwg_device *uwg,
+				      struct uwg_bbr_stats *stats)
+{
+	struct uwg_peer *peer;
+
+	memset(stats, 0, sizeof(*stats));
+	stats->mode = READ_ONCE(uwg->bbr_mode);
+
+	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
+		struct uwg_bbr_snapshot snap;
+		struct uwg_bbr *bbr;
+
+		rcu_read_lock();
+		bbr = uwg_peer_bbr_lookup(peer);
+		if (!bbr) {
+			rcu_read_unlock();
+			continue;
+		}
+		spin_lock_bh(&peer->bbr_lock);
+		uwg_bbr_snapshot_get(bbr, &snap);
+		spin_unlock_bh(&peer->bbr_lock);
+		rcu_read_unlock();
+
+		stats->peers++;
+		stats->cwnd += snap.cwnd;
+		stats->inflight += snap.inflight;
+		stats->pacing_rate += snap.pacing_rate;
+		stats->btl_bw += snap.btl_bw;
+		stats->round_lost += snap.round_lost;
+		/* 0 means "no measured sample"; only real minima take part. */
+		if (snap.min_rtt_ns &&
+		    (!stats->min_rtt_ns || snap.min_rtt_ns < stats->min_rtt_ns))
+			stats->min_rtt_ns = snap.min_rtt_ns;
+	}
+}
+
+static int uwg_put_fec_stats(struct sk_buff *skb, struct uwg_device *uwg)
+{
+	struct uwg_fec_stats stats;
+	struct nlattr *nest;
+
+	uwg_fec_stats_fill_device(uwg, &stats);
+
+	nest = nla_nest_start(skb, UWGDEVICE_A_FEC_STATS);
+	if (!nest)
+		return -EMSGSIZE;
+
+	if (nla_put_u64_64bit(skb, UWGDEVICE_FEC_STATS_A_BLOCKS_ENCODED,
+			      stats.blocks_encoded, UWGDEVICE_FEC_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_FEC_STATS_A_SHARDS_SENT,
+			      stats.shards_sent, UWGDEVICE_FEC_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_FEC_STATS_A_BLOCKS_DECODED,
+			      stats.blocks_decoded, UWGDEVICE_FEC_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_FEC_STATS_A_PACKETS_RECOVERED,
+			      stats.packets_recovered, UWGDEVICE_FEC_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_FEC_STATS_A_DECODE_FAIL,
+			      stats.decode_fail, UWGDEVICE_FEC_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_FEC_STATS_A_DROPPED_BOUNDS,
+			      stats.dropped_bounds, UWGDEVICE_FEC_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_FEC_STATS_A_DROPPED_DISABLED,
+			      stats.dropped_disabled, UWGDEVICE_FEC_STATS_A_UNSPEC)) {
+		nla_nest_cancel(skb, nest);
+		return -EMSGSIZE;
+	}
+
+	nla_nest_end(skb, nest);
+	return 0;
+}
+
+static int uwg_put_bbr_stats(struct sk_buff *skb,
+			     const struct uwg_bbr_stats *stats)
+{
+	struct nlattr *nest;
+
+	nest = nla_nest_start(skb, UWGDEVICE_A_BBR_STATS);
+	if (!nest)
+		return -EMSGSIZE;
+
+	if (nla_put_u8(skb, UWGDEVICE_BBR_STATS_A_MODE, stats->mode) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_CWND, stats->cwnd,
+			      UWGDEVICE_BBR_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_INFLIGHT,
+			      stats->inflight, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_PACING_RATE,
+			      stats->pacing_rate, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_BTL_BW,
+			      stats->btl_bw, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
+	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_MIN_RTT_NS,
+			      stats->min_rtt_ns, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
+	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_ROUND_LOST,
+			(u32)min_t(u64, stats->round_lost, U32_MAX)) ||
+	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_PEERS, stats->peers)) {
+		nla_nest_cancel(skb, nest);
+		return -EMSGSIZE;
+	}
+
+	nla_nest_end(skb, nest);
+	return 0;
+}
+
 static int uwg_get_device_start(struct netlink_callback *cb)
 {
 	struct uwg_device *uwg;
@@ -434,6 +555,7 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 	struct uwg_peer *peer, *next_peer_cursor;
 	struct dump_ctx *ctx = DUMP_CTX(cb);
 	struct uwg_device *uwg = ctx->uwg;
+	struct uwg_bbr_stats bbr_stats;
 	struct nlattr *peers_nest;
 	int ret = -EMSGSIZE;
 	bool done = true;
@@ -479,6 +601,14 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 			nla_put_u32(skb, UWGDEVICE_A_MAX_HANDSHAKE_ATTEMPTS, uwg->max_handshake_attempts) ||
 			nla_put_u8(skb, UWGDEVICE_A_RANDOM_TRAILERS, uwg->random_trailers) ||
 			nla_put_u8(skb, UWGDEVICE_A_DISABLE_COOKIES, uwg->disable_cookies))
+			goto out;
+
+		/* Both aggregates are always present, zeroed when the feature
+		 * is disabled, so clients never have to guess.
+		 */
+		uwg_bbr_stats_fill_device(uwg, &bbr_stats);
+		if (uwg_put_fec_stats(skb, uwg) ||
+		    uwg_put_bbr_stats(skb, &bbr_stats))
 			goto out;
 
 		if ((uwg->ispecs[0].desc &&

@@ -13,6 +13,7 @@
 #include "fec_data.h"
 
 #include <linux/kref.h>
+#include <linux/ktime.h>
 #include <linux/lockdep.h>
 #include <linux/rcupdate.h>
 #include <linux/list.h>
@@ -30,6 +31,30 @@ static atomic64_t peer_counter = ATOMIC64_INIT(0);
 struct uwg_bbr *uwg_peer_bbr_lookup(struct uwg_peer *peer)
 {
 	return rcu_dereference(peer->bbr);
+}
+
+/*
+ * Called whenever the peer starts using a different keypair. A rekey
+ * restarts the nonce space at zero, so the old send ring cannot be matched
+ * against new ACKs/loss reports any more. The id is checked under the BBR
+ * lock because several paths (tx worker, ext receive) may notice the same
+ * keypair concurrently. Never called under device_update_lock.
+ */
+void uwg_peer_bbr_keypair_changed(struct uwg_peer *peer, u64 keypair_id)
+{
+	struct uwg_bbr *bbr;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (bbr) {
+		spin_lock_bh(&peer->bbr_lock);
+		if (peer->bbr_keypair_id != keypair_id) {
+			peer->bbr_keypair_id = keypair_id;
+			uwg_bbr_new_epoch(bbr, keypair_id, ktime_get_ns());
+		}
+		spin_unlock_bh(&peer->bbr_lock);
+	}
+	rcu_read_unlock();
 }
 
 static struct uwg_bbr *uwg_peer_bbr_alloc(void)

@@ -533,8 +533,8 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 		uwg_ext_maybe_send_caps(peer);
 }
 
-static void uwg_ext_bbr_on_ack(struct uwg_peer *peer, u64 largest, u64 bitmap,
-			       u32 ack_delay_us)
+static void uwg_ext_bbr_on_ack(struct uwg_peer *peer, u64 keypair_id,
+			       u64 largest, u64 bitmap, u32 ack_delay_us)
 {
 	struct uwg_bbr *bbr;
 
@@ -545,15 +545,15 @@ static void uwg_ext_bbr_on_ack(struct uwg_peer *peer, u64 largest, u64 bitmap,
 	bbr = uwg_peer_bbr_lookup(peer);
 	if (bbr) {
 		spin_lock_bh(&peer->bbr_lock);
-		uwg_bbr_on_ack(bbr, largest, bitmap, ack_delay_us,
+		uwg_bbr_on_ack(bbr, keypair_id, largest, bitmap, ack_delay_us,
 			       ktime_get_ns());
 		spin_unlock_bh(&peer->bbr_lock);
 	}
 	rcu_read_unlock();
 }
 
-static void uwg_ext_handle_ack(struct uwg_peer *peer, const u8 *payload,
-			       size_t len)
+static void uwg_ext_handle_ack(struct uwg_peer *peer, u64 keypair_id,
+			       const u8 *payload, size_t len)
 {
 	struct uwg_ext_ack ack;
 	u64 bitmap;
@@ -572,7 +572,8 @@ static void uwg_ext_handle_ack(struct uwg_peer *peer, const u8 *payload,
 	peer->ack_tracker.last_ack_jiffies = jiffies;
 	peer->ack_tracker.last_ack_ktime = ktime_get();
 
-	uwg_ext_bbr_on_ack(peer, ack.largest, bitmap, ack.ack_delay_us);
+	uwg_ext_bbr_on_ack(peer, keypair_id, ack.largest, bitmap,
+			   ack.ack_delay_us);
 }
 
 static enum uwg_ext_rx_result uwg_ext_handle_fec_shard(struct uwg_peer *peer,
@@ -604,6 +605,7 @@ enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 	u8 fecbuf[UWG_EXT_FEC_HEADER_LEN];
 	const u8 *hdr;
 	struct uwg_ext_header header;
+	u64 keypair_id = 0;
 
 	if (skb->len < UWG_EXT_HEADER_LEN)
 		return UWG_EXT_RX_NOT_EXTENSION;
@@ -617,12 +619,15 @@ enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 	/* Account every ext frame for BBR/ACK feedback. FEC shards are real
 	 * transport packets and must be acknowledged; CAPS/ACK frames update
 	 * the bitmap but must not trigger another ACK (no ACK-on-ACK).
+	 * An ext frame always arrives after decryption, so the keypair is set;
+	 * if it is not, keypair_id stays 0 and the ACK is ignored by BBR
+	 * because it cannot be attributed to the current epoch.
 	 */
-	if (likely(PACKET_CB(skb)->keypair))
-		uwg_ext_data_received(peer,
-				      PACKET_CB(skb)->keypair->internal_id,
-				      PACKET_CB(skb)->nonce,
+	if (likely(PACKET_CB(skb)->keypair)) {
+		keypair_id = PACKET_CB(skb)->keypair->internal_id;
+		uwg_ext_data_received(peer, keypair_id, PACKET_CB(skb)->nonce,
 				      header.kind == UWG_EXT_KIND_FEC_SHARD);
+	}
 
 	switch (header.kind) {
 	case UWG_EXT_KIND_CAPS:
@@ -638,7 +643,8 @@ enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 		    skb_copy_bits(skb, UWG_EXT_HEADER_LEN, ackbuf,
 				  header.payload_len))
 			return UWG_EXT_RX_INVALID;
-		uwg_ext_handle_ack(peer, ackbuf, header.payload_len);
+		uwg_ext_handle_ack(peer, keypair_id, ackbuf,
+				   header.payload_len);
 		return UWG_EXT_RX_CONSUMED;
 	case UWG_EXT_KIND_FEC_SHARD:
 		if (header.payload_len < UWG_EXT_FEC_HEADER_LEN ||

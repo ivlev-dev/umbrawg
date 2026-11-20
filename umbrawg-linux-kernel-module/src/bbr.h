@@ -100,6 +100,11 @@ struct uwg_bbr {
 	u8 mode;
 	u8 cycle_idx;
 
+	/* Keypair generation: counters restart at zero on every rekey. */
+	u32 epoch;
+	u64 base_counter;
+	u64 keypair_id;
+
 	u64 pacing_rate;
 	u64 cwnd;
 	u64 inflight;
@@ -147,11 +152,26 @@ struct uwg_bbr {
 	u64 orphaned_packets;
 };
 
+struct uwg_bbr_snapshot {
+	u8 mode;
+	u64 cwnd;
+	u64 inflight;
+	u64 pacing_rate;
+	u64 btl_bw;
+	u64 min_rtt_ns;
+	u64 round_lost;
+};
+
 void uwg_bbr_init(struct uwg_bbr *b, u32 mss, u32 initial_rtt_us);
-void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns);
-void uwg_bbr_note_sent(struct uwg_bbr *b, u64 counter);
+/* Caller must hold the peer's bbr_lock. */
+void uwg_bbr_new_epoch(struct uwg_bbr *b, u64 keypair_id, u64 now_ns);
+void uwg_bbr_snapshot_get(const struct uwg_bbr *b,
+			  struct uwg_bbr_snapshot *snap);
+void uwg_bbr_on_send(struct uwg_bbr *b, u64 keypair_id, u64 counter, u32 len,
+		     u64 now_ns);
+void uwg_bbr_note_sent(struct uwg_bbr *b, u64 keypair_id, u64 counter);
 void uwg_bbr_on_sent(struct uwg_bbr *b, u64 counter, u64 now_ns);
-void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
+void uwg_bbr_on_ack(struct uwg_bbr *b, u64 keypair_id, u64 largest, u64 bitmap,
 		    u32 ack_delay_us, u64 now_ns);
 u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns);
 u64 uwg_bbr_pacing_rate(const struct uwg_bbr *b);

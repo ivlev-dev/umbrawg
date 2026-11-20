@@ -412,7 +412,8 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 }
 
 static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
-				   struct sk_buff_head *packets)
+				   struct sk_buff_head *packets,
+				   u64 keypair_id)
 {
 	struct uwg_bbr *bbr;
 	struct sk_buff *skb;
@@ -435,10 +436,11 @@ static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
 			/* Keepalives are not tracked in the ring, but their
 			 * counters appear in ACK.largest.
 			 */
-			uwg_bbr_note_sent(bbr, PACKET_CB(skb)->nonce);
+			uwg_bbr_note_sent(bbr, keypair_id, PACKET_CB(skb)->nonce);
 			continue;
 		}
-		uwg_bbr_on_send(bbr, PACKET_CB(skb)->nonce, skb->len, now_ns);
+		uwg_bbr_on_send(bbr, keypair_id, PACKET_CB(skb)->nonce, skb->len,
+				now_ns);
 	}
 	spin_unlock_bh(&peer->bbr_lock);
 	rcu_read_unlock();
@@ -837,6 +839,8 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 		uwg_noise_keypair_put(keypair, false);
 		return -EKEYREJECTED;
 	}
+	if (READ_ONCE(uwg->bbr_mode) != UWG_BBR_MODE_OFF)
+		uwg_peer_bbr_keypair_changed(peer, keypair->internal_id);
 
 	skb = alloc_skb(DATA_PACKET_HEAD_ROOM + len, GFP_ATOMIC);
 	if (unlikely(!skb)) {
@@ -873,7 +877,8 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 		bbr = uwg_peer_bbr_lookup(peer);
 		if (bbr) {
 			spin_lock_bh(&peer->bbr_lock);
-			uwg_bbr_note_sent(bbr, PACKET_CB(skb)->nonce);
+			uwg_bbr_note_sent(bbr, keypair->internal_id,
+					  PACKET_CB(skb)->nonce);
 			spin_unlock_bh(&peer->bbr_lock);
 		}
 		rcu_read_unlock();
@@ -935,6 +940,9 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 					      REJECT_AFTER_TIME)))
 		goto out_invalid;
 
+	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_OFF)
+		uwg_peer_bbr_keypair_changed(peer, keypair->internal_id);
+
 	/* After we know we have a somewhat valid key, we now try to assign
 	 * nonces to all of the packets in the queue. If we can't assign nonces
 	 * for all of them, we just consider it a failure and wait for the next
@@ -956,7 +964,7 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 			goto out_invalid;
 	}
 
-	uwg_packet_bbr_on_send(peer, &packets);
+	uwg_packet_bbr_on_send(peer, &packets, keypair->internal_id);
 
 	packets.prev->next = NULL;
 	uwg_peer_get(keypair->entry.peer);

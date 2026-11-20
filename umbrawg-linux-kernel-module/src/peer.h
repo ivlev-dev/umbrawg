@@ -80,6 +80,7 @@ struct uwg_peer {
 	struct uwg_peer_ack_tracker ack_tracker;
 	struct uwg_peer_ack_state ack_state;
 	struct uwg_bbr __rcu *bbr;
+	u64 bbr_keypair_id;
 	struct uwg_fec_tx __rcu *fec_tx;
 	struct uwg_fec_rx __rcu *fec_rx;
 	struct uwg_fec_counters fec_counters;
@@ -91,6 +92,7 @@ struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 			       const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN]);
 
 struct uwg_bbr *uwg_peer_bbr_lookup(struct uwg_peer *peer);
+void uwg_peer_bbr_keypair_changed(struct uwg_peer *peer, u64 keypair_id);
 void uwg_peer_bbr_release(struct uwg_peer *peer);
 int uwg_peer_bbr_sync(struct uwg_peer *peer);
 int uwg_peer_bbr_sync_device(struct uwg_device *uwg);

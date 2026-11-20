@@ -928,9 +928,71 @@ void uwg_bbr_init(struct uwg_bbr *b, u32 mss, u32 initial_rtt_us)
 	b->pacer.allowance = (s64)b->pacer.burst;
 }
 
-void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns)
+void uwg_bbr_new_epoch(struct uwg_bbr *b, u64 keypair_id, u64 now_ns)
+{
+	u64 delivered = b->delivered;
+
+	/*
+	 * A rekey restarts the nonce space at zero. The old records can never
+	 * be acknowledged by the peer again, so drop them instead of leaving
+	 * them to be matched by counters of the new keypair. The channel
+	 * estimate (btl_bw, min_rtt, cwnd, pacing rate) describes the path and
+	 * survives the rekey: resetting cwnd would either underutilise the
+	 * link or cause a burst, neither of which the new keypair justifies.
+	 */
+	memset(b->ring, 0, sizeof(b->ring));
+	b->epoch++;
+	b->keypair_id = keypair_id;
+	b->base_counter = 0;
+	b->inflight = 0;
+	b->largest_acked = 0;
+	b->max_sent = 0;
+	b->oldest_inflight = 0;
+	b->oldest_valid = false;
+	b->round_delivered = 0;
+	b->round_lost = 0;
+	b->round_max_inflight = 0;
+	b->round_congestion = false;
+	b->next_round_delivered = delivered;
+	uwg_pacer_refill(b, now_ns);
+}
+
+/*
+ * Fallback for a missed keypair notification: a changed id or a counter far
+ * below max_sent cannot belong to the current nonce space, because the ring
+ * only ever covers UWG_BBR_RING_CAPACITY counters. Nonces never wrap in
+ * practice -- the protocol rejects a keypair long before 2^64 packets.
+ */
+static void uwg_bbr_maybe_new_epoch(struct uwg_bbr *b, u64 keypair_id,
+				    u64 counter, u64 now_ns)
+{
+	if (unlikely(b->keypair_id != keypair_id)) {
+		uwg_bbr_new_epoch(b, keypair_id, now_ns);
+		return;
+	}
+	if (unlikely(b->max_sent > counter &&
+		     b->max_sent - counter > UWG_BBR_RING_CAPACITY))
+		uwg_bbr_new_epoch(b, keypair_id, now_ns);
+}
+
+void uwg_bbr_snapshot_get(const struct uwg_bbr *b,
+			  struct uwg_bbr_snapshot *snap)
+{
+	snap->mode = b->mode;
+	snap->cwnd = b->cwnd;
+	snap->inflight = b->inflight;
+	snap->pacing_rate = b->pacing_rate;
+	snap->btl_bw = b->btl_bw;
+	snap->min_rtt_ns = b->min_rtt.seen_min ? b->min_rtt.min_ns : 0;
+	snap->round_lost = b->round_lost;
+}
+
+void uwg_bbr_on_send(struct uwg_bbr *b, u64 keypair_id, u64 counter, u32 len,
+		     u64 now_ns)
 {
 	u32 evicted;
+
+	uwg_bbr_maybe_new_epoch(b, keypair_id, counter, now_ns);
 
 	/* Bound the record so the 2^29 delivered window always covers the ring. */
 	if (!len)
@@ -963,13 +1025,14 @@ void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns)
  * in the send ring (control frames, keepalives). It only raises max_sent so
  * their ACKs pass the validation in uwg_bbr_on_ack().
  */
-void uwg_bbr_note_sent(struct uwg_bbr *b, u64 counter)
+void uwg_bbr_note_sent(struct uwg_bbr *b, u64 keypair_id, u64 counter)
 {
+	uwg_bbr_maybe_new_epoch(b, keypair_id, counter, ktime_get_ns());
 	b->max_sent = max(b->max_sent, counter);
 }
 
-void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
-		    u32 ack_delay_us, u64 now_ns)
+void uwg_bbr_on_ack(struct uwg_bbr *b, u64 keypair_id, u64 largest,
+		    u64 bitmap, u32 ack_delay_us, u64 now_ns)
 {
 	struct uwg_bbr_sent newest;
 	bool have_newest;
@@ -981,11 +1044,28 @@ void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
 	bool have_rate = false;
 	bool starts_round;
 
+	/* An ACK is delivered on the keypair that carried the data it refers
+	 * to. Feedback from any other keypair belongs to an earlier epoch and
+	 * must not touch largest_acked, the ring, inflight or btl_bw.
+	 */
+	if (unlikely(keypair_id != b->keypair_id))
+		return;
+
 	/* A peer cannot acknowledge a counter we never put on the wire: such an
 	 * ACK would drag largest_acked past the ring, release every in-flight
 	 * record and zero inflight. Reject it before touching any state.
 	 */
 	if (unlikely(largest > b->max_sent))
+		return;
+	if (unlikely(largest < b->base_counter))
+		return;
+
+	/* Counters never regress within one keypair, so feedback far below
+	 * largest_acked was produced by the previous keypair's nonce space.
+	 * Ignoring it keeps the new epoch's largest_acked/inflight intact.
+	 */
+	if (unlikely(b->largest_acked > largest &&
+		     b->largest_acked - largest > UWG_BBR_RING_CAPACITY))
 		return;
 
 	/* A bogus delay distorts the delivery-rate sample; one second is far
@@ -1044,6 +1124,13 @@ void uwg_bbr_on_loss(struct uwg_bbr *b, u64 counter, u64 now_ns)
 	u32 len = 0;
 	int state;
 
+	/* Nothing outside [base_counter, max_sent] was sent in this nonce
+	 * space: this is feedback for an older keypair and must not touch the
+	 * new epoch.
+	 */
+	if (unlikely(counter > b->max_sent || counter < b->base_counter))
+		return;
+
 	uwg_pacer_refill(b, now_ns);
 
 	state = uwg_ring_mark_lost(b, counter, &len);
@@ -1079,8 +1166,12 @@ void uwg_bbr_on_loss(struct uwg_bbr *b, u64 counter, u64 now_ns)
  */
 void uwg_bbr_on_drop(struct uwg_bbr *b, u64 counter)
 {
-	struct uwg_bbr_sent *slot = &b->ring[counter & UWG_BBR_RING_MASK];
+	struct uwg_bbr_sent *slot;
 
+	if (unlikely(counter > b->max_sent || counter < b->base_counter))
+		return;
+
+	slot = &b->ring[counter & UWG_BBR_RING_MASK];
 	if (slot->counter != counter || !uwg_slot_inflight(slot))
 		return;
 
@@ -1101,8 +1192,12 @@ void uwg_bbr_on_drop(struct uwg_bbr *b, u64 counter)
  */
 void uwg_bbr_on_sent(struct uwg_bbr *b, u64 counter, u64 now_ns)
 {
-	struct uwg_bbr_sent *slot = &b->ring[counter & UWG_BBR_RING_MASK];
+	struct uwg_bbr_sent *slot;
 
+	if (unlikely(counter > b->max_sent || counter < b->base_counter))
+		return;
+
+	slot = &b->ring[counter & UWG_BBR_RING_MASK];
 	if (slot->counter == counter &&
 	    uwg_slot_state(slot) == UWG_BBR_SLOT_INFLIGHT)
 		slot->sent_ns = now_ns;
@@ -1238,7 +1333,7 @@ static int uwg_bbr_sim(struct uwg_bbr *b, const struct uwg_bbr_sim_params *p,
 			pkt[sent].len = p->mss;
 			pkt[sent].lost = lost;
 			pkt[sent].delivered = !lost;
-			uwg_bbr_on_send(b, sent, p->mss, now);
+			uwg_bbr_on_send(b, b->keypair_id, sent, p->mss, now);
 
 			depart = max(now, bottleneck_free);
 			bottleneck_free = depart +
@@ -1308,7 +1403,7 @@ static int uwg_bbr_sim(struct uwg_bbr *b, const struct uwg_bbr_sim_params *p,
 					if (pkt[largest_received - j].delivered)
 						bitmap |= 1ULL << j;
 				}
-				uwg_bbr_on_ack(b, largest_received, bitmap,
+				uwg_bbr_on_ack(b, b->keypair_id, largest_received, bitmap,
 					       p->ack_delay_us, now);
 			}
 
@@ -1510,14 +1605,14 @@ static int uwg_bbr_selftest_edges(void)
 	}
 
 	/* A bitmap that covers nothing and a zero-length send are no-ops. */
-	uwg_bbr_on_send(b, 0, 0, 1000);
-	uwg_bbr_on_ack(b, 0, 0, 0, 2000);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 0, 1000);
+	uwg_bbr_on_ack(b, b->keypair_id, 0, 0, 0, 2000);
 	if (uwg_bbr_inflight(b) != 1) {
 		pr_err("BBR self-test: zero-length send mis-accounted\n");
 		kfree(b);
 		return -EINVAL;
 	}
-	uwg_bbr_on_ack(b, 0, 1, 0, 3000);
+	uwg_bbr_on_ack(b, b->keypair_id, 0, 1, 0, 3000);
 	if (uwg_bbr_inflight(b) != 0) {
 		pr_err("BBR self-test: single ACK did not clear inflight\n");
 		kfree(b);
@@ -1536,7 +1631,7 @@ static int uwg_bbr_selftest_edges(void)
 
 	/* Ring wrap: capacity + 1000 unacknowledged sends must stay bounded. */
 	for (i = 0; i < UWG_BBR_RING_CAPACITY + 1000; i++)
-		uwg_bbr_on_send(b, 100 + i, 1400, 10000 + i * 1000);
+		uwg_bbr_on_send(b, b->keypair_id, 100 + i, 1400, 10000 + i * 1000);
 	if (!b->orphaned_packets || b->inflight > UWG_BBR_RING_CAPACITY * 1400ULL) {
 		pr_err("BBR self-test: ring overflow accounting broken\n");
 		kfree(b);
@@ -1545,10 +1640,10 @@ static int uwg_bbr_selftest_edges(void)
 
 	/* Ten seconds without a lower RTT sample must enter PROBE_RTT. */
 	uwg_bbr_init(b, 1400, 20000);
-	uwg_bbr_on_send(b, 0, 1400, 1000000000ULL);
-	uwg_bbr_on_ack(b, 0, 1, 0, 1020000000ULL);
-	uwg_bbr_on_send(b, 1, 1400, 11020000000ULL);
-	uwg_bbr_on_ack(b, 1, 3, 0, 11040000000ULL);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 1000000000ULL);
+	uwg_bbr_on_ack(b, b->keypair_id, 0, 1, 0, 1020000000ULL);
+	uwg_bbr_on_send(b, b->keypair_id, 1, 1400, 11020000000ULL);
+	uwg_bbr_on_ack(b, b->keypair_id, 1, 3, 0, 11040000000ULL);
 	if (b->mode != UWG_BBR_PROBE_RTT || b->cwnd != b->min_cwnd) {
 		pr_err("BBR self-test: PROBE_RTT not entered (mode=%u cwnd=%llu)\n",
 		       b->mode, b->cwnd);
@@ -1558,8 +1653,8 @@ static int uwg_bbr_selftest_edges(void)
 
 	/* A huge peer-reported delay must not move the RTT floor. */
 	uwg_bbr_init(b, 1400, 20000);
-	uwg_bbr_on_send(b, 0, 1400, 1000000);
-	uwg_bbr_on_ack(b, 0, 1, U32_MAX, 21000000);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 1000000);
+	uwg_bbr_on_ack(b, b->keypair_id, 0, 1, U32_MAX, 21000000);
 	if (uwg_min_rtt_value(b) < UWG_BBR_MIN_RTT_SAMPLE_NS ||
 	    uwg_min_rtt_value(b) > 20000000) {
 		pr_err("BBR self-test: ACK delay clamped wrongly (%llu)\n",
@@ -1574,7 +1669,7 @@ static int uwg_bbr_selftest_edges(void)
 	 * consuming anything itself.
 	 */
 	uwg_bbr_init(b, 1400, 20000);
-	uwg_bbr_on_send(b, 0, 1400, 1000);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 1000);
 	delay = uwg_bbr_next_delay_ns(b, 2800, 1000);
 	if (delay != 5000000ULL) {
 		pr_err("BBR self-test: pacing projection %llu, expected 5000000\n",
@@ -1600,17 +1695,17 @@ static int uwg_bbr_selftest_edges(void)
 	 * the same counter is spurious and must not be counted twice.
 	 */
 	uwg_bbr_init(b, 1400, 20000);
-	uwg_bbr_on_send(b, 0, 1400, 1000);
-	uwg_bbr_on_send(b, 1, 1400, 1100);
-	uwg_bbr_on_send(b, 2, 1400, 1200);
-	uwg_bbr_on_ack(b, 2, 0x5, 0, 5000000);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 1000);
+	uwg_bbr_on_send(b, b->keypair_id, 1, 1400, 1100);
+	uwg_bbr_on_send(b, b->keypair_id, 2, 1400, 1200);
+	uwg_bbr_on_ack(b, b->keypair_id, 2, 0x5, 0, 5000000);
 	if (b->lost_packets != 1 || uwg_bbr_inflight(b) != 1400) {
 		pr_err("BBR self-test: bitmap hole not seen as loss (lost=%llu inflight=%llu)\n",
 		       b->lost_packets, uwg_bbr_inflight(b));
 		kfree(b);
 		return -EINVAL;
 	}
-	uwg_bbr_on_ack(b, 2, 0x7, 0, 6000000);
+	uwg_bbr_on_ack(b, b->keypair_id, 2, 0x7, 0, 6000000);
 	if (b->lost_packets != 1 || !b->spurious_losses ||
 	    uwg_bbr_inflight(b) != 0) {
 		pr_err("BBR self-test: hole recovery mis-accounted (lost=%llu spurious=%llu inflight=%llu)\n",
@@ -1622,9 +1717,9 @@ static int uwg_bbr_selftest_edges(void)
 
 	/* An explicit loss report for an already-counted hole is not a second loss. */
 	uwg_bbr_init(b, 1400, 20000);
-	uwg_bbr_on_send(b, 0, 1400, 1000);
-	uwg_bbr_on_send(b, 1, 1400, 1100);
-	uwg_bbr_on_ack(b, 1, 0x1, 0, 5000000);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 1000);
+	uwg_bbr_on_send(b, b->keypair_id, 1, 1400, 1100);
+	uwg_bbr_on_ack(b, b->keypair_id, 1, 0x1, 0, 5000000);
 	uwg_bbr_on_loss(b, 0, 6000000);
 	if (b->lost_packets != 1 || uwg_bbr_inflight(b) != 0) {
 		pr_err("BBR self-test: hole loss counted twice (lost=%llu inflight=%llu)\n",
@@ -1635,7 +1730,7 @@ static int uwg_bbr_selftest_edges(void)
 
 	/* Locally dropped datagrams leave inflight but are not losses. */
 	uwg_bbr_init(b, 1400, 20000);
-	uwg_bbr_on_send(b, 0, 1400, 1000);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 1000);
 	uwg_bbr_on_drop(b, 0);
 	if (uwg_bbr_inflight(b) != 0 || b->lost_packets) {
 		pr_err("BBR self-test: local drop mis-accounted\n");
@@ -1656,8 +1751,8 @@ static int uwg_bbr_selftest_edges(void)
 	 */
 	uwg_bbr_init(b, 1400, 20000);
 	for (i = 0; i < 100; i++)
-		uwg_bbr_on_send(b, i, 1400, 1000000 + i * 1000);
-	uwg_bbr_on_ack(b, 99, U64_MAX, 0, 2000000);
+		uwg_bbr_on_send(b, b->keypair_id, i, 1400, 1000000 + i * 1000);
+	uwg_bbr_on_ack(b, b->keypair_id, 99, U64_MAX, 0, 2000000);
 	if (uwg_bbr_inflight(b) != 0 || b->lost_packets != 36) {
 		pr_err("BBR self-test: watermark release broken (lost=%llu inflight=%llu)\n",
 		       b->lost_packets, uwg_bbr_inflight(b));
@@ -1668,11 +1763,115 @@ static int uwg_bbr_selftest_edges(void)
 	/* cwnd is telemetry only: it must not add a sleep on top of pacing. */
 	uwg_bbr_init(b, 1400, 20000);
 	for (i = 0; i < 5; i++)
-		uwg_bbr_on_send(b, i, 1400, 1000 + i);
+		uwg_bbr_on_send(b, b->keypair_id, i, 1400, 1000 + i);
 	delay = uwg_bbr_next_delay_ns(b, 1400, 1000);
 	if (delay != 15000000ULL) {
 		pr_err("BBR self-test: pure pacing delay %llu, expected 15000000\n",
 		       delay);
+		kfree(b);
+		return -EINVAL;
+	}
+
+	kfree(b);
+	return 0;
+}
+
+static int uwg_bbr_selftest_epoch(void)
+{
+	struct uwg_bbr *b;
+	u64 btl_bw, min_rtt, cwnd, rate, lost;
+	unsigned int i;
+
+	b = kzalloc(sizeof(*b), GFP_KERNEL);
+	if (!b)
+		return -ENOMEM;
+
+	uwg_bbr_init(b, 1400, 20000);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 1000000);
+	uwg_bbr_on_ack(b, b->keypair_id, 0, 1, 0, 2000000);
+	uwg_bbr_on_send(b, b->keypair_id, 1, 1400, 2100000);
+	uwg_bbr_on_ack(b, b->keypair_id, 1, 1, 0, 3100000);
+	if (!b->btl_bw || !b->min_rtt.seen_min || uwg_bbr_inflight(b)) {
+		pr_err("BBR self-test: epoch fixture did not converge\n");
+		kfree(b);
+		return -EINVAL;
+	}
+
+	btl_bw = b->btl_bw;
+	min_rtt = b->min_rtt.min_ns;
+	cwnd = uwg_bbr_cwnd(b);
+	rate = uwg_bbr_pacing_rate(b);
+	lost = b->lost_packets;
+
+	uwg_bbr_new_epoch(b, 42, 4000000);
+	if (b->epoch != 1 || uwg_bbr_inflight(b) || b->largest_acked ||
+	    b->max_sent || b->oldest_valid || b->round_lost ||
+	    b->round_delivered) {
+		pr_err("BBR self-test: new epoch left stale counters\n");
+		kfree(b);
+		return -EINVAL;
+	}
+	for (i = 0; i < UWG_BBR_RING_CAPACITY; i++) {
+		if (uwg_slot_state(&b->ring[i]) != UWG_BBR_SLOT_EMPTY) {
+			pr_err("BBR self-test: new epoch left slot %u dirty\n", i);
+			kfree(b);
+			return -EINVAL;
+		}
+	}
+	if (b->btl_bw != btl_bw || b->min_rtt.min_ns != min_rtt ||
+	    uwg_bbr_cwnd(b) != cwnd || uwg_bbr_pacing_rate(b) != rate) {
+		pr_err("BBR self-test: new epoch lost the channel estimate\n");
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* Feedback carried on another keypair must not move the new epoch's
+	 * largest_acked, inflight, loss counters or the bandwidth estimate.
+	 */
+	uwg_bbr_on_ack(b, 41, 7000, U64_MAX, 0, 5000000);
+	uwg_bbr_on_loss(b, 7000, 5000000);
+	uwg_bbr_on_drop(b, 7000);
+	if (b->largest_acked || uwg_bbr_inflight(b) || b->btl_bw != btl_bw ||
+	    b->lost_packets != lost || b->spurious_losses) {
+		pr_err("BBR self-test: stale feedback reached the new epoch\n");
+		kfree(b);
+		return -EINVAL;
+	}
+
+	uwg_bbr_on_send(b, 42, 0, 1400, 6000000);
+	uwg_bbr_on_loss(b, 8000, 6100000);
+	if (uwg_bbr_inflight(b) != 1400 || b->lost_packets != lost) {
+		pr_err("BBR self-test: stale loss corrupted the new epoch\n");
+		kfree(b);
+		return -EINVAL;
+	}
+	/* The same counter, but issued on the old keypair: the ring record of
+	 * the new epoch must stay in flight.
+	 */
+	uwg_bbr_on_ack(b, 41, 0, 1, 0, 6500000);
+	if (uwg_bbr_inflight(b) != 1400 || b->largest_acked ||
+	    b->btl_bw != btl_bw) {
+		pr_err("BBR self-test: ACK from a foreign keypair was applied\n");
+		kfree(b);
+		return -EINVAL;
+	}
+	uwg_bbr_on_ack(b, 42, 0, 1, 0, 7000000);
+	if (uwg_bbr_inflight(b) != 0 || b->largest_acked != 0) {
+		pr_err("BBR self-test: new epoch ACK not applied\n");
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* A counter space restart without a keypair notification is detected
+	 * from the nonce regression itself.
+	 */
+	uwg_bbr_init(b, 1400, 20000);
+	for (i = 0; i < UWG_BBR_RING_CAPACITY + 10; i++)
+		uwg_bbr_on_send(b, b->keypair_id, i, 1400, 1000000 + i * 1000);
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 9000000);
+	if (b->epoch != 1 || uwg_bbr_inflight(b) != 1400 || b->max_sent) {
+		pr_err("BBR self-test: nonce restart not detected (epoch=%u inflight=%llu max_sent=%llu)\n",
+		       b->epoch, uwg_bbr_inflight(b), b->max_sent);
 		kfree(b);
 		return -EINVAL;
 	}
@@ -1686,6 +1885,9 @@ int uwg_bbr_selftest(void)
 	int ret;
 
 	ret = uwg_bbr_selftest_edges();
+	if (ret < 0)
+		return ret;
+	ret = uwg_bbr_selftest_epoch();
 	if (ret < 0)
 		return ret;
 	ret = uwg_bbr_selftest_path();
