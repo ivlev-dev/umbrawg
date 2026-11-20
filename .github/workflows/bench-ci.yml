@@ -80,7 +80,12 @@ jobs:
             pacman -Syu --noconfirm --needed base-devel clang llvm lld bc kmod linux-headers >/dev/null
             kdir=$(ls -d /usr/lib/modules/*/build | head -1)
             test -n "$kdir"
-            make -C /src/umbrawg-linux-kernel-module/src -j"$(nproc)" LLVM=1 "KERNELDIR=$kdir"
+            args=(-C /src/umbrawg-linux-kernel-module/src -j"$(nproc)" "KERNELDIR=$kdir")
+            if grep -qx CONFIG_CC_IS_CLANG=y "$kdir/.config" 2>/dev/null ||
+               grep -qx CONFIG_CC_IS_CLANG=y "$kdir/include/config/auto.conf" 2>/dev/null; then
+              args+=(LLVM=1)
+            fi
+            make "${args[@]}"
           '
           test -f umbrawg-linux-kernel-module/src/umbrawg.ko
 
