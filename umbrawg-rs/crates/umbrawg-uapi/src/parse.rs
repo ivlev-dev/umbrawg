@@ -115,7 +115,8 @@ fn apply_device_line(request: &mut SetRequest, key: &str, value: &str) -> Result
         "fwmark" => request.fwmark = Some(parse_u32(key, value)?),
         "extra_ports" => request.extra_ports = Some(parse_extra_ports(key, value)?),
         "bbr" => request.bbr = Some(value.trim().to_owned()),
-        "fec" => request.fec = Some(value.trim().to_owned()),
+        "fec" => request.fec = Some(parse_fec_mode(key, value)?),
+        "underlay_mtu" => request.underlay_mtu = Some(parse_underlay_mtu(key, value)?),
         "replace_peers" => {
             require_true(key, value)?;
             request.replace_peers = true;
@@ -251,6 +252,57 @@ fn parse_u32(key: &str, value: &str) -> Result<u32, UapiError> {
     value.parse::<u32>().map_err(|_| invalid_value(key, value))
 }
 
+/// Largest accepted FEC data shard count, mirroring `UWG_FEC_DATA_MAX_K`.
+const MAX_FEC_DATA_SHARDS: u8 = 8;
+
+/// Largest accepted FEC parity shard count, mirroring `UWG_FEC_DATA_MAX_M`.
+const MAX_FEC_PARITY_SHARDS: u8 = 2;
+
+/// Parses a `fec` value and rejects explicit shard counts the device data
+/// path cannot use.
+///
+/// The symbolic modes are passed through to [`DeviceControl::apply`]; explicit
+/// `K:M` pairs are bounded here so a client gets the same `EINVAL` for values
+/// the kernel would reject (`K <= 8`, `M <= 2`).
+///
+/// [`DeviceControl::apply`]: crate::DeviceControl::apply
+fn parse_fec_mode(key: &str, value: &str) -> Result<String, UapiError> {
+    let normalized = value.trim();
+    let Some((shards, parity)) = normalized.split_once(':') else {
+        return Ok(normalized.to_owned());
+    };
+    if shards.is_empty() || parity.is_empty() || !is_decimal(shards) || !is_decimal(parity) {
+        return Err(invalid_value(key, value));
+    }
+    let shards = shards
+        .parse::<u8>()
+        .map_err(|_| invalid_value(key, value))?;
+    let parity = parity
+        .parse::<u8>()
+        .map_err(|_| invalid_value(key, value))?;
+    if shards == 0 || parity == 0 || shards > MAX_FEC_DATA_SHARDS || parity > MAX_FEC_PARITY_SHARDS
+    {
+        return Err(UapiError::InvalidConfiguration(format!(
+            "`{key}` must be `off`, `adaptive` or K:M with 1 <= K <= \
+             {MAX_FEC_DATA_SHARDS} and 1 <= M <= {MAX_FEC_PARITY_SHARDS}, got \
+             `{normalized}`"
+        )));
+    }
+    Ok(normalized.to_owned())
+}
+
+/// Parses `underlay_mtu`, enforcing the kernel range `576..=65535`.
+fn parse_underlay_mtu(key: &str, value: &str) -> Result<u16, UapiError> {
+    let mtu = parse_u16(key, value)?;
+    if mtu < crate::types::MIN_UNDERLAY_MTU {
+        return Err(UapiError::InvalidConfiguration(format!(
+            "`{key}` must be {}..=65535, got {mtu}",
+            crate::types::MIN_UNDERLAY_MTU
+        )));
+    }
+    Ok(mtu)
+}
+
 /// Верхняя граница `extra_ports`; совпадает с `MAX_EXTRA_PORTS` устройства.
 const MAX_EXTRA_PORTS: u8 = 8;
 
@@ -317,6 +369,8 @@ private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 fwmark=4660
 extra_ports=6
+fec=8:2
+underlay_mtu=9000
 replace_peers=true
 jc=4
 jmin=40
@@ -362,6 +416,8 @@ allowed_ip=fd00::/64
         assert_eq!(request.listen_port, Some(51820));
         assert_eq!(request.fwmark, Some(4660));
         assert_eq!(request.extra_ports, Some(6));
+        assert_eq!(request.fec.as_deref(), Some("8:2"));
+        assert_eq!(request.underlay_mtu, Some(9000));
         assert!(request.replace_peers);
 
         let obfuscation = &request.obfuscation;
@@ -503,6 +559,48 @@ allowed_ip=fd00::/64
         ];
         for case in cases {
             assert!(parse(case).is_err(), "{case}");
+        }
+    }
+
+    #[test]
+    fn parses_underlay_mtu() {
+        for (value, expected) in [
+            ("576", 576),
+            ("1500", 1500),
+            ("9000", 9000),
+            ("65535", 65535),
+        ] {
+            let request = parse(&format!("underlay_mtu={value}\n\n")).expect("valid underlay_mtu");
+            assert_eq!(request.underlay_mtu, Some(expected), "{value}");
+        }
+        for value in ["", "abc", "-1", "+1500", "575", "0", "65536", "0x5dc"] {
+            assert!(
+                parse(&format!("underlay_mtu={value}\n\n")).is_err(),
+                "{value}"
+            );
+        }
+        let error = parse("underlay_mtu=575\n\n").expect_err("out of range");
+        assert!(matches!(error, UapiError::InvalidConfiguration(_)));
+        assert_eq!(error.code(), -22);
+        assert!(error.to_string().contains("576..=65535"), "{error}");
+    }
+
+    #[test]
+    fn validates_fec_shard_bounds() {
+        for value in ["off", "adaptive", "8:2", "1:1"] {
+            let request = parse(&format!("fec={value}\n\n")).expect("valid fec");
+            assert_eq!(request.fec.as_deref(), Some(value));
+        }
+        for value in ["0:0", "0:2", "2:0", "9:1", "1:3", "10:3", "255:255"] {
+            let error = parse(&format!("fec={value}\n\n")).expect_err("out of range");
+            assert_eq!(error.code(), -22, "{value}");
+            assert!(
+                error.to_string().contains("K <= 8") && error.to_string().contains("M <= 2"),
+                "{value}: {error}"
+            );
+        }
+        for value in ["1:", ":1", "1:2:3", "-1:2", "a:b"] {
+            assert!(parse(&format!("fec={value}\n\n")).is_err(), "{value}");
         }
     }
 

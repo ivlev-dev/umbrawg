@@ -967,7 +967,15 @@ fn device_fec_modes_roundtrip() {
 
 #[test]
 fn device_rejects_invalid_fec_shards() {
-    for (k, m) in [(0u8, 1u8), (1, 0), (255, 1), (200, 100)] {
+    for (k, m) in [
+        (0u8, 1u8),
+        (1, 0),
+        (9, 1),
+        (1, 3),
+        (10, 3),
+        (255, 1),
+        (200, 100),
+    ] {
         let error = UmbrawgDeviceConfig::by_name("uwg0")
             .fec(FecMode::Fixed { k, m })
             .build()
@@ -978,10 +986,9 @@ fn device_rejects_invalid_fec_shards() {
     assert_eq!(FecMode::fixed(0, 1), None);
     assert_eq!(FecMode::fixed(1, 0), None);
     assert_eq!(FecMode::fixed(255, 1), None);
-    assert_eq!(
-        FecMode::fixed(10, 3).and_then(FecMode::to_u32),
-        Some(0x0a03)
-    );
+    assert_eq!(FecMode::fixed(9, 1), None);
+    assert_eq!(FecMode::fixed(1, 3), None);
+    assert_eq!(FecMode::fixed(8, 2).and_then(FecMode::to_u32), Some(0x0802));
 }
 
 #[test]

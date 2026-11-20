@@ -8,9 +8,9 @@
 //!   `/var/run/umbrawg/`;
 //! * `UWG_QUICK_USERSPACE_IMPLEMENTATION` selects the userspace fallback
 //!   (`umbrawg` by default);
-//! * `UWG_COLOR_MODE` and `UWG_HIDE_KEYS` are inherited by every `uwg`
-//!   subprocess, exactly like `WG_COLOR_MODE`/`WG_HIDE_KEYS` are inherited
-//!   by `awg` in the shell implementation.
+//! * `WG_COLOR_MODE` and `WG_HIDE_KEYS` are read by `uwg show` and are
+//!   inherited by every `uwg` subprocess, exactly like the shell
+//!   implementation passes them to `awg`.
 
 pub mod command;
 pub mod commands;
@@ -48,10 +48,10 @@ pub const DEFAULT_USERSPACE_IMPLEMENTATION: &str = "umbrawg";
 pub const ENV_USERSPACE_IMPLEMENTATION: &str = "UWG_QUICK_USERSPACE_IMPLEMENTATION";
 
 /// Environment variable consumed by `uwg show` (passed through).
-pub const ENV_COLOR_MODE: &str = "UWG_COLOR_MODE";
+pub const ENV_COLOR_MODE: &str = "WG_COLOR_MODE";
 
 /// Environment variable consumed by `uwg show` (passed through).
-pub const ENV_HIDE_KEYS: &str = "UWG_HIDE_KEYS";
+pub const ENV_HIDE_KEYS: &str = "WG_HIDE_KEYS";
 
 /// First routing table used for a default route when no fwmark exists.
 pub const DEFAULT_ROUTE_TABLE_START: u32 = 51820;

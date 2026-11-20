@@ -92,6 +92,24 @@ pub fn decide_mtu(
     }
 }
 
+/// Keeps the FEC-derived MTU programmed by `setconf` when FEC is enabled.
+///
+/// The kernel and the userspace daemon lower the interface MTU while FEC is
+/// on so that a full-size inner packet fits one shard datagram (1368 bytes for
+/// the kernel and 1352 bytes for the userspace daemon on a 1500-byte
+/// underlay). `uwg-quick up` must not overwrite that value with the generic
+/// `underlay - 80` estimate afterwards.
+///
+/// `current` is the MTU read back from the interface after `setconf`; when it
+/// is unavailable the chosen base MTU is left alone. Taking the minimum keeps
+/// a smaller discovered path MTU while preserving the feature-derived value.
+pub fn fec_limited_mtu(chosen: u32, current: Option<u32>, fec_enabled: bool) -> u32 {
+    if !fec_enabled {
+        return chosen;
+    }
+    current.map_or(chosen, |current| chosen.min(current))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -162,5 +180,21 @@ mod tests {
             MtuDecision::Explicit("1280".to_string())
         );
         assert_eq!(decide_mtu(None, &[], Some(1500)), MtuDecision::Auto(1420));
+    }
+
+    #[test]
+    fn fec_mtu_is_preserved() {
+        // 1500-byte underlay: the kernel programmed 1368 and the userspace
+        // daemon 1352. The generic 1420 estimate must not raise either.
+        assert_eq!(fec_limited_mtu(1420, Some(1368), true), 1368);
+        assert_eq!(fec_limited_mtu(1420, Some(1352), true), 1352);
+        // A smaller discovered path MTU still wins, but the FEC value is
+        // never raised above what setconf chose.
+        assert_eq!(fec_limited_mtu(1220, Some(1368), true), 1220);
+        assert_eq!(fec_limited_mtu(1420, Some(1420), true), 1420);
+        assert_eq!(fec_limited_mtu(1420, None, true), 1420);
+        // FEC off keeps the existing auto/explicit behaviour.
+        assert_eq!(fec_limited_mtu(8920, Some(1420), false), 8920);
+        assert_eq!(fec_limited_mtu(1420, None, false), 1420);
     }
 }

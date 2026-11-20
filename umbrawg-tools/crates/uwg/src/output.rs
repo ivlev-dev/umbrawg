@@ -118,6 +118,12 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
     if let Some(underlay_mtu) = device.underlay_mtu {
         let _ = writeln!(output, "  {}: {underlay_mtu}", style.bold("underlay mtu"));
     }
+    if let Some(bbr) = &device.bbr {
+        let _ = writeln!(output, "  {}: {bbr}", style.bold("bbr"));
+    }
+    if let Some(fec) = &device.fec {
+        let _ = writeln!(output, "  {}: {fec}", style.bold("fec"));
+    }
     let obfuscation = &device.obfuscation;
     for (name, value) in [
         ("jc", obfuscation.jc),
@@ -897,7 +903,7 @@ mod tests {
         device.extra_ports = Some(4);
         device.fwmark = 0x1234;
         device.bbr = Some("monitor".to_owned());
-        device.fec = Some("10:3".to_owned());
+        device.fec = Some("8:2".to_owned());
         device.underlay_mtu = Some(9000);
         device.bbr_stats = Some(BbrStats {
             mode: 2,
@@ -943,7 +949,7 @@ mod tests {
     fn shows_bbr_and_fec_state() {
         let device = sample_device();
         assert_eq!(ugly(&device, "bbr", false).expect("valid"), "monitor\n");
-        assert_eq!(ugly(&device, "fec", false).expect("valid"), "10:3\n");
+        assert_eq!(ugly(&device, "fec", false).expect("valid"), "8:2\n");
 
         let mut device = sample_device();
         device.bbr = None;
@@ -1019,6 +1025,20 @@ mod tests {
     }
 
     #[test]
+    fn pretty_shows_bbr_and_fec_modes() {
+        let output = pretty_at(&sample_device(), false, 1_700_000_060);
+        assert!(output.contains("  bbr: monitor\n"), "{output}");
+        assert!(output.contains("  fec: 8:2\n"), "{output}");
+
+        let mut device = sample_device();
+        device.bbr = None;
+        device.fec = None;
+        let output = pretty_at(&device, false, 1_700_000_060);
+        assert!(!output.contains("  bbr:"), "{output}");
+        assert!(!output.contains("  fec:"), "{output}");
+    }
+
+    #[test]
     fn pretty_output_contains_fields() {
         let output = pretty_at(&sample_device(), false, 1_700_000_060);
         assert!(output.starts_with("interface: uwg0\n"));
@@ -1071,7 +1091,7 @@ mod tests {
         assert_eq!(ugly(&device, "fwmark", false).expect("valid"), "0x1234\n");
         assert_eq!(ugly(&device, "extra-ports", false).expect("valid"), "4\n");
         assert_eq!(ugly(&device, "bbr", false).expect("valid"), "monitor\n");
-        assert_eq!(ugly(&device, "fec", false).expect("valid"), "10:3\n");
+        assert_eq!(ugly(&device, "fec", false).expect("valid"), "8:2\n");
         assert_eq!(ugly(&device, "jc", false).expect("valid"), "4\n");
         assert_eq!(ugly(&device, "h1", false).expect("valid"), "10-20\n");
         assert_eq!(ugly(&device, "i1", false).expect("valid"), "<b 0x1><c>\n");
@@ -1147,7 +1167,7 @@ mod tests {
         assert!(output.contains("ExtraPorts = 4\n"));
         assert!(output.contains("FwMark = 0x1234\n"));
         assert!(output.contains("BBR = monitor\n"));
-        assert!(output.contains("FEC = 10:3\n"));
+        assert!(output.contains("FEC = 8:2\n"));
         assert!(output.contains("H1 = 10-20\n"));
         assert!(output.contains("I1 = <b 0x1><c>\n"));
         assert!(output.contains("RandomTrailers = on\n"));

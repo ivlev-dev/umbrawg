@@ -484,7 +484,7 @@ fn showconf_prints_advanced_security_from_uapi() {
 #[test]
 fn show_reports_bbr_and_fec_from_uapi() {
     let directory = runtime_dir();
-    let _fake = FakeUapi::start(&directory, get_response_with_bbr_fec("monitor", "10:3"));
+    let _fake = FakeUapi::start(&directory, get_response_with_bbr_fec("monitor", "8:2"));
 
     let output = run(&directory, &["show", "uwg0", "bbr"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -495,7 +495,7 @@ fn show_reports_bbr_and_fec_from_uapi() {
 
     let output = run(&directory, &["show", "uwg0", "fec"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert_eq!(String::from_utf8(output.stdout).expect("utf-8"), "10:3\n");
+    assert_eq!(String::from_utf8(output.stdout).expect("utf-8"), "8:2\n");
 }
 
 #[test]
@@ -564,6 +564,49 @@ fn show_prints_underlay_mtu_from_uapi() {
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
     assert!(stdout.contains("underlay mtu: 1280"), "{stdout}");
+}
+
+#[test]
+fn show_reports_daemon_bbr_and_fec_stats() {
+    let directory = runtime_dir();
+    let response = "listen_port=51820\n\
+                    bbr_stats=1\nbbr_mode=monitor\nbbr_cwnd=131072\nbbr_inflight=4096\n\
+                    bbr_pacing_rate=1000000\nbbr_btl_bw=2000000\nbbr_min_rtt_ns=12345\n\
+                    bbr_round_lost=8\nbbr_peers=1\n\
+                    fec_stats=1\nfec_blocks_encoded=10\nfec_shards_sent=12\n\
+                    fec_blocks_decoded=9\nfec_packets_recovered=1\nfec_decode_fail=2\n\
+                    fec_dropped_bounds=3\nfec_dropped_disabled=4\nerrno=0\n\n";
+    let _fake = FakeUapi::start(&directory, response.to_owned());
+
+    let output = run(&directory, &["show", "uwg0", "bbr-stats"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf-8"),
+        "mode=monitor\ncwnd=131072\ninflight=4096\npacing_rate=1000000\nbtl_bw=2000000\n\
+         min_rtt_ns=12345\nround_lost=8\npeers=1\n"
+    );
+
+    let output = run(&directory, &["show", "uwg0", "fec-stats"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf-8"),
+        "blocks_encoded=10\nshards_sent=12\nblocks_decoded=9\npackets_recovered=1\n\
+         decode_fail=2\ndropped_bounds=3\ndropped_disabled=4\n"
+    );
+}
+
+#[test]
+fn show_all_without_interfaces_succeeds_with_empty_output() {
+    let directory = runtime_dir();
+
+    let output = run(&directory, &["show", "all"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+
+    let output = run(&directory, &["show", "interfaces"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
 }
 
 #[test]

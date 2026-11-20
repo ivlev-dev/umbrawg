@@ -970,7 +970,7 @@ fn test_bbr_fec_roundtrip() {
         attributes: vec![
             UmbrawgAttribute::IfName("uwg0".into()),
             UmbrawgAttribute::Bbr(2),
-            UmbrawgAttribute::Fec(crate::attribute::fec_pack(10, 3).unwrap()),
+            UmbrawgAttribute::Fec(crate::attribute::fec_pack(8, 2).unwrap()),
         ],
     };
 
@@ -1010,7 +1010,7 @@ fn test_fec_wire_format() {
         (crate::attribute::FEC_ADAPTIVE, vec![0x01, 0x00, 0x00, 0x00]),
         (0x0402, vec![0x02, 0x04, 0x00, 0x00]),
         (0x0101, vec![0x01, 0x01, 0x00, 0x00]),
-        (0xfe01, vec![0x01, 0xfe, 0x00, 0x00]),
+        (0x0802, vec![0x02, 0x08, 0x00, 0x00]),
     ];
     for (value, payload) in cases {
         let attr = UmbrawgAttribute::Fec(value);
@@ -1030,8 +1030,10 @@ fn test_fec_wire_format() {
 fn test_fec_rejects_invalid_payloads() {
     use netlink_packet_core::NlaBuffer;
 
-    // 2..=255 cannot be `(K << 8) | M` with both counts non-zero.
-    for value in [2u32, 0x00ff, 0x0100, 0xff01, 0x010000] {
+    // Not `(K << 8) | M` with 1 <= K <= 8 and 1 <= M <= 2.
+    for value in [
+        2u32, 0x00ff, 0x0100, 0x0901, 0x0103, 0xfe01, 0x0a03, 0x010000,
+    ] {
         let attr = UmbrawgAttribute::Fec(value);
         let mut buf = vec![0; attr.buffer_len()];
         attr.emit(&mut buf);
@@ -1046,10 +1048,14 @@ fn test_fec_rejects_invalid_payloads() {
 fn test_fec_pack_and_unpack() {
     use crate::attribute::{fec_pack, fec_unpack, FEC_ADAPTIVE, FEC_OFF};
 
-    assert_eq!(fec_pack(10, 3), Some(0x0a03));
-    assert_eq!(fec_unpack(0x0a03), Some((10, 3)));
-    assert_eq!(fec_pack(254, 1), Some(0xfe01));
-    assert_eq!(fec_unpack(0xfe01), Some((254, 1)));
+    assert_eq!(fec_pack(8, 2), Some(0x0802));
+    assert_eq!(fec_unpack(0x0802), Some((8, 2)));
+    assert_eq!(fec_pack(2, 1), Some(0x0201));
+    assert_eq!(fec_unpack(0x0201), Some((2, 1)));
+    assert_eq!(fec_pack(9, 1), None);
+    assert_eq!(fec_pack(1, 3), None);
+    assert_eq!(fec_unpack(0x0901), None);
+    assert_eq!(fec_unpack(0x0103), None);
     assert_eq!(fec_pack(0, 0), None);
     assert_eq!(fec_pack(0, 3), None);
     assert_eq!(fec_pack(3, 0), None);
@@ -1087,12 +1093,13 @@ fn test_fec_mode_conversions() {
         FecMode::Adaptive,
         FecMode::Fixed { k: 2, m: 1 },
         FecMode::Fixed { k: 8, m: 2 },
-        FecMode::Fixed { k: 254, m: 1 },
     ] {
         assert_eq!(FecMode::from_u32(mode.to_u32().unwrap()), Some(mode));
     }
 
-    for value in [2u32, 0x00ff, 0x0100, 0xff01, 0x010000] {
+    for value in [
+        2u32, 0x00ff, 0x0100, 0x0901, 0x0103, 0xfe01, 0x0a03, 0x010000,
+    ] {
         assert_eq!(FecMode::from_u32(value), None);
     }
 }

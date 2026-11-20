@@ -7,8 +7,8 @@ use crate::attribute::{fec_pack, fec_unpack, FEC_ADAPTIVE, FEC_OFF};
 /// Forward error correction mode (`UWGDEVICE_A_FEC`, `NLA_U32`).
 ///
 /// `0` disables FEC, `1` selects the adaptive mode and every other valid
-/// payload packs explicit shard counts as `(K << 8) | M` with `K >= 1`,
-/// `M >= 1` and `K + M <= 255`.
+/// payload packs explicit shard counts as `(K << 8) | M` with `1 <= K <= 8`
+/// and `1 <= M <= 2`, the bounds the kernel data path enforces.
 ///
 /// [`Fixed`](Self::Fixed) can be built without validation; use
 /// [`fixed`](Self::fixed) for checked construction. Invalid shard counts are
@@ -36,7 +36,7 @@ pub enum FecMode {
     /// Explicit shard counts: `K` data shards and `M` parity shards.
     ///
     /// The values are emitted as `(K << 8) | M`; the kernel requires
-    /// `K >= 1`, `M >= 1` and `K + M <= 255`.
+    /// `1 <= K <= 8` and `1 <= M <= 2`.
     Fixed {
         /// Number of data shards.
         k: u8,
@@ -48,7 +48,7 @@ pub enum FecMode {
 impl FecMode {
     /// Creates a checked [`Fixed`](Self::Fixed) mode.
     ///
-    /// Returns `None` unless `k >= 1`, `m >= 1` and `k + m <= 255`.
+    /// Returns `None` unless `1 <= k <= 8` and `1 <= m <= 2`.
     pub const fn fixed(k: u8, m: u8) -> Option<Self> {
         if fec_pack(k, m).is_some() {
             Some(Self::Fixed { k, m })

@@ -90,12 +90,23 @@ pub enum PreparedIncoming {
     Dropped,
 }
 
+/// Default MTU of the path between peers, mirroring the kernel.
+pub const DEFAULT_UNDERLAY_MTU: u16 = 1500;
+
+/// Smallest accepted MTU of the path between peers, mirroring the kernel.
+pub const MIN_UNDERLAY_MTU: u16 = 576;
+
 pub struct DeviceConfig {
     pub private_key: Option<Key>,
     pub listen_port: u16,
     pub fwmark: u32,
     pub extra_ports: u8,
     pub mtu: u16,
+    /// MTU of the path between the peers; `576..=65535`, `1500` by default.
+    ///
+    /// With FEC enabled the tunnel MTU is derived from it, so the daemon must
+    /// initialise this from `UMBRAWG_UNDERLAY_MTU`.
+    pub underlay_mtu: u16,
     pub obfuscation: ObfParams,
     pub timings: Timings,
     pub staged_pool_capacity: usize,
@@ -110,6 +121,7 @@ impl Default for DeviceConfig {
             fwmark: 0,
             extra_ports: DEFAULT_EXTRA_PORTS,
             mtu: 1420,
+            underlay_mtu: DEFAULT_UNDERLAY_MTU,
             obfuscation: ObfParams::default(),
             timings: Timings::new(),
             staged_pool_capacity: 128,
@@ -165,6 +177,7 @@ pub struct Device {
     fwmark: AtomicU32,
     extra_ports: AtomicU8,
     mtu: AtomicU16,
+    underlay_mtu: AtomicU16,
     next_peer_id: AtomicU32,
     staging_pool: Arc<BufferPool>,
     incoming_drops: IncomingDropCounters,
@@ -177,6 +190,9 @@ impl Device {
         config.obfuscation.validate()?;
         if !config.timings.validate() {
             return Err(DeviceError::InvalidParameter("timings"));
+        }
+        if config.underlay_mtu < MIN_UNDERLAY_MTU {
+            return Err(DeviceError::InvalidParameter("underlay_mtu"));
         }
         let private_key = config
             .private_key
@@ -208,6 +224,7 @@ impl Device {
             fwmark: AtomicU32::new(config.fwmark),
             extra_ports: AtomicU8::new(config.extra_ports.min(MAX_EXTRA_PORTS)),
             mtu: AtomicU16::new(config.mtu),
+            underlay_mtu: AtomicU16::new(config.underlay_mtu),
             next_peer_id: AtomicU32::new(1),
             staging_pool: Arc::new(BufferPool::new(
                 config.staged_pool_capacity,
@@ -428,6 +445,24 @@ impl Device {
 
     pub fn set_mtu(&self, mtu: u16) {
         self.mtu.store(mtu, Ordering::Relaxed);
+    }
+
+    /// Возвращает MTU подложки — путь между пирами.
+    #[must_use]
+    pub fn underlay_mtu(&self) -> u16 {
+        self.underlay_mtu.load(Ordering::Relaxed)
+    }
+
+    /// Устанавливает MTU подложки.
+    ///
+    /// Значение меньше [`MIN_UNDERLAY_MTU`] отклоняется: политика FEC-MTU
+    /// не может опустить туннель ниже минимального IPv4 reassembly buffer.
+    pub fn set_underlay_mtu(&self, mtu: u16) -> Result<()> {
+        if mtu < MIN_UNDERLAY_MTU {
+            return Err(DeviceError::InvalidParameter("underlay_mtu"));
+        }
+        self.underlay_mtu.store(mtu, Ordering::Relaxed);
+        Ok(())
     }
 
     #[must_use]

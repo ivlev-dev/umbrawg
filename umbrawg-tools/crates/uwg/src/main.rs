@@ -138,7 +138,10 @@ async fn run_show(args: &ShowArgs) -> CommandResult {
             }
             success = true;
         }
-        if !success || ugly_failed {
+        // `show all` without any interface is a successful empty listing,
+        // matching `show interfaces`. An interface that was listed but could
+        // not be queried is still an error.
+        if ugly_failed || (!interfaces.is_empty() && !success) {
             return Err(String::new());
         }
         return Ok(());

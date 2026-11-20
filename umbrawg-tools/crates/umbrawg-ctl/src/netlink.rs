@@ -14,7 +14,7 @@ use netlink_packet_umbrawg::constants::{
 use netlink_packet_umbrawg::{
     fec_pack, fec_unpack, UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
     UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
-    FEC_ADAPTIVE, FEC_OFF,
+    FEC_ADAPTIVE, FEC_MAX_K, FEC_MAX_M, FEC_OFF,
 };
 use umbrawg_config::{AllowedIp, Cipher, Key, U16Range, U32Range};
 
@@ -640,6 +640,11 @@ fn fec_value(text: &str) -> Result<u32, Error> {
     }
     let shards: u8 = shards.parse().map_err(|_| invalid())?;
     let parity: u8 = parity.parse().map_err(|_| invalid())?;
+    if shards > FEC_MAX_K || parity > FEC_MAX_M {
+        return Err(Error::Protocol(format!(
+            "invalid FEC mode `{text}`: K must be 1..={FEC_MAX_K} and M must be 1..={FEC_MAX_M}"
+        )));
+    }
     fec_pack(shards, parity).ok_or_else(invalid)
 }
 
@@ -899,7 +904,7 @@ mod tests {
                 UmbrawgAttribute::ListenPort(51820),
                 UmbrawgAttribute::ExtraPorts(7),
                 UmbrawgAttribute::Bbr(2),
-                UmbrawgAttribute::Fec(0x0a03),
+                UmbrawgAttribute::Fec(0x0802),
                 UmbrawgAttribute::Fwmark(0x12),
                 UmbrawgAttribute::PrivateKey([1u8; 32]),
                 UmbrawgAttribute::PublicKey([2u8; 32]),
@@ -956,7 +961,7 @@ mod tests {
         assert_eq!(device.listen_port, 51820);
         assert_eq!(device.extra_ports, Some(7));
         assert_eq!(device.bbr.as_deref(), Some("on"));
-        assert_eq!(device.fec.as_deref(), Some("10:3"));
+        assert_eq!(device.fec.as_deref(), Some("8:2"));
         assert_eq!(device.fwmark, 0x12);
         assert_eq!(device.obfuscation.jc, Some(4));
         assert_eq!(device.obfuscation.h1, Some(U32Range::new(10, 20)));
@@ -1142,11 +1147,11 @@ mod tests {
             .any(|attribute| matches!(attribute, UmbrawgAttribute::Fec(_))));
 
         config.device.bbr = Some("monitor".to_owned());
-        config.device.fec = Some("10:3".to_owned());
+        config.device.fec = Some("8:2".to_owned());
         let messages = build_set_messages(&config, 3).expect("valid");
         let attributes = &messages[0].attributes;
         assert!(attributes.contains(&UmbrawgAttribute::Bbr(1)));
-        assert!(attributes.contains(&UmbrawgAttribute::Fec(0x0a03)));
+        assert!(attributes.contains(&UmbrawgAttribute::Fec(0x0802)));
 
         config.device.bbr = Some("on".to_owned());
         config.device.fec = Some("adaptive".to_owned());
@@ -1207,19 +1212,22 @@ mod tests {
     fn encodes_fec_modes() {
         assert_eq!(fec_value("off").expect("valid"), 0);
         assert_eq!(fec_value("adaptive").expect("valid"), 1);
-        assert_eq!(fec_value("10:3").expect("valid"), 0x0a03);
+        assert_eq!(fec_value("8:2").expect("valid"), 0x0802);
         assert_eq!(fec_value("1:1").expect("valid"), 0x0101);
-        assert_eq!(fec_value("254:1").expect("valid"), 0xfe01);
+        assert_eq!(fec_value("2:1").expect("valid"), 0x0201);
         assert_eq!(fec_value(" ADAPTIVE ").expect("valid"), 1);
         for value in [
-            "", "0:0", "0:3", "3:0", "255:1", "200:100", "10", "10:3:4", "-1:2", "a:b", "1:",
+            "", "0:0", "0:3", "3:0", "9:1", "1:3", "10:3", "255:1", "200:100", "10", "10:3:4",
+            "-1:2", "a:b", "1:",
         ] {
             assert!(fec_value(value).is_err(), "{value}");
         }
         assert_eq!(fec_text(0).expect("valid"), "off");
         assert_eq!(fec_text(1).expect("valid"), "adaptive");
-        assert_eq!(fec_text(0x0a03).expect("valid"), "10:3");
-        assert_eq!(fec_text(0xfe01).expect("valid"), "254:1");
+        assert_eq!(fec_text(0x0802).expect("valid"), "8:2");
+        assert!(fec_text(0xfe01).is_err());
+        assert!(fec_text(0x0901).is_err());
+        assert!(fec_text(0x0103).is_err());
         assert!(fec_text(2).is_err());
         assert!(fec_text(0x0100).is_err());
     }
@@ -1243,11 +1251,11 @@ mod tests {
     fn reads_bbr_and_fec_from_netlink() {
         let mut builder = DeviceBuilder::new("test0");
         builder
-            .apply(&[UmbrawgAttribute::Bbr(2), UmbrawgAttribute::Fec(0x0a03)])
+            .apply(&[UmbrawgAttribute::Bbr(2), UmbrawgAttribute::Fec(0x0802)])
             .expect("apply");
         let device = builder.finish();
         assert_eq!(device.bbr.as_deref(), Some("on"));
-        assert_eq!(device.fec.as_deref(), Some("10:3"));
+        assert_eq!(device.fec.as_deref(), Some("8:2"));
 
         for (mode, expected) in [(0u8, "off"), (1, "monitor"), (2, "on")] {
             let mut builder = DeviceBuilder::new("test0");

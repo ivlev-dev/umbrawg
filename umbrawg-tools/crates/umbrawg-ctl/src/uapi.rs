@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
+use netlink_packet_umbrawg::{BbrStats, FecStats};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use umbrawg_config::{format_endpoint, parse_endpoint, AllowedIp, Cipher, Key, U16Range, U32Range};
@@ -305,6 +306,90 @@ fn apply_device_line(device: &mut Device, key: &str, value: &str) -> Result<(), 
         "bbr" => device.bbr = Some(parse_mode_text(key, value)?),
         "fec" => device.fec = Some(parse_mode_text(key, value)?),
         "underlay_mtu" => device.underlay_mtu = Some(parse_u16(key, value)?),
+        "bbr_stats" => device.bbr_stats = Some(BbrStats::default()),
+        "bbr_mode" => {
+            device.bbr_stats.get_or_insert_with(BbrStats::default).mode =
+                parse_bbr_mode(key, value)?;
+        }
+        "bbr_cwnd" => {
+            device.bbr_stats.get_or_insert_with(BbrStats::default).cwnd = parse_u64(key, value)?;
+        }
+        "bbr_inflight" => {
+            device
+                .bbr_stats
+                .get_or_insert_with(BbrStats::default)
+                .inflight = parse_u64(key, value)?;
+        }
+        "bbr_pacing_rate" => {
+            device
+                .bbr_stats
+                .get_or_insert_with(BbrStats::default)
+                .pacing_rate = parse_u64(key, value)?;
+        }
+        "bbr_btl_bw" => {
+            device
+                .bbr_stats
+                .get_or_insert_with(BbrStats::default)
+                .btl_bw = parse_u64(key, value)?;
+        }
+        "bbr_min_rtt_ns" => {
+            device
+                .bbr_stats
+                .get_or_insert_with(BbrStats::default)
+                .min_rtt_ns = parse_u64(key, value)?;
+        }
+        "bbr_round_lost" => {
+            device
+                .bbr_stats
+                .get_or_insert_with(BbrStats::default)
+                .round_lost = parse_u32(key, value)?;
+        }
+        "bbr_peers" => {
+            device.bbr_stats.get_or_insert_with(BbrStats::default).peers = parse_u32(key, value)?;
+        }
+        "fec_stats" => device.fec_stats = Some(FecStats::default()),
+        "fec_blocks_encoded" => {
+            device
+                .fec_stats
+                .get_or_insert_with(FecStats::default)
+                .blocks_encoded = parse_u64(key, value)?;
+        }
+        "fec_shards_sent" => {
+            device
+                .fec_stats
+                .get_or_insert_with(FecStats::default)
+                .shards_sent = parse_u64(key, value)?;
+        }
+        "fec_blocks_decoded" => {
+            device
+                .fec_stats
+                .get_or_insert_with(FecStats::default)
+                .blocks_decoded = parse_u64(key, value)?;
+        }
+        "fec_packets_recovered" => {
+            device
+                .fec_stats
+                .get_or_insert_with(FecStats::default)
+                .packets_recovered = parse_u64(key, value)?;
+        }
+        "fec_decode_fail" => {
+            device
+                .fec_stats
+                .get_or_insert_with(FecStats::default)
+                .decode_fail = parse_u64(key, value)?;
+        }
+        "fec_dropped_bounds" => {
+            device
+                .fec_stats
+                .get_or_insert_with(FecStats::default)
+                .dropped_bounds = parse_u64(key, value)?;
+        }
+        "fec_dropped_disabled" => {
+            device
+                .fec_stats
+                .get_or_insert_with(FecStats::default)
+                .dropped_disabled = parse_u64(key, value)?;
+        }
         "jc" => device.obfuscation.jc = Some(parse_u16(key, value)?),
         "jmin" => device.obfuscation.jmin = Some(parse_u16(key, value)?),
         "jmax" => device.obfuscation.jmax = Some(parse_u16(key, value)?),
@@ -471,6 +556,23 @@ fn parse_u16(key: &str, value: &str) -> Result<u16, Error> {
         .map_err(|_| Error::Protocol(format!("invalid {key}: `{value}`")))
 }
 
+fn parse_bbr_mode(key: &str, value: &str) -> Result<u8, Error> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" => Ok(0),
+        "monitor" => Ok(1),
+        "on" => Ok(2),
+        other => {
+            let mode = other
+                .parse::<u8>()
+                .map_err(|_| Error::Protocol(format!("invalid {key}: `{value}`")))?;
+            if mode > 2 {
+                return Err(Error::Protocol(format!("invalid {key}: `{value}`")));
+            }
+            Ok(mode)
+        }
+    }
+}
+
 fn parse_mode_text(key: &str, value: &str) -> Result<String, Error> {
     let value = value.trim();
     if value.is_empty() {
@@ -551,6 +653,7 @@ extra_ports=4
 fwmark=4660
 bbr=monitor
 fec=adaptive
+underlay_mtu=1500
 jc=4
 jmin=40
 jmax=70
@@ -572,6 +675,23 @@ keepalive_timeout=10
 max_handshake_attempts=7
 random_trailers=1
 disable_cookies=0
+bbr_stats=1
+bbr_mode=monitor
+bbr_cwnd=131072
+bbr_inflight=4096
+bbr_pacing_rate=1000000
+bbr_btl_bw=2000000
+bbr_min_rtt_ns=12345
+bbr_round_lost=8
+bbr_peers=1
+fec_stats=1
+fec_blocks_encoded=10
+fec_shards_sent=12
+fec_blocks_decoded=9
+fec_packets_recovered=1
+fec_decode_fail=2
+fec_dropped_bounds=3
+fec_dropped_disabled=4
 public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 preshared_key=606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f
 protocol_version=1
@@ -596,7 +716,7 @@ errno=0
         device.device.extra_ports = Some(4);
         device.device.fwmark = Some(0);
         device.device.bbr = Some("on".to_owned());
-        device.device.fec = Some("10:3".to_owned());
+        device.device.fec = Some("8:2".to_owned());
         device.device.obfuscation.jc = Some(4);
         device.device.obfuscation.jmin = Some(40);
         device.device.obfuscation.jmax = Some(70);
@@ -641,6 +761,32 @@ errno=0
         assert_eq!(device.fwmark, 4660);
         assert_eq!(device.bbr.as_deref(), Some("monitor"));
         assert_eq!(device.fec.as_deref(), Some("adaptive"));
+        assert_eq!(device.underlay_mtu, Some(1500));
+        assert_eq!(
+            device.bbr_stats,
+            Some(BbrStats {
+                mode: 1,
+                cwnd: 131_072,
+                inflight: 4096,
+                pacing_rate: 1_000_000,
+                btl_bw: 2_000_000,
+                min_rtt_ns: 12_345,
+                round_lost: 8,
+                peers: 1,
+            })
+        );
+        assert_eq!(
+            device.fec_stats,
+            Some(FecStats {
+                blocks_encoded: 10,
+                shards_sent: 12,
+                blocks_decoded: 9,
+                packets_recovered: 1,
+                decode_fail: 2,
+                dropped_bounds: 3,
+                dropped_disabled: 4,
+            })
+        );
         assert_eq!(device.obfuscation.jc, Some(4));
         assert_eq!(
             device.obfuscation.h1,
@@ -664,6 +810,26 @@ errno=0
         );
         assert_eq!(peer.advanced_security, None);
         assert_eq!(peer.cipher, Some(Cipher::Aes256Gcm));
+    }
+
+    #[test]
+    fn parses_stats_only_when_reported() {
+        let device =
+            parse_get_response("listen_port=51820\nerrno=0\n\n", "test0").expect("valid response");
+        assert_eq!(device.bbr_stats, None);
+        assert_eq!(device.fec_stats, None);
+
+        assert!(parse_get_response("bbr_mode=maybe\nerrno=0\n\n", "test0").is_err());
+        assert!(parse_get_response("bbr_cwnd=abc\nerrno=0\n\n", "test0").is_err());
+        assert!(parse_get_response("fec_shards_sent=-1\nerrno=0\n\n", "test0").is_err());
+
+        let device =
+            parse_get_response("bbr_stats=1\nbbr_mode=on\nerrno=0\n\n", "test0").expect("valid");
+        assert_eq!(device.bbr_stats.expect("bbr stats").mode, 2);
+        let device =
+            parse_get_response("fec_stats=1\nfec_dropped_disabled=9\nerrno=0\n\n", "test0")
+                .expect("valid");
+        assert_eq!(device.fec_stats.expect("fec stats").dropped_disabled, 9);
     }
 
     #[test]
@@ -718,7 +884,7 @@ errno=0
         let mut config = set_device();
         let request = build_set_request(&config).expect("valid request");
         assert!(request.contains("bbr=on\n"));
-        assert!(request.contains("fec=10:3\n"));
+        assert!(request.contains("fec=8:2\n"));
 
         config.device.bbr = None;
         config.device.fec = None;
@@ -742,7 +908,7 @@ errno=0
         for (value, expected) in [
             ("off", "off"),
             ("adaptive", "adaptive"),
-            ("10:3", "10:3"),
+            ("8:2", "8:2"),
             ("ADAPTIVE", "adaptive"),
         ] {
             let device = parse_get_response(&format!("fec={value}\nerrno=0\n\n"), "test0")
@@ -913,7 +1079,7 @@ errno=0
         assert!(request.contains("extra_ports=4\n"));
         assert!(request.contains("fwmark=0\n"));
         assert!(request.contains("bbr=on\n"));
-        assert!(request.contains("fec=10:3\n"));
+        assert!(request.contains("fec=8:2\n"));
         assert!(request.contains("replace_peers=true\n"));
         assert!(request.contains("h1=61220074-118999195\n"));
         assert!(request.contains("i1=<b 0x1><c>\n"));

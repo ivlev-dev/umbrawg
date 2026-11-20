@@ -142,7 +142,7 @@ pub use self::{
     allowedip::{UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr},
     attribute::{
         fec_pack, fec_unpack, UmbrawgAttribute, BBR_MAX, FEC_ADAPTIVE,
-        FEC_MAX_SHARDS, FEC_OFF,
+        FEC_MAX_K, FEC_MAX_M, FEC_MAX_SHARDS, FEC_OFF,
     },
     bbr::BbrMode,
     cipher::UmbrawgCipher,

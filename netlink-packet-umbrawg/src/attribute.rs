@@ -72,15 +72,28 @@ pub const FEC_OFF: u32 = 0;
 /// `UWGDEVICE_A_FEC` value that selects adaptive FEC.
 pub const FEC_ADAPTIVE: u32 = 1;
 
+/// Largest accepted number of FEC data shards (`K`).
+///
+/// Mirrors `UWG_FEC_DATA_MAX_K` of the kernel data path. The older arithmetic
+/// codec accepts larger values, but `UWGDEVICE_A_FEC` is validated against the
+/// data path, so a larger `K` is rejected by the kernel.
+pub const FEC_MAX_K: u8 = 8;
+
+/// Largest accepted number of FEC parity shards (`M`).
+///
+/// Mirrors `UWG_FEC_DATA_MAX_M` of the kernel data path.
+pub const FEC_MAX_M: u8 = 2;
+
 /// Largest accepted total number of FEC shards (`K + M`).
-pub const FEC_MAX_SHARDS: u16 = 255;
+pub const FEC_MAX_SHARDS: u16 = FEC_MAX_K as u16 + FEC_MAX_M as u16;
 
 /// Packs explicit FEC shard counts into the `UWGDEVICE_A_FEC` payload
 /// (`k << 8 | m`).
 ///
-/// Returns `None` unless `k >= 1`, `m >= 1` and `k + m <= 255`.
+/// Returns `None` unless `1 <= k <= 8` and `1 <= m <= 2`, the bounds the
+/// kernel data path enforces.
 pub const fn fec_pack(k: u8, m: u8) -> Option<u32> {
-    if k == 0 || m == 0 || k as u16 + m as u16 > FEC_MAX_SHARDS {
+    if k == 0 || m == 0 || k > FEC_MAX_K || m > FEC_MAX_M {
         return None;
     }
     Some(((k as u32) << 8) | m as u32)
@@ -88,19 +101,15 @@ pub const fn fec_pack(k: u8, m: u8) -> Option<u32> {
 
 /// Unpacks explicit FEC shard counts from a `UWGDEVICE_A_FEC` payload.
 ///
-/// Returns `None` for the `off`/`adaptive` modes and for payloads that do not
-/// satisfy the `k >= 1`, `m >= 1`, `k + m <= 255` contract.
+/// Returns `None` for the `off`/`adaptive` modes and for payloads outside the
+/// `1 <= k <= 8`, `1 <= m <= 2` contract of the kernel data path.
 pub const fn fec_unpack(value: u32) -> Option<(u8, u8)> {
     if value == FEC_OFF || value == FEC_ADAPTIVE {
         return None;
     }
     let k = (value >> 8) as u8;
     let m = value as u8;
-    if value >> 16 != 0
-        || k == 0
-        || m == 0
-        || k as u16 + m as u16 > FEC_MAX_SHARDS
-    {
+    if value >> 16 != 0 || k == 0 || m == 0 || k > FEC_MAX_K || m > FEC_MAX_M {
         return None;
     }
     Some((k, m))
@@ -338,8 +347,8 @@ pub enum UmbrawgAttribute {
     /// `UWGDEVICE_A_DISABLE_COOKIES`: `u8` boolean (UmbraWG 3.1).
     DisableCookies(bool),
     /// `UWGDEVICE_A_EXTRA_PORTS`: number of additional external UDP ports
-    /// (`u8`, `0..=8`), `4` by default. The kernel opens one extra socket
-    /// per port and sends over them round-robin.
+    /// (`u8`, `0..=8`), `0` by default. The kernel opens one extra socket
+    /// per configured port and sends over them round-robin.
     ExtraPorts(u8),
     /// `UWGDEVICE_A_BBR`: BBR congestion control mode (`u8`).
     ///
@@ -349,9 +358,9 @@ pub enum UmbrawgAttribute {
     /// `UWGDEVICE_A_FEC`: forward error correction mode (`u32`).
     ///
     /// `0` disables FEC, `1` selects adaptive FEC, and any other valid value
-    /// packs explicit shard counts as `(K << 8) | M` with `K >= 1`, `M >= 1`
-    /// and `K + M <= 255`. Use [`fec_pack`] and [`fec_unpack`] to convert
-    /// between shard counts and the wire value.
+    /// packs explicit shard counts as `(K << 8) | M` with `1 <= K <= 8` and
+    /// `1 <= M <= 2`, the bounds of the kernel data path. Use [`fec_pack`] and
+    /// [`fec_unpack`] to convert between shard counts and the wire value.
     Fec(u32),
     /// `UWGDEVICE_A_UNDERLAY_MTU`: `u16` MTU of the path between the peers
     /// (`576..=65535`, `1500` by default).

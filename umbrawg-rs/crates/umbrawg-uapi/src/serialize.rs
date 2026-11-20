@@ -56,6 +56,7 @@ fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
     write_field(output, "extra_ports", snapshot.extra_ports);
     write_field(output, "bbr", &snapshot.bbr);
     write_field(output, "fec", &snapshot.fec);
+    write_field(output, "underlay_mtu", snapshot.underlay_mtu);
 
     let obfuscation = &snapshot.obfuscation;
     for (name, value) in [
@@ -122,6 +123,38 @@ fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
 
     write_bool(output, "random_trailers", obfuscation.random_trailers);
     write_bool(output, "disable_cookies", obfuscation.disable_cookies);
+
+    if let Some(stats) = &snapshot.bbr_stats {
+        write_field(output, "bbr_stats", 1);
+        write_field(output, "bbr_mode", bbr_mode_text(stats.mode));
+        write_field(output, "bbr_cwnd", stats.cwnd);
+        write_field(output, "bbr_inflight", stats.inflight);
+        write_field(output, "bbr_pacing_rate", stats.pacing_rate);
+        write_field(output, "bbr_btl_bw", stats.btl_bw);
+        write_field(output, "bbr_min_rtt_ns", stats.min_rtt_ns);
+        write_field(output, "bbr_round_lost", stats.round_lost);
+        write_field(output, "bbr_peers", stats.peers);
+    }
+    if let Some(stats) = &snapshot.fec_stats {
+        write_field(output, "fec_stats", 1);
+        write_field(output, "fec_blocks_encoded", stats.blocks_encoded);
+        write_field(output, "fec_shards_sent", stats.shards_sent);
+        write_field(output, "fec_blocks_decoded", stats.blocks_decoded);
+        write_field(output, "fec_packets_recovered", stats.packets_recovered);
+        write_field(output, "fec_decode_fail", stats.decode_fail);
+        write_field(output, "fec_dropped_bounds", stats.dropped_bounds);
+        write_field(output, "fec_dropped_disabled", stats.dropped_disabled);
+    }
+}
+
+/// Formats the numeric BBR mode as the same words the UAPI uses.
+fn bbr_mode_text(mode: u8) -> &'static str {
+    match mode {
+        0 => "off",
+        1 => "monitor",
+        2 => "on",
+        _ => "unknown",
+    }
 }
 
 fn write_peer(output: &mut String, peer: &PeerSnapshot) {
@@ -205,6 +238,7 @@ fwmark=4660
 extra_ports=0
 bbr=off
 fec=off
+underlay_mtu=1500
 jc=4
 jmin=40
 jmax=70
@@ -226,6 +260,23 @@ keepalive_timeout=10
 max_handshake_attempts=7
 random_trailers=1
 disable_cookies=0
+bbr_stats=1
+bbr_mode=monitor
+bbr_cwnd=131072
+bbr_inflight=4096
+bbr_pacing_rate=1000000
+bbr_btl_bw=2000000
+bbr_min_rtt_ns=12345
+bbr_round_lost=8
+bbr_peers=1
+fec_stats=1
+fec_blocks_encoded=10
+fec_shards_sent=12
+fec_blocks_decoded=9
+fec_packets_recovered=1
+fec_decode_fail=2
+fec_dropped_bounds=3
+fec_dropped_disabled=4
 public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 preshared_key=606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f
 protocol_version=1
@@ -249,6 +300,29 @@ errno=0
     }
 
     #[test]
+    fn prints_underlay_mtu_always_and_stats_when_reported() {
+        let mut snapshot = DeviceSnapshot::default();
+        let response = format_get_response(&snapshot);
+        assert!(response.contains("underlay_mtu=1500\n"), "{response}");
+        assert!(!response.contains("bbr_stats="), "{response}");
+        assert!(!response.contains("fec_stats="), "{response}");
+
+        snapshot.underlay_mtu = 9000;
+        snapshot.bbr_stats = Some(crate::types::BbrStats::default());
+        snapshot.fec_stats = Some(crate::types::FecStats::default());
+        let response = format_get_response(&snapshot);
+        assert!(response.contains("underlay_mtu=9000\n"), "{response}");
+        assert!(
+            response.contains("bbr_stats=1\nbbr_mode=off\n"),
+            "{response}"
+        );
+        assert!(
+            response.contains("fec_stats=1\nfec_blocks_encoded=0\n"),
+            "{response}"
+        );
+    }
+
+    #[test]
     fn prints_extra_ports_always() {
         let mut snapshot = DeviceSnapshot::default();
         assert!(format_get_response(&snapshot).contains("extra_ports=0\n"));
@@ -265,7 +339,7 @@ errno=0
         let response = format_get_response(&DeviceSnapshot::default());
         assert_eq!(
             response,
-            "extra_ports=0\nbbr=off\nfec=off\nh1=1\nh2=2\nh3=3\nh4=4\nrandom_trailers=0\ndisable_cookies=0\nerrno=0\n\n"
+            "extra_ports=0\nbbr=off\nfec=off\nunderlay_mtu=1500\nh1=1\nh2=2\nh3=3\nh4=4\nrandom_trailers=0\ndisable_cookies=0\nerrno=0\n\n"
         );
     }
 
@@ -342,6 +416,26 @@ errno=0
             extra_ports: 0,
             bbr: "off".to_owned(),
             fec: "off".to_owned(),
+            underlay_mtu: 1500,
+            bbr_stats: Some(crate::types::BbrStats {
+                mode: 1,
+                cwnd: 131_072,
+                inflight: 4096,
+                pacing_rate: 1_000_000,
+                btl_bw: 2_000_000,
+                min_rtt_ns: 12_345,
+                round_lost: 8,
+                peers: 1,
+            }),
+            fec_stats: Some(crate::types::FecStats {
+                blocks_encoded: 10,
+                shards_sent: 12,
+                blocks_decoded: 9,
+                packets_recovered: 1,
+                decode_fail: 2,
+                dropped_bounds: 3,
+                dropped_disabled: 4,
+            }),
             obfuscation: ObfuscationSnapshot {
                 jc: 4,
                 jmin: 40,

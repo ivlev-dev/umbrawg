@@ -1044,14 +1044,30 @@ fn parse_bbr(key: &str, value: &str) -> Result<String, Error> {
     }
 }
 
+/// Largest accepted number of FEC data shards (`K`).
+///
+/// The kernel data path (`UWG_FEC_DATA_MAX_K`) rejects larger blocks even
+/// though the wire format could encode them.
+pub const MAX_FEC_DATA_SHARDS: u16 = 8;
+
+/// Largest accepted number of FEC parity shards (`M`).
+///
+/// Mirrors `UWG_FEC_DATA_MAX_M` of the kernel data path.
+pub const MAX_FEC_PARITY_SHARDS: u16 = 2;
+
 /// Largest accepted total number of FEC shards (`K + M`).
-pub const MAX_FEC_SHARDS: u16 = 255;
+pub const MAX_FEC_SHARDS: u16 = MAX_FEC_DATA_SHARDS + MAX_FEC_PARITY_SHARDS;
 
 fn parse_fec_at(entry: &Entry, key: &str, value: &str) -> Result<String, Error> {
-    parse_fec(key, value).map_err(|_| Error::InvalidValue {
-        line: entry.line,
-        key: key.to_owned(),
-        value: value.to_owned(),
+    parse_fec(key, value).map_err(|error| match error {
+        Error::InvalidArgument(message) => {
+            Error::InvalidArgument(format!("line {}: {message}", entry.line))
+        }
+        _ => Error::InvalidValue {
+            line: entry.line,
+            key: key.to_owned(),
+            value: value.to_owned(),
+        },
     })
 }
 
@@ -1076,11 +1092,12 @@ fn parse_fec(key: &str, value: &str) -> Result<String, Error> {
     }
     let shards = shards.parse::<u16>().map_err(|_| error())?;
     let parity = parity.parse::<u16>().map_err(|_| error())?;
-    if shards == 0
-        || parity == 0
-        || u32::from(shards) + u32::from(parity) > u32::from(MAX_FEC_SHARDS)
+    if shards == 0 || parity == 0 || shards > MAX_FEC_DATA_SHARDS || parity > MAX_FEC_PARITY_SHARDS
     {
-        return Err(error());
+        return Err(Error::InvalidArgument(format!(
+            "`{key}` must be `off`, `adaptive` or K:M with 1 <= K <= \
+             {MAX_FEC_DATA_SHARDS} and 1 <= M <= {MAX_FEC_PARITY_SHARDS}, got `{value}`"
+        )));
     }
     Ok(format!("{shards}:{parity}"))
 }
@@ -1186,7 +1203,7 @@ ListenPort = 51820
 ExtraPorts = 4
 FwMark = 0x1234
 BBR = monitor
-FEC = 10:3
+FEC = 8:2
 Jc = 4
 Jmin = 40
 Jmax = 70
@@ -1228,7 +1245,7 @@ PersistentKeepalive = 25
         assert_eq!(device.extra_ports, Some(4));
         assert_eq!(device.fwmark, Some(0x1234));
         assert_eq!(device.bbr.as_deref(), Some("monitor"));
-        assert_eq!(device.fec.as_deref(), Some("10:3"));
+        assert_eq!(device.fec.as_deref(), Some("8:2"));
         assert_eq!(
             device.private_key.as_ref().map(Key::to_base64),
             Some(PRIVATE.to_owned())
@@ -1267,7 +1284,7 @@ PersistentKeepalive = 25
         assert_eq!(config, reparsed);
         assert!(emitted.contains("ExtraPorts = 4"));
         assert!(emitted.contains("BBR = monitor"));
-        assert!(emitted.contains("FEC = 10:3"));
+        assert!(emitted.contains("FEC = 8:2"));
         assert!(emitted.contains("H1 = 61220074-118999195"));
         assert!(emitted.contains("I1 = <b 0x160d2f><c>"));
         assert!(emitted.contains("AllowedIPs = 10.0.0.0/8, fd00::/64"));
@@ -1350,9 +1367,9 @@ PersistentKeepalive = 25
     #[test]
     fn parses_bbr_and_fec() {
         let config =
-            Config::parse("[Interface]\nbbr = MONITOR\nFEC = 10:3\n").expect("valid config");
+            Config::parse("[Interface]\nbbr = MONITOR\nFEC = 8:2\n").expect("valid config");
         assert_eq!(config.device.bbr.as_deref(), Some("monitor"));
-        assert_eq!(config.device.fec.as_deref(), Some("10:3"));
+        assert_eq!(config.device.fec.as_deref(), Some("8:2"));
 
         for value in ["off", "monitor", "on", "OFF", "On", "Monitor"] {
             let input = format!("[Interface]\nBBR = {value}\n");
@@ -1368,7 +1385,7 @@ PersistentKeepalive = 25
             ("ADAPTIVE", "adaptive"),
             ("1:1", "1:1"),
             ("01:002", "1:2"),
-            ("252:3", "252:3"),
+            ("8:2", "8:2"),
         ] {
             let input = format!("[Interface]\nFEC = {value}\n");
             let config = Config::parse(&input).expect("valid config");
@@ -1391,6 +1408,9 @@ PersistentKeepalive = 25
             "1:0",
             "0:0",
             "1:255",
+            "9:1",
+            "1:3",
+            "10:3",
             "256:1",
             "1:",
             ":1",
@@ -1402,6 +1422,14 @@ PersistentKeepalive = 25
             assert!(Config::parse(&input).is_err(), "{value}");
             assert!(Config::from_args(["fec", value]).is_err(), "{value}");
         }
+
+        let error = Config::from_args(["fec", "10:3"]).expect_err("out of range");
+        assert!(
+            error.to_string().contains("1 <= K <= 8") && error.to_string().contains("1 <= M <= 2"),
+            "{error}"
+        );
+        let error = Config::parse("[Interface]\nFEC = 1:3\n").expect_err("out of range");
+        assert!(error.to_string().contains("1 <= M <= 2"), "{error}");
     }
 
     #[test]

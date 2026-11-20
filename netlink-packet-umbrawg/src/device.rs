@@ -519,8 +519,9 @@ impl UmbrawgDeviceConfig {
     /// Sets the forward error correction mode (`UWGDEVICE_A_FEC`).
     ///
     /// The mode is emitted as a `u32`: `0` off, `1` adaptive, otherwise
-    /// `(K << 8) | M`. [`build`](Self::build) rejects
-    /// [`FecMode::Fixed`] shard counts that the kernel does not accept.
+    /// `(K << 8) | M` with `1 <= K <= 8` and `1 <= M <= 2`.
+    /// [`build`](Self::build) rejects [`FecMode::Fixed`] shard counts that the
+    /// kernel data path does not accept.
     pub fn fec(mut self, mode: FecMode) -> Self {
         self.fec = Some(mode);
         self

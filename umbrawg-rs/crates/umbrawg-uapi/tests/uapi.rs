@@ -16,7 +16,7 @@ use umbrawg_crypto::{Key, PublicKey};
 use umbrawg_uapi::{
     format_get_response, AllowedIp, AllowedIpChange, Cipher, DeviceControl, DeviceSnapshot,
     ObfuscationSnapshot, PeerSnapshot, ServerHandle, SetRequest, SpecialPacketUpdate,
-    TimingSnapshot, U16Range, UapiError, UapiListener,
+    TimingSnapshot, U16Range, UapiError, UapiListener, DEFAULT_UNDERLAY_MTU,
 };
 
 const SET_REQUEST: &str = "\
@@ -25,6 +25,7 @@ private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 fwmark=4660
 extra_ports=6
+underlay_mtu=9000
 replace_peers=true
 jc=4
 jmin=40
@@ -128,6 +129,7 @@ struct MockState {
     listen_port: u16,
     fwmark: u32,
     extra_ports: u8,
+    underlay_mtu: u16,
     obfuscation: ObfuscationSnapshot,
     timings: TimingSnapshot,
     peers: Vec<MockPeer>,
@@ -140,6 +142,7 @@ impl Default for MockState {
             listen_port: 0,
             fwmark: 0,
             extra_ports: 4,
+            underlay_mtu: DEFAULT_UNDERLAY_MTU,
             obfuscation: ObfuscationSnapshot::default(),
             timings: TimingSnapshot::default(),
             peers: Vec::new(),
@@ -169,6 +172,9 @@ impl DeviceControl for MockControl {
             extra_ports: state.extra_ports,
             bbr: "off".to_owned(),
             fec: "off".to_owned(),
+            underlay_mtu: state.underlay_mtu,
+            bbr_stats: None,
+            fec_stats: None,
             obfuscation: state.obfuscation.clone(),
             timings: state.timings,
             peers: state
@@ -205,6 +211,9 @@ impl DeviceControl for MockControl {
         }
         if let Some(extra_ports) = request.extra_ports {
             state.extra_ports = extra_ports;
+        }
+        if let Some(underlay_mtu) = request.underlay_mtu {
+            state.underlay_mtu = underlay_mtu;
         }
         if request.replace_peers {
             state.peers.clear();
@@ -443,6 +452,7 @@ fn round_trips_every_31_field() {
         "listen_port=51820\n",
         "fwmark=4660\n",
         "extra_ports=6\n",
+        "underlay_mtu=9000\n",
         "jc=4\n",
         "jmin=40\n",
         "jmax=70\n",
@@ -685,6 +695,7 @@ private_key=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
 listen_port=65535
 fwmark=4294967295
 extra_ports=8
+underlay_mtu=65535
 replace_peers=true
 jc=65535
 jmin=65535
@@ -728,6 +739,7 @@ allowed_ip=::/0
         "extra_ports=8\n",
         "bbr=off\n",
         "fec=off\n",
+        "underlay_mtu=65535\n",
         "jc=65535\n",
         "jmin=65535\n",
         "jmax=65535\n",

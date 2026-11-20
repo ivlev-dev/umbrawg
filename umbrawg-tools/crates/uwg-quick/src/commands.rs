@@ -217,8 +217,18 @@ fn add_address(config: &QuickConfig, address: &str, runner: &dyn CommandRunner) 
 }
 
 fn set_mtu_up(config: &QuickConfig, runner: &dyn CommandRunner) -> QuickResult<()> {
+    let fec_enabled = fec_enabled(config);
     if let Some(explicit) = &config.mtu {
-        return set_link_mtu(config, runner, explicit);
+        let Ok(chosen) = explicit.parse::<u32>() else {
+            return set_link_mtu(config, runner, explicit);
+        };
+        let current = if fec_enabled {
+            current_mtu(config, runner)
+        } else {
+            None
+        };
+        let value = mtu::fec_limited_mtu(chosen, current, fec_enabled);
+        return set_link_mtu(config, runner, &value.to_string());
     }
 
     let mut endpoint_mtus = Vec::new();
@@ -267,8 +277,42 @@ fn set_mtu_up(config: &QuickConfig, runner: &dyn CommandRunner) -> QuickResult<(
         None
     };
 
-    let value = mtu::auto_mtu(&endpoint_mtus, default_route_mtu);
+    let chosen = mtu::auto_mtu(&endpoint_mtus, default_route_mtu);
+    let current = if fec_enabled {
+        current_mtu(config, runner)
+    } else {
+        None
+    };
+    let value = mtu::fec_limited_mtu(chosen, current, fec_enabled);
     set_link_mtu(config, runner, &value.to_string())
+}
+
+/// Returns `true` when the configuration enables FEC.
+///
+/// Both FEC modes lower the interface MTU during `setconf`; the auto MTU
+/// calculation must not undo that (see [`mtu::fec_limited_mtu`]).
+fn fec_enabled(config: &QuickConfig) -> bool {
+    config
+        .to_umbrawg_config()
+        .ok()
+        .and_then(|config| config.device.fec)
+        .is_some_and(|fec| !fec.eq_ignore_ascii_case("off"))
+}
+
+/// Reads the MTU programmed by `setconf` on the tunnel interface.
+fn current_mtu(config: &QuickConfig, runner: &dyn CommandRunner) -> Option<u32> {
+    let captured = runner
+        .capture(&quiet_capture(
+            IP_PROGRAM,
+            vec![
+                "link".to_string(),
+                "show".to_string(),
+                "dev".to_string(),
+                config.interface.clone(),
+            ],
+        ))
+        .ok()?;
+    mtu::extract_mtu(&captured.stdout_lossy())
 }
 
 fn route_mtu(output: &str, runner: &dyn CommandRunner) -> Option<u32> {
@@ -1003,6 +1047,33 @@ mod tests {
                 "ip link set mtu 8920 up dev wg0",
             ]
         );
+    }
+
+    #[test]
+    fn fec_mtu_from_setconf_is_not_overwritten() {
+        let key = "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk=";
+        for (implementation, setconf_mtu) in [("kernel", 1368), ("userspace", 1352)] {
+            let directory = tempfile::tempdir().unwrap();
+            let body = format!("[Interface]\nPrivateKey = {key}\nFEC = 8:2\n");
+            let config = config_with(directory.path(), "wg0.conf", &body);
+            let mtu_line = format!(
+                "4: wg0: <POINTOPOINT,UP,LOWER_UP> mtu {setconf_mtu} qdisc noqueue state UNKNOWN\n"
+            );
+            let runner = mock_from(move |command, _| match command {
+                "ip link show dev wg0" => (0, mtu_line.clone()),
+                _ => (0, String::new()),
+            });
+
+            set_mtu_up(&config, &runner).unwrap();
+
+            let expected = vec![
+                "uwg show wg0 endpoints".to_string(),
+                "ip route show default".to_string(),
+                "ip link show dev wg0".to_string(),
+                format!("ip link set mtu {setconf_mtu} up dev wg0"),
+            ];
+            assert_eq!(runner.call_strings(), expected, "{implementation}");
+        }
     }
 
     #[test]
