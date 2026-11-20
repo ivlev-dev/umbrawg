@@ -66,21 +66,23 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             bc build-essential clang libelf-dev lld llvm kmod \
             iperf3 iproute2 python3 tcpdump
-          sudo apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
 
-      - name: Собрать kernel-модуль
+      # Заголовки Ubuntu-раннера не содержат crypto/aes-gcm.h, поэтому
+      # модуль собирается в Arch-контейнере: там есть полный linux-headers
+      # и версия ядра, под которую модуль реально компилируется. Загрузить
+      # его на раннере нельзя (другое ядро), так что это проверка сборки;
+      # interop с модулем гоняется на стенде, на раннере — Rust↔Rust.
+      - name: Собрать kernel-модуль (Arch)
         run: |
           set -euo pipefail
-          kdir="/lib/modules/$(uname -r)/build"
-          if [ ! -d "$kdir" ]; then
-            echo "::error::нет заголовков ядра для $(uname -r) ($kdir)"
-            exit 1
-          fi
-          # Заголовки ядра на раннере собраны gcc, поэтому LLVM=1 здесь
-          # несовместим с их флагами; для проверки сборки достаточно gcc.
-          make -C umbrawg-linux-kernel-module/src -j"$(nproc)" "KERNELDIR=$kdir"
+          docker run --rm -v "$PWD:/src" archlinux:base-devel bash -c '
+            set -euo pipefail
+            pacman -Syu --noconfirm --needed base-devel clang llvm lld bc kmod linux-headers >/dev/null
+            kdir=$(ls -d /usr/lib/modules/*/build | head -1)
+            test -n "$kdir"
+            make -C /src/umbrawg-linux-kernel-module/src -j"$(nproc)" LLVM=1 "KERNELDIR=$kdir"
+          '
           test -f umbrawg-linux-kernel-module/src/umbrawg.ko
-          modinfo -F vermagic umbrawg-linux-kernel-module/src/umbrawg.ko
 
       - name: Собрать Rust-демон и uwg
         run: |
@@ -105,7 +107,7 @@ jobs:
           (github.event_name == 'push' && github.ref == 'refs/heads/master')
         env:
           DUR: "2"
-          CASES: mixed-fec21 kernel-fec21 rust2-fec21
+          CASES: rust2-fec21 rust2-bbr-fec
         run: |
           set -euo pipefail
           sudo -E env DUR="$DUR" CASES="$CASES" bash bench/ext-tests.sh
