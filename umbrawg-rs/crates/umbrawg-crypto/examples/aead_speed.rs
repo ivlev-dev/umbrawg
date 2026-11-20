@@ -31,11 +31,23 @@ fn bench(algorithm: Algorithm, size: usize) -> f64 {
     (size as f64 * iterations as f64) / elapsed / 1_000_000.0
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+fn cpu_features() -> (bool, bool, bool, bool) {
+    (
+        std::is_x86_feature_detected!("aes"),
+        std::is_x86_feature_detected!("pclmulqdq"),
+        std::is_x86_feature_detected!("avx2"),
+        std::is_x86_feature_detected!("vaes"),
+    )
+}
+
+#[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+fn cpu_features() -> (bool, bool, bool, bool) {
+    (false, false, false, false)
+}
+
 fn main() {
-    let aesni = std::is_x86_feature_detected!("aes");
-    let pclmul = std::is_x86_feature_detected!("pclmulqdq");
-    let avx2 = std::is_x86_feature_detected!("avx2");
-    let vaes = std::is_x86_feature_detected!("vaes");
+    let (aesni, pclmul, avx2, vaes) = cpu_features();
     println!("cpu: aes={aesni} pclmulqdq={pclmul} avx2={avx2} vaes={vaes}");
     println!(
         "{:<22} {:>7} {:>12} {:>12}",
