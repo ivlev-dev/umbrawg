@@ -33,11 +33,14 @@ prepare() {
 
 build() {
   cd "${srcdir}/umbrawg/umbrawg-rs"
+  # ring's prebuilt objects fail to resolve with Arch's default lld.
+  export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=bfd"
   cargo build --release --frozen --package umbrawg
 }
 
 check() {
   cd "${srcdir}/umbrawg/umbrawg-rs"
+  export RUSTFLAGS="${RUSTFLAGS:-} -C link-arg=-fuse-ld=bfd"
   cargo test --release --frozen --workspace --exclude umbrawg-bench --exclude umbrawg-uapi
   cargo test --release --frozen --package umbrawg-uapi --lib
 }

@@ -216,7 +216,8 @@ jobs:
         working-directory: dist
         run: |
           set -euo pipefail
-          sha256sum ./*.deb ./*.rpm ./*.pkg.tar.zst > SHA256SUMS
+          find . -type f \( -name '*.deb' -o -name '*.rpm' -o -name '*.pkg.tar.zst' \) -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS
           cat SHA256SUMS
 
       - name: Опубликовать релиз
@@ -225,7 +226,7 @@ jobs:
           files: |
             dist/*.deb
             dist/*.rpm
-            dist/*.pkg.tar.zst
+            dist/**/*.pkg.tar.zst
             dist/SHA256SUMS
           fail_on_unmatched_files: true
 
