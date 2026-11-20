@@ -627,7 +627,8 @@ static bool uwg_packet_send_gso(struct uwg_peer *peer, struct sk_buff **pkts,
 
 /*
  * Pacing cost of one datagram. FEC blocks are charged once, on the shard
- * that carries the whole block length in pace_len.
+ * that carries the whole block length in pace_len; the other shards of the
+ * block add nothing, so a GSO group of shards is never charged twice.
  */
 static u32 uwg_packet_pace_bytes(struct sk_buff *skb)
 {
@@ -672,19 +673,22 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 	if (pace_len)
 		uwg_packet_pace(peer, pace_len);
 
+	/* Neighbouring datagrams of equal size share one GSO skb. FEC shards of
+	 * a block have the same length by construction, so they aggregate the
+	 * same way transport packets do, but never together with non-FEC
+	 * traffic: every GSO segment has to remain a standalone ext frame with
+	 * its own shard header. Pacing is charged once per block by the shard
+	 * carrying pace_len, see uwg_packet_pace_bytes().
+	 */
 	for (i = 0; i < nskbs; ) {
 		unsigned int len = skbs[i]->len;
 		u8 ds = PACKET_CB(skbs[i])->ds;
+		bool is_fec = PACKET_CB(skbs[i])->is_fec;
 
-		j = i + 1;
-		if (PACKET_CB(skbs[i])->is_fec)
-			goto send_group;
-
-		for (; j < nskbs; ++j) {
+		for (j = i + 1; j < nskbs; ++j) {
 			if (skbs[j]->len != len ||
-			    PACKET_CB(skbs[j])->ds != ds)
-				break;
-			if (PACKET_CB(skbs[j])->is_fec)
+			    PACKET_CB(skbs[j])->ds != ds ||
+			    PACKET_CB(skbs[j])->is_fec != is_fec)
 				break;
 			if (j - i >= UWG_GSO_SEGS_MAX)
 				break;
@@ -692,9 +696,8 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 				break;
 		}
 
-send_group:
-		if (j - i > 1 && uwg_packet_send_gso(peer, skbs + i, j - i,
-						     &data_sent)) {
+		if (j - i > 1 &&
+		    uwg_packet_send_gso(peer, skbs + i, j - i, &data_sent)) {
 			i = j;
 			continue;
 		}

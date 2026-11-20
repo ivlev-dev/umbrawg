@@ -142,7 +142,7 @@ static int prepare_skb_header(struct sk_buff *skb, struct uwg_device *uwg)
 		/* Final len does not agree with calculated len */
 		return -EINVAL;
 
-	if (uwg->header_protection.has_protection) {
+	if (uwg_header_protection_enabled(uwg)) {
 		ptr = skb_header_pointer(skb, 0, sizeof(buf), buf);
 		if (!ptr)
 			return -EINVAL;

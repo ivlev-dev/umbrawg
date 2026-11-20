@@ -488,15 +488,9 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 				nla_put_string(skb, UWGDEVICE_A_I5, uwg->ispecs[4].desc)))
 			goto out;
 
-		down_read(&uwg->header_protection.lock);
-		if (uwg->header_protection.has_protection) {
-			uwg_header_protection_get_key(&uwg->header_protection, buf);
-			if (nla_put(skb, UWGDEVICE_A_HEADER_PROTECTION_KEY, HEADER_PROTECTION_KEY_SIZE, buf)) {
-				up_read(&uwg->header_protection.lock);
-				goto out;
-			}
-		}
-		up_read(&uwg->header_protection.lock);
+		if (uwg_header_protection_get_key(uwg, buf) &&
+			nla_put(skb, UWGDEVICE_A_HEADER_PROTECTION_KEY, HEADER_PROTECTION_KEY_SIZE, buf))
+			goto out;
 
 		down_read(&uwg->static_identity.lock);
 		if (uwg->static_identity.has_identity) {
@@ -827,8 +821,8 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 	rtnl_lock();
 	mutex_lock(&uwg->device_update_lock);
 
-	has_protection = uwg->header_protection.has_protection ||
-		info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY];
+	has_protection = !!rcu_access_pointer(uwg->header_protection) ||
+		!!info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY];
 
 	if (info->attrs[UWGDEVICE_A_FLAGS])
 		flags = nla_get_u32(info->attrs[UWGDEVICE_A_FLAGS]);
@@ -1109,8 +1103,10 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			ret = -EINVAL;
 			goto out;
 		}
-		uwg_header_protection_set_key(&uwg->header_protection,
+		ret = uwg_header_protection_set_key(uwg,
 			nla_data(info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY]));
+		if (ret)
+			goto out;
 	}
 
 	if (info->attrs[UWGDEVICE_A_CONTENT_PADDING_ADDITION]) {

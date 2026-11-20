@@ -15,14 +15,24 @@
 #define UWG_FEC_MAX_WORK (UWG_FEC_MAX_DATA * UWG_FEC_MAX_TOTAL)
 #define UWG_FEC_MAX_AUG (UWG_FEC_MAX_PARITY * 2 * UWG_FEC_MAX_PARITY)
 
+/* Profiles the data path actually uses (fec_data.h: k <= 8, m <= 2). Every
+ * other valid combination is still computed on demand for the self-test.
+ */
+#define UWG_FEC_CACHE_K 8
+#define UWG_FEC_CACHE_M 2
+
 static u8 uwg_gf_exp[UWG_FEC_EXP_LEN];
 static u8 uwg_gf_log[256];
+static u8 uwg_fec_parity_cache[UWG_FEC_CACHE_K][UWG_FEC_CACHE_M]
+			       [UWG_FEC_CACHE_K * UWG_FEC_CACHE_M];
 static bool uwg_fec_ready;
+
+static int uwg_fec_parity_matrix(u8 k, u8 m, u8 *p);
 
 int uwg_fec_init(void)
 {
 	u16 value = 1;
-	unsigned int i;
+	unsigned int i, k, m;
 
 	if (READ_ONCE(uwg_fec_ready))
 		return 0;
@@ -37,6 +47,15 @@ int uwg_fec_init(void)
 
 	for (i = UWG_FEC_ORDER; i < UWG_FEC_EXP_LEN; i++)
 		uwg_gf_exp[i] = uwg_gf_exp[i - UWG_FEC_ORDER];
+
+	/* Solving for the parity matrix is O(k^3) and the result only depends
+	 * on (k, m): build every hot profile once instead of per block.
+	 */
+	for (k = 1; k <= UWG_FEC_CACHE_K; k++)
+		for (m = 1; m <= UWG_FEC_CACHE_M; m++)
+			if (uwg_fec_parity_matrix((u8)k, (u8)m,
+						  uwg_fec_parity_cache[k - 1][m - 1]))
+				return -EINVAL;
 
 	smp_wmb();
 	WRITE_ONCE(uwg_fec_ready, true);
@@ -207,6 +226,16 @@ static int uwg_fec_parity_matrix(u8 k, u8 m, u8 *p)
 	return 0;
 }
 
+static int uwg_fec_parity_get(u8 k, u8 m, u8 *p)
+{
+	if (k <= UWG_FEC_CACHE_K && m <= UWG_FEC_CACHE_M) {
+		memcpy(p, uwg_fec_parity_cache[k - 1][m - 1], (size_t)k * m);
+		return 0;
+	}
+
+	return uwg_fec_parity_matrix(k, m, p);
+}
+
 static bool uwg_fec_valid(u8 k, u8 m)
 {
 	return k >= 1 && k <= UWG_FEC_MAX_DATA &&
@@ -226,7 +255,7 @@ int uwg_fec_encode(u8 k, u8 m, size_t shard_len, const u8 *data, u8 *parity)
 	if (!READ_ONCE(uwg_fec_ready))
 		return -EINVAL;
 
-	ret = uwg_fec_parity_matrix(k, m, p);
+	ret = uwg_fec_parity_get(k, m, p);
 	if (ret < 0)
 		return ret;
 
@@ -274,7 +303,7 @@ int uwg_fec_decode(u8 k, u8 m, size_t shard_len, u8 **shards,
 	if (!n_missing)
 		return 0;
 
-	ret = uwg_fec_parity_matrix(k, m, p);
+	ret = uwg_fec_parity_get(k, m, p);
 	if (ret < 0)
 		return ret;
 

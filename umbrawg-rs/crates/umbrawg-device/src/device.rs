@@ -27,6 +27,7 @@ use umbrawg_proto::{CookieReply, HandshakeInitiation, HandshakeResponse, ObfPara
 use crate::allowedips::PeerId;
 use crate::buffer::{BufferPool, DEFAULT_BUFFER_SIZE};
 use crate::error::{DeviceError, Result};
+pub use crate::ext::BbrBatch;
 use crate::gso::BatchLayout;
 use crate::index::IndexTable;
 use crate::io::{
@@ -1454,6 +1455,22 @@ impl Device {
     #[must_use]
     pub fn bbr_drain(&self, peer: &Peer, now: Instant, max_packets: usize) -> Vec<Vec<u8>> {
         peer.extension().bbr_drain(now, max_packets)
+    }
+
+    /// Перекладывает готовые к отправке пакеты BBR-очереди в переиспользуемый батч.
+    ///
+    /// Возвращает число пакетов. Буфер батча переходит очереди, а очередь
+    /// отдаёт ей свой: в установившемся режиме вызов не аллоцирует и не копирует
+    /// байты. Батч нужно держать между вызовами, иначе буферы перестают
+    /// переиспользоваться.
+    pub fn bbr_drain_into(
+        &self,
+        peer: &Peer,
+        now: Instant,
+        max_packets: usize,
+        batch: &mut BbrBatch,
+    ) -> usize {
+        peer.extension().bbr_drain_into(now, max_packets, batch)
     }
 
     /// Returns a BBR snapshot for the peer, or `None` when BBR is disabled.

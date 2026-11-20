@@ -270,6 +270,7 @@ static void uwg_destruct(struct net_device *dev)
 	uwg_packet_queue_free_percpu(&uwg->decrypt_queue, false);
 	uwg_packet_queue_free_percpu(&uwg->encrypt_queue, false);
 	rcu_barrier(); /* Wait for all the peers to be actually freed. */
+	uwg_header_protection_release(uwg);
 	uwg_ratelimiter_uninit();
 	memzero_explicit(&uwg->static_identity, sizeof(uwg->static_identity));
 	kvfree(uwg->index_hashtable);
@@ -337,7 +338,6 @@ static int uwg_newlink(struct net_device *dev,
 
 	rcu_assign_pointer(uwg->creating_net, link_net);
 	init_rwsem(&uwg->static_identity.lock);
-	init_rwsem(&uwg->header_protection.lock);
 	mutex_init(&uwg->socket_update_lock);
 	mutex_init(&uwg->device_update_lock);
 	for (i = 0; i < ARRAY_SIZE(uwg->ispecs); ++i)

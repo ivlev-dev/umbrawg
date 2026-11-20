@@ -42,6 +42,8 @@ const ACK_TIMEOUT_MAX_US: u64 = 5_000;
 const FEC_DEADLINE_MIN_US: u64 = 500;
 /// Upper bound of the randomized partial FEC block deadline.
 const FEC_DEADLINE_MAX_US: u64 = 2_000;
+/// Scratch size for one FEC shard header: 8-byte prefix plus a 12-byte body.
+const FEC_SHARD_HEADER_LEN: usize = 20;
 
 /// Small, fast, non-cryptographic PRNG used for traffic-shape jitter.
 ///
@@ -492,15 +494,46 @@ fn draw_timeout(jitter: &mut Jitter) -> Duration {
     Duration::from_micros(jitter.range_inclusive(ACK_TIMEOUT_MIN_US, ACK_TIMEOUT_MAX_US))
 }
 
+/// Largest ACK or CAPS frame kept inline in a [`ControlFrame`].
+///
+/// An ACK frame is 32 bytes and a CAPS frame is 20, so the small control
+/// frames never touch the allocator on the send path.
+const CONTROL_INLINE_LEN: usize = 64;
+
+enum ControlPayload {
+    Inline {
+        bytes: [u8; CONTROL_INLINE_LEN],
+        len: u8,
+    },
+    Owned(Vec<u8>),
+}
+
 /// One encoded control frame waiting for transmission.
 pub(crate) struct ControlFrame {
     kind: ControlKind,
-    bytes: Vec<u8>,
+    payload: ControlPayload,
 }
 
 impl ControlFrame {
-    const fn new(kind: ControlKind, bytes: Vec<u8>) -> Self {
-        Self { kind, bytes }
+    /// Encodes a small frame into inline storage, without allocating.
+    fn inline(kind: ControlKind, encode: impl FnOnce(&mut [u8]) -> Option<usize>) -> Option<Self> {
+        let mut bytes = [0u8; CONTROL_INLINE_LEN];
+        let len = u8::try_from(encode(&mut bytes)?).ok()?;
+        if usize::from(len) > CONTROL_INLINE_LEN {
+            return None;
+        }
+        Some(Self {
+            kind,
+            payload: ControlPayload::Inline { bytes, len },
+        })
+    }
+
+    /// Takes ownership of an already encoded frame of arbitrary length.
+    fn owned(kind: ControlKind, bytes: Vec<u8>) -> Self {
+        Self {
+            kind,
+            payload: ControlPayload::Owned(bytes),
+        }
     }
 
     pub(crate) const fn kind(&self) -> ControlKind {
@@ -508,7 +541,201 @@ impl ControlFrame {
     }
 
     pub(crate) fn bytes(&self) -> &[u8] {
-        &self.bytes
+        match &self.payload {
+            ControlPayload::Inline { bytes, len } => &bytes[..usize::from(*len)],
+            ControlPayload::Owned(bytes) => bytes.as_slice(),
+        }
+    }
+}
+
+/// Maximum number of packets held by the BBR pacing queue.
+const BBR_MAX_PACKETS: usize = 1024;
+/// Maximum number of plaintext bytes held by the BBR pacing queue.
+const BBR_MAX_BYTES: usize = 4 * 1024 * 1024;
+/// Pacer delay below which a queued packet is released for transmission.
+const BBR_RELEASE_DELAY: Duration = Duration::from_micros(500);
+
+/// One queued packet inside [`BbrQueue::bytes`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BbrSlot {
+    start: u32,
+    len: u32,
+}
+
+/// Packets released by one drain.
+///
+/// The bytes of every released packet live in one contiguous buffer, so the
+/// caller encrypts them without a per-packet allocation or a second copy. A
+/// worker keeps one batch across ticks: draining swaps the batch buffer with
+/// the queue buffer, and the queue reuses the previous batch buffer, which
+/// keeps the steady state allocation-free.
+#[derive(Default)]
+pub struct BbrBatch {
+    bytes: Vec<u8>,
+    slots: Vec<BbrSlot>,
+}
+
+impl BbrBatch {
+    /// Creates an empty batch.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            slots: Vec::new(),
+        }
+    }
+
+    /// Returns `true` when no packets were drained.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+
+    /// Returns the number of drained packets.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Iterates over the drained packets in the order they were queued.
+    pub fn iter(&self) -> impl Iterator<Item = &[u8]> + '_ {
+        self.slots.iter().map(|slot| {
+            let start = slot.start as usize;
+            &self.bytes[start..start + slot.len as usize]
+        })
+    }
+
+    /// Drops the drained packets while keeping the buffer capacity.
+    pub fn clear(&mut self) {
+        self.bytes.clear();
+        self.slots.clear();
+    }
+}
+
+/// FIFO of plaintext packets waiting for the BBR pacer.
+///
+/// Packets are appended to one contiguous byte buffer and described by
+/// `(offset, len)` slots. Draining hands the buffer over instead of copying
+/// packets out one by one; the dead prefix is reclaimed by compaction only
+/// when the buffer has to grow.
+struct BbrQueue {
+    bytes: Vec<u8>,
+    slots: VecDeque<BbrSlot>,
+    head: usize,
+    live_bytes: usize,
+}
+
+impl BbrQueue {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            slots: VecDeque::new(),
+            head: 0,
+            live_bytes: 0,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.slots.clear();
+        if self.bytes.capacity() > 64 * 1024 {
+            self.bytes = Vec::new();
+        } else {
+            self.bytes.clear();
+        }
+        self.head = 0;
+        self.live_bytes = 0;
+    }
+
+    #[cfg(test)]
+    fn live_bytes(&self) -> usize {
+        self.live_bytes
+    }
+
+    fn push(&mut self, packet: &[u8]) -> bool {
+        if self.slots.len() >= BBR_MAX_PACKETS
+            || self.live_bytes.saturating_add(packet.len()) > BBR_MAX_BYTES
+        {
+            return false;
+        }
+        let Ok(len) = u32::try_from(packet.len()) else {
+            return false;
+        };
+        if self.bytes.len().saturating_add(packet.len()) > self.bytes.capacity() {
+            self.compact();
+        }
+        let Ok(start) = u32::try_from(self.bytes.len()) else {
+            return false;
+        };
+        self.bytes.extend_from_slice(packet);
+        self.slots.push_back(BbrSlot { start, len });
+        self.live_bytes = self.live_bytes.saturating_add(packet.len());
+        true
+    }
+
+    /// Moves the live region to the front of the buffer.
+    fn compact(&mut self) {
+        if self.head == 0 {
+            return;
+        }
+        self.bytes.copy_within(self.head.., 0);
+        let live = self.bytes.len() - self.head;
+        self.bytes.truncate(live);
+        let head = u32::try_from(self.head).unwrap_or(u32::MAX);
+        for slot in &mut self.slots {
+            slot.start = slot.start.saturating_sub(head);
+        }
+        self.head = 0;
+    }
+
+    fn drain_into(
+        &mut self,
+        max_packets: usize,
+        bbr: &Bbr,
+        now: Instant,
+        batch: &mut BbrBatch,
+    ) -> usize {
+        let mut taken = 0usize;
+        let mut end = self.head;
+        let mut drained_bytes = 0usize;
+        for slot in &self.slots {
+            if taken >= max_packets {
+                break;
+            }
+            if bbr.next_send_delay(slot.len as usize, now) > BBR_RELEASE_DELAY {
+                break;
+            }
+            end = slot.start as usize + slot.len as usize;
+            drained_bytes = drained_bytes.saturating_add(slot.len as usize);
+            taken += 1;
+        }
+        if taken == 0 {
+            return 0;
+        }
+        let Ok(head) = u32::try_from(self.head) else {
+            return 0;
+        };
+        batch.clear();
+        let whole_queue = taken == self.slots.len();
+        if whole_queue {
+            let mut handover = std::mem::take(&mut batch.bytes);
+            std::mem::swap(&mut handover, &mut self.bytes);
+            handover.truncate(end);
+            batch.bytes = handover;
+            batch.slots.extend(self.slots.drain(..taken));
+            self.head = 0;
+            self.live_bytes = 0;
+        } else {
+            batch.bytes.extend_from_slice(&self.bytes[self.head..end]);
+            batch
+                .slots
+                .extend(self.slots.drain(..taken).map(|slot| BbrSlot {
+                    start: slot.start.saturating_sub(head),
+                    len: slot.len,
+                }));
+            self.head = end;
+            self.live_bytes = self.live_bytes.saturating_sub(drained_bytes);
+        }
+        taken
     }
 }
 
@@ -532,8 +759,7 @@ pub(crate) struct PeerExtension {
     fec_deadline: Option<Instant>,
     jitter: Jitter,
     pending: VecDeque<ControlFrame>,
-    bbr_queue: VecDeque<Vec<u8>>,
-    bbr_queued_bytes: usize,
+    bbr_queue: BbrQueue,
     last_ack_largest: Option<u64>,
 }
 
@@ -565,8 +791,7 @@ impl PeerExtension {
             fec_deadline: None,
             jitter: Jitter::seeded(),
             pending: VecDeque::new(),
-            bbr_queue: VecDeque::new(),
-            bbr_queued_bytes: 0,
+            bbr_queue: BbrQueue::new(),
             last_ack_largest: None,
         };
         extension.apply(config);
@@ -622,7 +847,6 @@ impl PeerExtension {
             // Only the `On` pacer drains the queue; anything else would strand
             // the packets there forever.
             self.bbr_queue.clear();
-            self.bbr_queued_bytes = 0;
         } else if bbr_changed || self.bbr.is_none() {
             self.bbr = Some(Bbr::new(config.bbr_config()));
         }
@@ -666,13 +890,15 @@ impl PeerExtension {
                 parity: index >= block.k,
                 shard_len: block.shard_len,
             };
-            let mut frame = vec![0u8; 32 + shard.len()];
+            let mut frame = vec![0u8; FEC_SHARD_HEADER_LEN + shard.len()];
             let Ok(header_len) = header.encode(&mut frame) else {
                 break;
             };
-            frame.truncate(header_len);
-            frame.extend_from_slice(shard);
-            self.push_control(ControlFrame::new(ControlKind::FecShard, frame));
+            if header_len + shard.len() != frame.len() {
+                break;
+            }
+            frame[header_len..].copy_from_slice(shard);
+            self.push_control(ControlFrame::owned(ControlKind::FecShard, frame));
         }
     }
 
@@ -882,38 +1108,32 @@ impl PeerExtension {
     }
 
     pub(crate) fn bbr_enqueue(&mut self, packet: &[u8]) -> bool {
-        const MAX_PACKETS: usize = 1024;
-        const MAX_BYTES: usize = 4 * 1024 * 1024;
-        if self.bbr_queue.len() >= MAX_PACKETS
-            || self.bbr_queued_bytes.saturating_add(packet.len()) > MAX_BYTES
-        {
-            return false;
-        }
-        self.bbr_queued_bytes = self.bbr_queued_bytes.saturating_add(packet.len());
-        self.bbr_queue.push_back(packet.to_vec());
-        true
+        self.bbr_queue.push(packet)
     }
 
+    /// Releases the packets the pacer allows, copying them into per-packet
+    /// buffers. Kept for callers that cannot reuse a [`BbrBatch`].
     pub(crate) fn bbr_drain(&mut self, now: Instant, max_packets: usize) -> Vec<Vec<u8>> {
-        let Some(bbr) = self.bbr.as_ref() else {
+        let mut batch = BbrBatch::new();
+        if self.bbr_drain_into(now, max_packets, &mut batch) == 0 {
             return Vec::new();
-        };
+        }
+        batch.iter().map(<[u8]>::to_vec).collect()
+    }
+
+    pub(crate) fn bbr_drain_into(
+        &mut self,
+        now: Instant,
+        max_packets: usize,
+        batch: &mut BbrBatch,
+    ) -> usize {
         if self.config.bbr != BbrMode::On {
-            return Vec::new();
+            return 0;
         }
-        let mut output = Vec::new();
-        while output.len() < max_packets {
-            let Some(front) = self.bbr_queue.front() else {
-                break;
-            };
-            if bbr.next_send_delay(front.len(), now) > Duration::from_micros(500) {
-                break;
-            }
-            let packet = self.bbr_queue.pop_front().expect("front exists");
-            self.bbr_queued_bytes = self.bbr_queued_bytes.saturating_sub(packet.len());
-            output.push(packet);
-        }
-        output
+        let Some(bbr) = self.bbr.as_ref() else {
+            return 0;
+        };
+        self.bbr_queue.drain_into(max_packets, bbr, now, batch)
     }
 
     pub(crate) fn pacing_delay(&mut self, bytes: usize, now: Instant) -> Duration {
@@ -1008,11 +1228,10 @@ impl PeerExtension {
             fec_k,
             fec_m,
         };
-        let mut frame = vec![0u8; 32];
-        if let Ok(length) = caps.encode(&mut frame) {
-            frame.truncate(length);
-            self.pending
-                .push_back(ControlFrame::new(ControlKind::Caps, frame));
+        if let Some(frame) =
+            ControlFrame::inline(ControlKind::Caps, |output| caps.encode(output).ok())
+        {
+            self.pending.push_back(frame);
         }
     }
 
@@ -1042,11 +1261,10 @@ impl PeerExtension {
         }
         self.request_caps(now);
         if let Some(ack) = self.ack.make(now) {
-            let mut frame = vec![0u8; 32];
-            if let Ok(length) = ack.encode(&mut frame) {
-                frame.truncate(length);
-                self.pending
-                    .push_back(ControlFrame::new(ControlKind::Ack, frame));
+            if let Some(frame) =
+                ControlFrame::inline(ControlKind::Ack, |output| ack.encode(output).ok())
+            {
+                self.pending.push_back(frame);
             }
         }
         self.pending.drain(..).collect()
@@ -1184,6 +1402,191 @@ mod tests {
             umbrawg_proto::control::extension_kind(frames[0].bytes()),
             Some(ControlKind::Caps)
         );
+        assert!(matches!(&frames[0].payload, ControlPayload::Inline { .. }));
+    }
+
+    #[test]
+    fn ack_frames_are_inline_and_decode() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        assert!(!ext.pending_control(base).is_empty());
+
+        let now = base + Duration::from_millis(5);
+        for counter in 0..4u64 {
+            ext.observe_received(counter, now);
+        }
+        let frames = ext.pending_control(now);
+        let frame = frames
+            .iter()
+            .find(|frame| frame.kind() == ControlKind::Ack)
+            .expect("ACK is due after the first observation");
+        assert!(matches!(&frame.payload, ControlPayload::Inline { .. }));
+        assert_eq!(frame.bytes().len(), 32);
+
+        let ack = Ack::decode(frame.bytes()).expect("ACK decodes");
+        assert_eq!(ack.largest_counter, 3);
+        assert_eq!(ack.received & 0b1111, 0b1111);
+        assert!(!ack.ecn_ce);
+    }
+
+    #[test]
+    fn control_backlog_is_bounded_and_keeps_kind() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        assert!(!ext.pending_control(base).is_empty());
+        for index in 0..32u8 {
+            ext.push_control(ControlFrame::owned(ControlKind::FecShard, vec![index; 8]));
+        }
+        assert_eq!(ext.pending.len(), 16);
+        assert!(ext
+            .pending
+            .iter()
+            .all(|frame| frame.kind() == ControlKind::FecShard));
+        let frames = ext.pending_control(base);
+        assert_eq!(
+            frames
+                .iter()
+                .filter(|frame| frame.kind() == ControlKind::FecShard)
+                .count(),
+            16
+        );
+        assert!(matches!(
+            &frames[0].payload,
+            ControlPayload::Owned(bytes) if bytes == &[0u8; 8]
+        ));
+    }
+
+    fn bbr_packets(count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|index| vec![u8::try_from(index % 251).unwrap(); 40 + index % 13])
+            .collect()
+    }
+
+    #[test]
+    fn bbr_queue_drains_packets_in_order() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        let mut batch = BbrBatch::new();
+        let packets = bbr_packets(64);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+        assert_eq!(
+            ext.bbr_queue.live_bytes(),
+            packets.iter().map(Vec::len).sum::<usize>()
+        );
+
+        let mut drained = Vec::new();
+        loop {
+            let count = ext.bbr_drain_into(base, 7, &mut batch);
+            if count == 0 {
+                break;
+            }
+            assert!(count <= 7);
+            drained.extend(batch.iter().map(<[u8]>::to_vec));
+        }
+        assert_eq!(drained, packets);
+        assert!(ext.bbr_queue.slots.is_empty());
+        assert_eq!(ext.bbr_queue.live_bytes(), 0);
+    }
+
+    #[test]
+    fn bbr_queue_keeps_order_across_compaction() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        let mut batch = BbrBatch::new();
+        let mut expected: Vec<Vec<u8>> = Vec::new();
+        let mut drained = 0usize;
+
+        for round in 0..8u8 {
+            for index in 0..16u8 {
+                let value = round * 16 + index;
+                let packet = vec![value; 64 + usize::from(value % 17)];
+                assert!(ext.bbr_enqueue(&packet));
+                expected.push(packet);
+            }
+            assert_eq!(ext.bbr_drain_into(base, 5, &mut batch), 5);
+            for (offset, packet) in batch.iter().enumerate() {
+                assert_eq!(packet, expected[drained + offset].as_slice());
+            }
+            drained += batch.len();
+        }
+        loop {
+            let count = ext.bbr_drain_into(base, 64, &mut batch);
+            if count == 0 {
+                break;
+            }
+            for (offset, packet) in batch.iter().enumerate() {
+                assert_eq!(packet, expected[drained + offset].as_slice());
+            }
+            drained += count;
+        }
+        assert_eq!(drained, expected.len());
+    }
+
+    #[test]
+    fn bbr_queue_enforces_its_limits() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        for index in 0..BBR_MAX_PACKETS {
+            assert!(ext.bbr_enqueue(&[u8::try_from(index % 251).unwrap(); 8]));
+        }
+        assert!(!ext.bbr_enqueue(&[0u8; 8]));
+        assert_eq!(ext.bbr_queue.slots.len(), BBR_MAX_PACKETS);
+        assert_eq!(ext.bbr_queue.live_bytes(), BBR_MAX_PACKETS * 8);
+        ext.bbr_queue.clear();
+        assert_eq!(ext.bbr_queue.live_bytes(), 0);
+
+        let packet = vec![1u8; BBR_MAX_BYTES / 3];
+        assert!(ext.bbr_enqueue(&packet));
+        assert!(ext.bbr_enqueue(&packet));
+        assert!(ext.bbr_enqueue(&packet));
+        assert!(!ext.bbr_enqueue(&packet));
+
+        let mut batch = BbrBatch::new();
+        assert_eq!(ext.bbr_drain_into(base, BBR_MAX_PACKETS, &mut batch), 3);
+        assert!(ext.bbr_queue.slots.is_empty());
+        assert!(batch.bytes.capacity() >= packet.len());
+    }
+
+    #[test]
+    fn bbr_batch_recycles_the_queue_buffer() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        let mut batch = BbrBatch::new();
+
+        assert!(ext.bbr_enqueue(&[1u8; 100]));
+        assert_eq!(ext.bbr_drain_into(base, 8, &mut batch), 1);
+        assert_eq!(batch.iter().next().map(<[u8]>::len), Some(100));
+
+        assert!(ext.bbr_enqueue(&[2u8; 100]));
+        assert_eq!(ext.bbr_drain_into(base, 8, &mut batch), 1);
+        assert_eq!(
+            batch.iter().next().map(<[u8]>::to_vec),
+            Some(vec![2u8; 100])
+        );
+        assert!(
+            ext.bbr_queue.bytes.capacity() >= 100,
+            "the queue must take the previous batch buffer"
+        );
+    }
+
+    #[test]
+    fn bbr_drain_obeys_the_pacer() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        let mut batch = BbrBatch::new();
+        ext.handle_caps(caps(CapsFlags::BBR | CapsFlags::ACK, 0, 0), base);
+        for counter in 0..4u64 {
+            ext.on_packet_sent(counter, 1400, FrameKind::Data, base);
+        }
+        assert!(ext.bbr_enqueue(&[5u8; 1400]));
+        assert_eq!(ext.bbr_drain_into(base, 8, &mut batch), 0);
+        assert_eq!(
+            ext.bbr_drain_into(base + Duration::from_secs(1), 8, &mut batch),
+            1
+        );
+        assert_eq!(batch.iter().next().map(<[u8]>::len), Some(1400));
     }
 
     #[test]

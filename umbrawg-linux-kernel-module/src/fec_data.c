@@ -240,23 +240,27 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 		shard_len += min(extra, limit - shard_len);
 	}
 
-	for (i = 0; i < n; i++) {
-		unsigned int copy = (unsigned int)tx->lens[i] + 2;
-		u8 *dst = tx->block + (size_t)i * shard_len;
-
-		memcpy(dst, tx->shards + (size_t)i * UWG_FEC_DATA_SHARD_CAP,
-		       copy);
-		if (copy < shard_len)
-			memset(dst + copy, 0, shard_len - copy);
-	}
-
+	/* Only the encoder needs a contiguous block; without parity the shards
+	 * are copied straight from tx->shards into their skbs below.
+	 */
 	block_k = with_parity ? tx->k : (u8)n;
 	block_m = with_parity ? tx->m : 0;
-	if (with_parity &&
-	    uwg_fec_encode(tx->k, tx->m, shard_len, tx->block,
-			   tx->block + (size_t)tx->k * shard_len)) {
-		block_m = 0;
-		block_k = (u8)n;
+	if (with_parity) {
+		for (i = 0; i < n; i++) {
+			unsigned int copy = (unsigned int)tx->lens[i] + 2;
+			u8 *dst = tx->block + (size_t)i * shard_len;
+
+			memcpy(dst,
+			       tx->shards + (size_t)i * UWG_FEC_DATA_SHARD_CAP,
+			       copy);
+			if (copy < shard_len)
+				memset(dst + copy, 0, shard_len - copy);
+		}
+		if (uwg_fec_encode(tx->k, tx->m, shard_len, tx->block,
+				   tx->block + (size_t)tx->k * shard_len)) {
+			block_m = 0;
+			block_k = (u8)n;
+		}
 	}
 	total = (unsigned int)block_k + block_m;
 
@@ -306,8 +310,20 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 			DEV_STATS_INC(dev, tx_dropped);
 			continue;
 		}
-		skb_put_data(skb, tx->block + (size_t)index * shard_len,
-			     shard_len);
+		if (index < block_k && index < n) {
+			const u8 *src = tx->shards +
+				(size_t)index * UWG_FEC_DATA_SHARD_CAP;
+			unsigned int copy = (unsigned int)tx->lens[index] + 2;
+			u8 *dst = skb_put(skb, shard_len);
+
+			memcpy(dst, src, copy);
+			if (copy < shard_len)
+				memset(dst + copy, 0, shard_len - copy);
+		} else {
+			skb_put_data(skb,
+				     tx->block + (size_t)index * shard_len,
+				     shard_len);
+		}
 		skb->dev = dev;
 		/* Zero MTU makes the sender pad to the 16 byte block only
 		 * instead of aligning the shard up to the TUN MTU, which would

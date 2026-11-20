@@ -70,7 +70,7 @@ struct uwg_device {
 	struct allowedips peer_allowedips;
 	struct mutex device_update_lock, socket_update_lock;
 	struct list_head device_list, peer_list;
-	struct header_protection header_protection;
+	struct uwg_header_protection __rcu *header_protection;
 	struct jp_spec ispecs[5];
 	u32_range_t init_header, resp_header, cookie_header, transport_header;
 	u16_range_t content_padding_addition, max_handshake_attempts;

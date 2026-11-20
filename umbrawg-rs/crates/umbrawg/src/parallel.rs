@@ -25,8 +25,8 @@ use rand_core::{OsRng, RngCore};
 
 use umbrawg_crypto::random::BufferedRng;
 use umbrawg_device::{
-    DatagramSink, Device, IncomingOutcome, IoContext, PacketIo, Peer, PreparedIncoming,
-    PreparedTransport,
+    device::BbrBatch, DatagramSink, Device, IncomingOutcome, IoContext, PacketIo, Peer,
+    PreparedIncoming, PreparedTransport,
 };
 use umbrawg_proto::obf::{DetectedPacket, MessageKind};
 use umbrawg_transport::{RecvQueue, SocketSet, SocketSource, MAX_BATCH_SIZE};
@@ -1264,12 +1264,12 @@ pub(crate) fn worker_loop(
                 let _ = device.flush_control(peer, &mut context);
             });
             rekey.clear();
+            let mut drained = BbrBatch::new();
             device.for_each_peer(|peer| {
-                let packets = device.bbr_drain(peer, now, crate::MAX_BATCH_SIZE);
-                if packets.is_empty() {
+                if device.bbr_drain_into(peer, now, crate::MAX_BATCH_SIZE, &mut drained) == 0 {
                     return;
                 }
-                let slices: Vec<&[u8]> = packets.iter().map(Vec::as_slice).collect();
+                let slices: Vec<&[u8]> = drained.iter().collect();
                 crate::send_run_inner(
                     &device,
                     active,
