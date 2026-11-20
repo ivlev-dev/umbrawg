@@ -8,6 +8,7 @@
 
 #include "device.h"
 #include "ext.h"
+#include "fec_data.h"
 #include "messages.h"
 #include "noise.h"
 #include "cookie.h"
@@ -81,6 +82,7 @@ struct uwg_peer {
 	struct uwg_bbr __rcu *bbr;
 	struct uwg_fec_tx __rcu *fec_tx;
 	struct uwg_fec_rx __rcu *fec_rx;
+	struct uwg_fec_counters fec_counters;
 	spinlock_t bbr_lock;
 };
 
@@ -123,6 +125,27 @@ static inline void uwg_peer_reset_last_sent_handshake(struct uwg_peer *peer)
  * random bytes below this floor are preferable to that tell.
  */
 #define UWG_TRAILER_RANDOM_MIN 16
+
+/* A peer can inflate our egress padding by sending an oversized datagram: the
+ * learned UDP window is the exclusive upper bound of the random trailer, so an
+ * unchecked window would let a peer make us emit tens of kilobytes per packet.
+ * The window is capped at what a full-MTU datagram of this device plus the
+ * fixed underlay overhead -- the noise message header, the configured
+ * transport padding and the IP/UDP headers -- can legitimately measure.
+ */
+#define UWG_UDP_WINDOW_OVERHEAD (MESSAGE_MINIMUM_LENGTH + 128)
+#define UWG_UDP_WINDOW_HARD_MAX 65535U
+
+static inline unsigned int uwg_peer_udp_window_max(const struct uwg_device *uwg)
+{
+	unsigned int max = READ_ONCE(uwg->dev->mtu) +
+			   READ_ONCE(uwg->transport_padding) +
+			   UWG_UDP_WINDOW_OVERHEAD;
+
+	if (max > UWG_UDP_WINDOW_HARD_MAX)
+		max = UWG_UDP_WINDOW_HARD_MAX;
+	return max;
+}
 
 static inline unsigned int uwg_peer_skb_random_trailer(struct uwg_peer *peer,
 									struct uwg_device *uwg, unsigned int size)

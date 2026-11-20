@@ -42,27 +42,34 @@ bool uwg_header_protection_enabled(struct uwg_device *uwg)
 /* Called with device_update_lock held. The new block is published first and
  * the old one is only freed once every reader has left its RCU section, so the
  * hot path never has to take a sleeping lock.
+ *
+ * An all-zero key means "header protection off", matching the userspace
+ * implementation: with a zero key the ChaCha keystream is public, so the
+ * obfuscation would be worthless and the headers are better left in the
+ * clear. Disabling publishes a NULL pointer.
  */
 int uwg_header_protection_set_key(struct uwg_device *uwg, const u8 *key)
 {
-	struct uwg_header_protection *new_key;
+	struct uwg_header_protection *new_key = NULL;
 	void *old_key;
 
 	lockdep_assert_held(&uwg->device_update_lock);
 
-	new_key = kzalloc(sizeof(*new_key), GFP_KERNEL);
-	if (unlikely(!new_key))
-		return -ENOMEM;
+	if (memchr_inv(key, 0, HEADER_PROTECTION_KEY_SIZE)) {
+		new_key = kzalloc(sizeof(*new_key), GFP_KERNEL);
+		if (unlikely(!new_key))
+			return -ENOMEM;
 
-	new_key->key[0] = get_unaligned_le32(key + 0);
-	new_key->key[1] = get_unaligned_le32(key + 4);
-	new_key->key[2] = get_unaligned_le32(key + 8);
-	new_key->key[3] = get_unaligned_le32(key + 12);
-	new_key->key[4] = get_unaligned_le32(key + 16);
-	new_key->key[5] = get_unaligned_le32(key + 20);
-	new_key->key[6] = get_unaligned_le32(key + 24);
-	new_key->key[7] = get_unaligned_le32(key + 28);
-	new_key->enabled = true;
+		new_key->key[0] = get_unaligned_le32(key + 0);
+		new_key->key[1] = get_unaligned_le32(key + 4);
+		new_key->key[2] = get_unaligned_le32(key + 8);
+		new_key->key[3] = get_unaligned_le32(key + 12);
+		new_key->key[4] = get_unaligned_le32(key + 16);
+		new_key->key[5] = get_unaligned_le32(key + 20);
+		new_key->key[6] = get_unaligned_le32(key + 24);
+		new_key->key[7] = get_unaligned_le32(key + 28);
+		new_key->enabled = true;
+	}
 
 	old_key = rcu_replace_pointer(uwg->header_protection, new_key,
 				      lockdep_is_held(&uwg->device_update_lock));

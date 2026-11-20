@@ -269,7 +269,7 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	struct sk_buff *trailer;
 	char *crypto;
 	int num_frags;
-	unsigned int udp_window;
+	unsigned int udp_window, window_max;
 	int padding;
 	u16_range_t content_padding_addition;
 
@@ -277,6 +277,9 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	content_padding_addition = peer->device->content_padding_addition;
 
 	udp_window = padding + MESSAGE_MINIMUM_LENGTH + skb->len;
+	window_max = uwg_peer_udp_window_max(peer->device);
+	if (udp_window > window_max)
+		udp_window = window_max;
 	if (READ_ONCE(peer->udp_window) < udp_window)
 		WRITE_ONCE(peer->udp_window, udp_window);
 

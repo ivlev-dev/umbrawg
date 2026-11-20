@@ -10,6 +10,7 @@
 #include "timers.h"
 #include "messages.h"
 #include "cookie.h"
+#include "ratelimiter.h"
 #include "socket.h"
 #include "type.h"
 #include "aead.h"
@@ -186,6 +187,7 @@ static void uwg_receive_handshake_packet(struct uwg_device *uwg,
 	static u64 last_under_load;
 	bool packet_needs_cookie;
 	bool under_load;
+	bool challenge;
 	
 	if (PACKET_CB(skb)->type == MESSAGE_HANDSHAKE_COOKIE) {
 		struct message_handshake_cookie message;
@@ -199,7 +201,7 @@ static void uwg_receive_handshake_packet(struct uwg_device *uwg,
 		return;
 	}
 
-	under_load = !uwg->disable_cookies && atomic_read(&uwg->handshake_queue_len) >=
+	under_load = atomic_read(&uwg->handshake_queue_len) >=
 			MAX_QUEUED_INCOMING_HANDSHAKES / 8;
 	if (under_load) {
 		last_under_load = ktime_get_coarse_boottime_ns();
@@ -208,12 +210,36 @@ static void uwg_receive_handshake_packet(struct uwg_device *uwg,
 		if (!under_load)
 			last_under_load = 0;
 	}
+
+	/* Cookies may be disabled for low-power or compatibility setups. Keep
+	 * the detector and the initiation limiter in that case, but never ask
+	 * for a cookie: an unauthenticated flood is met with the per-source-IP
+	 * rate limiter instead of a challenge we promised not to send.
+	 */
+	challenge = under_load && !uwg->disable_cookies;
+	if (under_load && !challenge &&
+	    (PACKET_CB(skb)->type == MESSAGE_HANDSHAKE_INITIATION ||
+	     PACKET_CB(skb)->type == MESSAGE_HANDSHAKE_RESPONSE) &&
+	    unlikely(!uwg_ratelimiter_allow(skb, dev_net(uwg->dev)))) {
+		net_dbg_skb_ratelimited("%s: Rate limiting handshake from %pISpfsc while under load\n",
+					uwg->dev->name, skb);
+		return;
+	}
+
 	mac_state = uwg_cookie_validate_packet(&uwg->cookie_checker, skb,
-					      under_load);
-	if ((under_load && mac_state == VALID_MAC_WITH_COOKIE) ||
-	    (!under_load && mac_state == VALID_MAC_BUT_NO_COOKIE)) {
+					      challenge);
+	if (!challenge) {
+		if (mac_state == VALID_MAC_BUT_NO_COOKIE ||
+		    mac_state == VALID_MAC_WITH_COOKIE)
+			packet_needs_cookie = false;
+		else {
+			net_dbg_skb_ratelimited("%s: Invalid MAC of handshake, dropping packet from %pISpfsc\n",
+						uwg->dev->name, skb);
+			return;
+		}
+	} else if (mac_state == VALID_MAC_WITH_COOKIE) {
 		packet_needs_cookie = false;
-	} else if (under_load && mac_state == VALID_MAC_BUT_NO_COOKIE) {
+	} else if (mac_state == VALID_MAC_BUT_NO_COOKIE) {
 		packet_needs_cookie = true;
 	} else {
 		net_dbg_skb_ratelimited("%s: Invalid MAC of handshake, dropping packet from %pISpfsc\n",
@@ -621,6 +647,7 @@ int uwg_packet_rx_poll(struct napi_struct *napi, int budget)
 	struct sk_buff *skb;
 	int work_done = 0;
 	u32 udp_window;
+	unsigned int window_max;
 	bool free;
 
 	if (unlikely(budget <= 0))
@@ -650,6 +677,13 @@ int uwg_packet_rx_poll(struct napi_struct *napi, int budget)
 
 
 		udp_window = PACKET_CB(skb)->padding + MESSAGE_MINIMUM_LENGTH + skb->len;
+		/* Do not let a peer inflate our egress padding: the window is
+		 * only ever learned up to what a legitimate full-MTU datagram
+		 * of this device can measure.
+		 */
+		window_max = uwg_peer_udp_window_max(peer->device);
+		if (udp_window > window_max)
+			udp_window = window_max;
 		if (READ_ONCE(peer->udp_window) < udp_window)
 			WRITE_ONCE(peer->udp_window, udp_window);
 

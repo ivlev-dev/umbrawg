@@ -20,6 +20,7 @@
 #include <linux/mutex.h>
 #include <linux/net.h>
 #include <linux/ptr_ring.h>
+#include <linux/ratelimit.h>
 
 struct uwg_device;
 
@@ -71,6 +72,11 @@ struct uwg_device {
 	struct mutex device_update_lock, socket_update_lock;
 	struct list_head device_list, peer_list;
 	struct uwg_header_protection __rcu *header_protection;
+	/* Bounds the cost of unknown-peer notifications: every event allocates
+	 * a fresh ~8 KiB skb, which unauthenticated handshake initiations must
+	 * not be able to drive unchecked.
+	 */
+	struct ratelimit_state unknown_peer_notify;
 	struct jp_spec ispecs[5];
 	u32_range_t init_header, resp_header, cookie_header, transport_header;
 	u16_range_t content_padding_addition, max_handshake_attempts;

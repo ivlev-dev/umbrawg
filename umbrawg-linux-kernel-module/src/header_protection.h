@@ -16,7 +16,8 @@ enum header_protection_lengths {
 
 /* Immutable once published: readers only take it under rcu_read_lock(), the
  * netlink path swaps the whole block and frees the old one after a grace
- * period. A NULL pointer means header protection is off.
+ * period. A NULL pointer means header protection is off; setting an all-zero
+ * key also unpublishes it, see uwg_header_protection_set_key().
  */
 struct uwg_header_protection {
 	u32 key[CHACHA_KEY_WORDS];

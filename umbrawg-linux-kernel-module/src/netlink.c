@@ -35,6 +35,11 @@ char *bogus_endpoints_prefix6 = "ff80::/16";
 
 static struct genl_family genl_family;
 
+/* Config changes are rare, but keep their warning independent from the global
+ * net_ratelimit() state that busy call sites may exhaust.
+ */
+static DEFINE_RATELIMIT_STATE(uwg_set_device_rs, 5 * HZ, 5);
+
 static const struct nla_policy device_policy[UWGDEVICE_A_MAX + 1] = {
 	[UWGDEVICE_A_IFINDEX]		= { .type = NLA_U32 },
 	[UWGDEVICE_A_IFNAME]		= { .type = NLA_NUL_STRING, .len = IFNAMSIZ - 1 },
@@ -811,6 +816,7 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 	u32 flags = 0;
 	int ret;
 	u16 val16;
+	struct nlattr *hp_key = info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY];
 	bool has_protection;
 
 	if (IS_ERR(uwg)) {
@@ -821,8 +827,13 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 	rtnl_lock();
 	mutex_lock(&uwg->device_update_lock);
 
-	has_protection = !!rcu_access_pointer(uwg->header_protection) ||
-		!!info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY];
+	has_protection = !!rcu_access_pointer(uwg->header_protection);
+	if (hp_key)
+		/* An all-zero key disables header protection, so it must not
+		 * force the nonce padding requirements below.
+		 */
+		has_protection = !!memchr_inv(nla_data(hp_key), 0,
+					      HEADER_PROTECTION_KEY_SIZE);
 
 	if (info->attrs[UWGDEVICE_A_FLAGS])
 		flags = nla_get_u32(info->attrs[UWGDEVICE_A_FLAGS]);
@@ -1076,35 +1087,37 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 		}
 	}
 
-	if (info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY] &&
-		nla_len(info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY])
-			== HEADER_PROTECTION_KEY_SIZE) {
-		if (uwg->init_padding < HEADER_PROTECTION_NONCE_SIZE) {
-			net_dbg_ratelimited("%s: S1 must be more then %d to use headerProtection\n",
-				uwg->dev->name, HEADER_PROTECTION_NONCE_SIZE);
-			ret = -EINVAL;
-			goto out;
+	if (hp_key) {
+		if (has_protection) {
+			if (uwg->init_padding < HEADER_PROTECTION_NONCE_SIZE) {
+				net_dbg_ratelimited("%s: S1 must be more then %d to use headerProtection\n",
+					uwg->dev->name, HEADER_PROTECTION_NONCE_SIZE);
+				ret = -EINVAL;
+				goto out;
+			}
+			if (uwg->resp_padding < HEADER_PROTECTION_NONCE_SIZE) {
+				net_dbg_ratelimited("%s: S2 must be more then %d to use headerProtection\n",
+					uwg->dev->name, HEADER_PROTECTION_NONCE_SIZE);
+				ret = -EINVAL;
+				goto out;
+			}
+			if (uwg->cookie_padding < HEADER_PROTECTION_NONCE_SIZE) {
+				net_dbg_ratelimited("%s: S3 must be more then %d to use headerProtection\n",
+					uwg->dev->name, HEADER_PROTECTION_NONCE_SIZE);
+				ret = -EINVAL;
+				goto out;
+			}
+			if (uwg->transport_padding < HEADER_PROTECTION_NONCE_SIZE) {
+				net_dbg_ratelimited("%s: S4 must be more then %d to use headerProtection\n",
+					uwg->dev->name, HEADER_PROTECTION_NONCE_SIZE);
+				ret = -EINVAL;
+				goto out;
+			}
+		} else {
+			net_dbg_ratelimited("%s: all-zero header protection key disables header protection\n",
+					    uwg->dev->name);
 		}
-		if (uwg->resp_padding < HEADER_PROTECTION_NONCE_SIZE) {
-			net_dbg_ratelimited("%s: S2 must be more then %d to use headerProtection\n",
-				uwg->dev->name, HEADER_PROTECTION_NONCE_SIZE);
-			ret = -EINVAL;
-			goto out;
-		}
-		if (uwg->cookie_padding < HEADER_PROTECTION_NONCE_SIZE) {
-			net_dbg_ratelimited("%s: S3 must be more then %d to use headerProtection\n",
-				uwg->dev->name, HEADER_PROTECTION_NONCE_SIZE);
-			ret = -EINVAL;
-			goto out;
-		}
-		if (uwg->transport_padding < HEADER_PROTECTION_NONCE_SIZE) {
-			net_dbg_ratelimited("%s: S4 must be more then %d to use headerProtection\n",
-				uwg->dev->name, HEADER_PROTECTION_NONCE_SIZE);
-			ret = -EINVAL;
-			goto out;
-		}
-		ret = uwg_header_protection_set_key(uwg,
-			nla_data(info->attrs[UWGDEVICE_A_HEADER_PROTECTION_KEY]));
+		ret = uwg_header_protection_set_key(uwg, nla_data(hp_key));
 		if (ret)
 			goto out;
 	}
@@ -1201,6 +1214,9 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			ret = -EINVAL;
 			goto out;
 		}
+		if (val8 && !uwg->disable_cookies &&
+		    __ratelimit(&uwg_set_device_rs))
+			netdev_warn(uwg->dev, "cookies disabled: under-load handshakes use the initiation rate limiter instead of a cookie challenge\n");
 		uwg->disable_cookies = val8;
 	}
 
@@ -1287,7 +1303,12 @@ static const struct genl_ops genl_ops[] = {
 
 static const struct genl_multicast_group uwg_genl_mcgrps[] = {
 	{
-		.name = UWG_MULTICAST_GROUP_AUTH
+		.name = UWG_MULTICAST_GROUP_AUTH,
+		/* Unknown-peer events carry no secret, but they are only useful
+		 * to a privileged control plane and subscribing must not be a
+		 * way to make the kernel allocate for unprivileged listeners.
+		 */
+		.flags = GENL_MCAST_CAP_NET_ADMIN,
 	}
 };
 
@@ -1321,6 +1342,13 @@ int uwg_genl_mcast_peer_unknown(struct uwg_device *uwg, const u8 pubkey[NOISE_PU
 	struct nlattr *peer_nest;
 	void *hdr;
 	int ret = 0;
+
+	/* Unknown-peer events come from unauthenticated initiations. Rate
+	 * limiting here, before the ~8 KiB skb allocation, keeps a flood from
+	 * turning into unbounded allocator pressure.
+	 */
+	if (!__ratelimit(&uwg->unknown_peer_notify))
+		return 0;
 
 	skb = genlmsg_new(NLMSG_GOODSIZE, GFP_KERNEL);
 	if (skb == NULL)

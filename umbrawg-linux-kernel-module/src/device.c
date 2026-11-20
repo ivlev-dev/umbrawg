@@ -321,6 +321,11 @@ static void uwg_setup(struct net_device *dev)
 	uwg->extra_ports = UWG_EXTRA_PORTS_DEFAULT;
 	uwg->bbr_mode = UWG_BBR_MODE_OFF;
 	uwg->fec_mode = UWG_FEC_MODE_OFF;
+	/* At most ten unknown-peer notifications per five seconds per device:
+	 * a wider burst only buys log and skb churn on an unauthenticated
+	 * flood, and the useful signal is lost anyway.
+	 */
+	ratelimit_state_init(&uwg->unknown_peer_notify, 5 * HZ, 10);
 
 	u32_range_init(&uwg->init_header, MESSAGE_HANDSHAKE_INITIATION, MESSAGE_HANDSHAKE_INITIATION);
 	u32_range_init(&uwg->resp_header, MESSAGE_HANDSHAKE_RESPONSE, MESSAGE_HANDSHAKE_RESPONSE);

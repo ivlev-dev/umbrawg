@@ -226,8 +226,10 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 		if (len > shard_len)
 			shard_len = len;
 	}
-	if (shard_len < 2 || shard_len > UWG_FEC_DATA_SHARD_CAP)
+	if (shard_len < 2 || shard_len > UWG_FEC_DATA_SHARD_CAP) {
+		atomic64_inc(&peer->fec_counters.dropped_bounds);
 		goto out;
+	}
 
 	/* Add a random tail to the whole block. All shards keep the same
 	 * length for Reed-Solomon, but the length no longer pins down the
@@ -263,6 +265,7 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 		}
 	}
 	total = (unsigned int)block_k + block_m;
+	atomic64_inc(&peer->fec_counters.blocks_encoded);
 
 	/* Shuffle the send order: indexes and the parity bit stay correct, but
 	 * parity no longer always arrives last and the block is not a single
@@ -337,6 +340,7 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 			total * (UWG_EXT_HEADER_LEN +
 				 UWG_EXT_FEC_HEADER_LEN + shard_len);
 		__skb_queue_tail(out, skb);
+		atomic64_inc(&peer->fec_counters.shards_sent);
 	}
 
 out:
@@ -352,15 +356,21 @@ static bool uwg_fec_tx_push_locked(struct uwg_fec_tx *tx,
 	unsigned int limit = uwg_fec_tx_limit(peer);
 	u8 *slot;
 
-	if (unlikely(tx->disabled))
+	if (unlikely(tx->disabled)) {
+		atomic64_inc(&peer->fec_counters.dropped_disabled);
 		return false;
-	if (plen + 2 > limit)
+	}
+	if (plen + 2 > limit) {
+		atomic64_inc(&peer->fec_counters.dropped_bounds);
 		return false;
+	}
 	if (tx->count >= tx->k)
 		return false;
 	slot = tx->shards + (size_t)tx->count * UWG_FEC_DATA_SHARD_CAP;
-	if (unlikely(skb_copy_bits(skb, 0, slot + 2, plen)))
+	if (unlikely(skb_copy_bits(skb, 0, slot + 2, plen))) {
+		atomic64_inc(&peer->fec_counters.dropped_bounds);
 		return false;
+	}
 	put_unaligned_le16((u16)plen, slot);
 	tx->lens[tx->count] = (u16)plen;
 	tx->count++;
@@ -402,8 +412,10 @@ bool uwg_fec_tx_push(struct uwg_peer *peer, struct sk_buff *skb,
 
 	if (!uwg_fec_peer_tx_ready(peer))
 		return false;
-	if (skb->len + 2 > uwg_fec_tx_limit(peer))
+	if (skb->len + 2 > uwg_fec_tx_limit(peer)) {
+		atomic64_inc(&peer->fec_counters.dropped_bounds);
 		return false;
+	}
 	/* The shard payload is a byte copy of the plaintext packet taken before
 	 * the regular send path finalizes checksums. Complete them first, or a
 	 * receiver that verifies inner checksums (userspace) drops the packet.
@@ -592,13 +604,16 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 	int ret = 0;
 
 	if (shard->shard_len < 2 ||
-	    shard->shard_len > UWG_FEC_DATA_SHARD_CAP)
+	    shard->shard_len > UWG_FEC_DATA_SHARD_CAP) {
+		atomic64_inc(&peer->fec_counters.dropped_bounds);
 		return -EINVAL;
+	}
 
 	rcu_read_lock();
 	rx = rcu_dereference(peer->fec_rx);
 	if (!rx || !READ_ONCE(peer->caps.peer_valid) ||
 	    !(READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_FEC)) {
+		atomic64_inc(&peer->fec_counters.dropped_disabled);
 		ret = -EINVAL;
 		goto out_rcu;
 	}
@@ -609,6 +624,7 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 		invalid = true;
 	}
 	if (invalid) {
+		atomic64_inc(&peer->fec_counters.dropped_bounds);
 		ret = -EINVAL;
 		goto out_rcu;
 	}
@@ -616,6 +632,7 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 	__skb_queue_head_init(&out);
 	spin_lock_bh(&rx->lock);
 	if (unlikely(rx->disabled)) {
+		atomic64_inc(&peer->fec_counters.dropped_disabled);
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -625,8 +642,10 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 		rx->next_id = shard->block_id;
 		rx->have_next = true;
 	}
-	if ((s32)(shard->block_id - rx->next_id) < 0)
+	if ((s32)(shard->block_id - rx->next_id) < 0) {
+		atomic64_inc(&peer->fec_counters.dropped_bounds);
 		goto out_unlock;
+	}
 
 	for (i = 0; i < rx->slots; i++) {
 		if (rx->blocks[i].used &&
@@ -683,6 +702,7 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 		memset(blk->have, 0, sizeof(blk->have));
 	} else if (blk->k != shard->k || blk->m != shard->m ||
 		   blk->shard_len != shard->shard_len) {
+		atomic64_inc(&peer->fec_counters.dropped_bounds);
 		ret = -EINVAL;
 		goto out_unlock;
 	}
@@ -692,6 +712,7 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 					   uwg_fec_rx_slot(rx, slot,
 							   shard->index),
 					   shard->shard_len))) {
+			atomic64_inc(&peer->fec_counters.dropped_bounds);
 			ret = -EINVAL;
 			goto out_unlock;
 		}
@@ -700,9 +721,11 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 	}
 
 	if (blk->m == 0) {
-		if (blk->present == blk->k)
+		if (!blk->ready && blk->present == blk->k) {
 			blk->ready = true;
-	} else if (blk->present >= blk->k) {
+			atomic64_inc(&peer->fec_counters.blocks_decoded);
+		}
+	} else if (!blk->ready && blk->present >= blk->k) {
 		u8 *shards[UWG_FEC_DATA_MAX_SHARDS];
 		bool present[UWG_FEC_DATA_MAX_SHARDS];
 		unsigned int total = blk->k + blk->m;
@@ -712,10 +735,21 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 			present[i] = blk->have[i];
 		}
 		if (!uwg_fec_decode(blk->k, blk->m, blk->shard_len,
-				    shards, present))
+				    shards, present)) {
+			unsigned int j, missing = 0;
+
+			for (j = 0; j < blk->k; j++) {
+				if (!blk->have[j])
+					missing++;
+			}
 			blk->ready = true;
-		else
+			atomic64_inc(&peer->fec_counters.blocks_decoded);
+			atomic64_add(missing,
+				     &peer->fec_counters.packets_recovered);
+		} else {
 			blk->used = false;
+			atomic64_inc(&peer->fec_counters.decode_fail);
+		}
 	}
 
 	uwg_fec_rx_drain(rx, &out);
@@ -912,5 +946,45 @@ void uwg_peer_fec_rcu_free(struct uwg_peer *peer)
 	if (rx) {
 		timer_delete(&rx->timer);
 		uwg_fec_rx_free(rx);
+	}
+}
+
+void uwg_fec_stats_fill(const struct uwg_peer *peer,
+			struct uwg_fec_stats *stats)
+{
+	stats->blocks_encoded =
+		atomic64_read(&peer->fec_counters.blocks_encoded);
+	stats->shards_sent = atomic64_read(&peer->fec_counters.shards_sent);
+	stats->blocks_decoded =
+		atomic64_read(&peer->fec_counters.blocks_decoded);
+	stats->packets_recovered =
+		atomic64_read(&peer->fec_counters.packets_recovered);
+	stats->decode_fail = atomic64_read(&peer->fec_counters.decode_fail);
+	stats->dropped_bounds =
+		atomic64_read(&peer->fec_counters.dropped_bounds);
+	stats->dropped_disabled =
+		atomic64_read(&peer->fec_counters.dropped_disabled);
+}
+
+/* Caller must hold device_update_lock, which keeps peer_list stable; the
+ * netlink device dump is the intended caller.
+ */
+void uwg_fec_stats_fill_device(struct uwg_device *uwg,
+			       struct uwg_fec_stats *stats)
+{
+	struct uwg_fec_stats peer_stats;
+	struct uwg_peer *peer;
+
+	lockdep_assert_held(&uwg->device_update_lock);
+	memset(stats, 0, sizeof(*stats));
+	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
+		uwg_fec_stats_fill(peer, &peer_stats);
+		stats->blocks_encoded += peer_stats.blocks_encoded;
+		stats->shards_sent += peer_stats.shards_sent;
+		stats->blocks_decoded += peer_stats.blocks_decoded;
+		stats->packets_recovered += peer_stats.packets_recovered;
+		stats->decode_fail += peer_stats.decode_fail;
+		stats->dropped_bounds += peer_stats.dropped_bounds;
+		stats->dropped_disabled += peer_stats.dropped_disabled;
 	}
 }

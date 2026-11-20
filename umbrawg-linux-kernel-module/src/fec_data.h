@@ -2,6 +2,7 @@
 #ifndef _UWG_FEC_DATA_H
 #define _UWG_FEC_DATA_H
 
+#include <linux/atomic.h>
 #include <linux/types.h>
 #include <linux/skbuff.h>
 
@@ -23,6 +24,35 @@ struct uwg_fec_rx;
  * limit and is the same for all shards, as Reed-Solomon requires.
  */
 #define UWG_FEC_DATA_SHARD_SLACK 32
+
+/* Local FEC observability, per peer. The update sites run on the TX emit and
+ * the RX shard paths, which take different locks, so the counters are atomic
+ * and are only read through the fill helpers below. Nothing here changes the
+ * wire format; exporting these over netlink is a separate step.
+ */
+struct uwg_fec_counters {
+	atomic64_t blocks_encoded;
+	atomic64_t shards_sent;
+	atomic64_t blocks_decoded;
+	atomic64_t packets_recovered;
+	atomic64_t decode_fail;
+	atomic64_t dropped_bounds;
+	atomic64_t dropped_disabled;
+};
+
+struct uwg_fec_stats {
+	u64 blocks_encoded;
+	u64 shards_sent;
+	u64 blocks_decoded;
+	u64 packets_recovered;
+	u64 decode_fail;
+	u64 dropped_bounds;
+	u64 dropped_disabled;
+};
+
+void uwg_fec_stats_fill(const struct uwg_peer *peer, struct uwg_fec_stats *stats);
+void uwg_fec_stats_fill_device(struct uwg_device *uwg,
+			       struct uwg_fec_stats *stats);
 
 void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter);
 
