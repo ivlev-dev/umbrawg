@@ -3,6 +3,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
+use log::warn;
 use rand_core::RngCore;
 use umbrawg_cc::{Ack as BbrAck, Bbr, BbrConfig, BbrStats};
 use umbrawg_fec::{
@@ -46,6 +47,13 @@ const FEC_DEADLINE_MIN_US: u64 = 500;
 const FEC_DEADLINE_MAX_US: u64 = 2_000;
 /// Scratch size for one FEC shard header: 8-byte prefix plus a 12-byte body.
 const FEC_SHARD_HEADER_LEN: usize = 20;
+
+/// Maximum number of control frames kept pending for one peer.
+///
+/// The queue is deliberately bounded: a peer with a broken socket must not be
+/// able to grow it without limit. Frames above the bound are dropped loudly
+/// (log + [`FecStats::dropped_control`]) instead of disappearing silently.
+const CONTROL_QUEUE_CAPACITY: usize = 16;
 
 /// Small, fast, non-cryptographic PRNG used for traffic-shape jitter.
 ///
@@ -216,6 +224,10 @@ pub struct FecStats {
     pub dropped_bounds: u64,
     /// Shards dropped because FEC was not negotiated or is disabled.
     pub dropped_disabled: u64,
+    /// Control frames dropped before transmission by the peer extension
+    /// (queue overflow or an encryption failure). Kept next to the FEC
+    /// counters so a lost ACK/CAPS/shard never becomes a silent black hole.
+    pub dropped_control: u64,
 }
 
 /// Smallest allowed FEC shard limit, including the 2-byte length prefix.
@@ -1287,12 +1299,18 @@ impl PeerExtension {
             .map_or(Duration::ZERO, |bbr| bbr.next_send_delay(bytes, now))
     }
 
-    /// Resets all feedback state after the peer installed a new keypair.
+    /// Resets the per-keypair state after the peer installed a new keypair.
     ///
-    /// Besides ACK/BBR/CAPS, the FEC state is rebuilt: the decoder's block
-    /// clock is discarded (a restarted peer starts again at `block_id = 0`,
-    /// which the old clock would reject forever) and the encoder queue is
-    /// flushed into explicit shard frames instead of being dropped.
+    /// Wire counters and FEC `block_id`s live inside one keypair, so the ACK
+    /// tracker, the BBR ring and the FEC decoder's block clock are discarded.
+    /// Capabilities are a *device* property, not a keypair one: the kernel
+    /// never drops `peer->caps` on a rekey and neither do we. Keeping
+    /// `peer_caps` (and the negotiated FEC profile) is what prevents the
+    /// silent one-way FEC black hole after a rekey, where incoming shards
+    /// would otherwise be counted as `dropped_disabled` until a fresh CAPS
+    /// arrives. Only the bounded exchange bookkeeping is re-armed so our own
+    /// CAPS can be re-sent once in case it raced the keypair installation on
+    /// the peer.
     pub(crate) fn reset_feedback(&mut self) {
         self.flush_encoder_frames();
         self.ack.reset();
@@ -1307,9 +1325,10 @@ impl PeerExtension {
         }
         self.loss = LossWindow::default();
         self.adaptive_clean_since = None;
-        // A new handshake means the peer's view of our capabilities is
-        // unknown again: restart the bounded CAPS exchange.
-        self.reset_caps();
+        self.caps_attempts = 0;
+        self.caps_next = None;
+        self.caps_last_sent = None;
+        self.caps_seen = None;
     }
 
     pub(crate) fn handle_caps(&mut self, caps: Caps, now: Instant) {
@@ -1398,24 +1417,38 @@ impl PeerExtension {
     }
 
     pub(crate) fn pending_control(&mut self, now: Instant) -> Vec<ControlFrame> {
-        if self.local_caps.bits() == 0 {
-            return Vec::new();
-        }
-        self.request_caps(now);
-        if let Some(ack) = self.ack.make(now) {
-            if let Some(frame) =
-                ControlFrame::inline(ControlKind::Ack, |output| ack.encode(output).ok())
-            {
-                self.pending.push_back(frame);
+        // Producing new CAPS/ACK frames needs our advertised capabilities.
+        // Frames that already sit in the queue, however, must always leave:
+        // an encoder flushed right before FEC was turned off would otherwise
+        // stay pending forever (and its block would never reach the peer).
+        if self.local_caps.bits() != 0 {
+            self.request_caps(now);
+            if let Some(ack) = self.ack.make(now) {
+                if let Some(frame) =
+                    ControlFrame::inline(ControlKind::Ack, |output| ack.encode(output).ok())
+                {
+                    self.pending.push_back(frame);
+                }
             }
         }
         self.pending.drain(..).collect()
     }
 
     pub(crate) fn push_control(&mut self, frame: ControlFrame) {
-        if self.pending.len() < 16 {
+        if self.pending.len() < CONTROL_QUEUE_CAPACITY {
             self.pending.push_back(frame);
+        } else {
+            self.note_control_drop();
+            warn!(
+                "dropping {:?} control frame: the per-peer queue is full",
+                frame.kind()
+            );
         }
+    }
+
+    /// Accounts for one control frame dropped before it reached the transport.
+    pub(crate) fn note_control_drop(&mut self) {
+        self.fec_stats.dropped_control = self.fec_stats.dropped_control.saturating_add(1);
     }
 
     /// Returns FEC accounting for this peer, or `None` when FEC is disabled.
@@ -2465,22 +2498,156 @@ mod tests {
     }
 
     #[test]
-    fn reset_feedback_restarts_caps_exchange() {
+    fn reset_feedback_keeps_negotiated_caps_and_rearms_the_exchange() {
         let base = Instant::now();
-        let mut ext = PeerExtension::new(BBR_CONFIG);
+        let config = ExtConfig {
+            bbr: BbrMode::On,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        };
+        let mut ext = PeerExtension::new(config);
         let frames = ext.pending_control(base);
         for frame in &frames {
             ext.note_frame_sent(frame.kind(), base);
         }
-        ext.handle_caps(caps(CapsFlags::ACK, 0, 0), base);
-        assert_eq!(ext.caps_attempts, 1);
+        let peer = caps(CapsFlags::ACK | CapsFlags::FEC, 2, 1);
+        ext.handle_caps(peer, base);
+        assert!(ext.caps_attempts >= 1);
+        assert!(ext.fec_tx_active());
 
         ext.reset_feedback();
         assert_eq!(ext.caps_attempts, 0);
         assert!(ext.caps_seen.is_none());
         assert!(ext.caps_last_sent.is_none());
         assert!(ext.caps_next.is_none());
-        assert_eq!(ext.peer_caps.bits(), 0);
+        assert_eq!(
+            ext.peer_caps,
+            CapsFlags::ACK | CapsFlags::FEC,
+            "capabilities are a device property and must survive a rekey"
+        );
+        assert_eq!((ext.peer_fec_k, ext.peer_fec_m), (2, 1));
+        assert!(
+            ext.fec_tx_active(),
+            "FEC TX must stay negotiated across the keypair switch"
+        );
+        assert!(ext.bbr.is_some(), "BBR restarts with an empty ring");
+    }
+
+    #[test]
+    fn caps_changes_after_a_keypair_reset_are_still_applied() {
+        let base = Instant::now();
+        let config = ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        };
+        let mut ext = PeerExtension::new(config);
+        ext.handle_caps(caps(CapsFlags::ACK | CapsFlags::FEC, 2, 1), base);
+
+        ext.reset_feedback();
+        assert!(ext.fec_tx_active(), "the old profile is still valid");
+
+        ext.handle_caps(
+            caps(CapsFlags::ACK | CapsFlags::FEC, 3, 1),
+            base + Duration::from_millis(1),
+        );
+        assert_eq!(
+            (ext.peer_fec_k, ext.peer_fec_m),
+            (3, 1),
+            "a changed peer profile must be applied after a rekey"
+        );
+        assert!(
+            !ext.fec_tx_active(),
+            "a mismatched profile must disable FEC TX until the peer changes back"
+        );
+
+        ext.handle_caps(
+            caps(CapsFlags::ACK | CapsFlags::FEC, 2, 1),
+            base + Duration::from_millis(2),
+        );
+        assert!(ext.fec_tx_active());
+    }
+
+    #[test]
+    fn full_size_shards_survive_a_profile_change() {
+        let base = Instant::now();
+        let config = ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1385,
+        };
+        let mut ext = PeerExtension::new(config);
+        ext.handle_caps(caps(CapsFlags::ACK | CapsFlags::FEC, 2, 1), base);
+        assert!(ext.fec_push(&[0x5a; 1352], base).unwrap().is_none());
+
+        // Turning FEC off must still release the block that was flushed from
+        // the encoder; a stranded shard used to stay pending forever because
+        // `pending_control` short-circuited on `local_caps == 0`.
+        ext.configure(ExtConfig {
+            fec: FecMode::Off,
+            ..config
+        });
+
+        let frames = ext.pending_control(base);
+        let shards: Vec<&ControlFrame> = frames
+            .iter()
+            .filter(|frame| frame.kind() == ControlKind::FecShard)
+            .collect();
+        assert_eq!(shards.len(), 1, "the flushed block must leave the queue");
+        assert!(
+            shards[0].bytes().len() > 1024,
+            "the frame is a full-size FEC shard, not a tiny ACK"
+        );
+        assert_eq!(ext.fec_stats.dropped_control, 0);
+        for frame in &frames {
+            ext.note_frame_sent(frame.kind(), base);
+        }
+        assert!(
+            ext.pending_control(base).is_empty(),
+            "nothing may stay pending after the flush"
+        );
+    }
+
+    #[test]
+    fn full_size_shards_survive_a_keypair_reset() {
+        let base = Instant::now();
+        let config = ExtConfig {
+            bbr: BbrMode::On,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1385,
+        };
+        let mut ext = PeerExtension::new(config);
+        ext.handle_caps(caps(CapsFlags::ACK | CapsFlags::FEC, 2, 1), base);
+        assert!(ext.fec_push(&[0x5a; 1352], base).unwrap().is_none());
+
+        ext.reset_feedback();
+
+        let frames = ext.pending_control(base);
+        let shards: Vec<&ControlFrame> = frames
+            .iter()
+            .filter(|frame| frame.kind() == ControlKind::FecShard)
+            .collect();
+        assert_eq!(shards.len(), 1);
+        assert!(shards[0].bytes().len() > 1024);
+        assert_eq!(ext.fec_stats.dropped_control, 0);
+        for frame in &frames {
+            ext.note_frame_sent(frame.kind(), base);
+        }
+        assert!(ext.pending_control(base).is_empty());
+    }
+
+    #[test]
+    fn control_queue_overflow_is_counted_not_silent() {
+        let mut ext = PeerExtension::default();
+        for _ in 0..(CONTROL_QUEUE_CAPACITY + 2) {
+            ext.push_control(ControlFrame::owned(ControlKind::FecShard, vec![0u8; 8]));
+        }
+        assert_eq!(ext.pending.len(), CONTROL_QUEUE_CAPACITY);
+        assert_eq!(ext.fec_stats.dropped_control, 2);
     }
 
     fn fec_block_fixture() -> (u16, Vec<Vec<u8>>) {

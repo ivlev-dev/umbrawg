@@ -1248,15 +1248,19 @@ impl Device {
         let mut sent = 0;
         let frames = peer.extension().pending_control(ctx.now);
         for frame in frames {
-            let mut dst = [0u8; 1024];
-            match self.encrypt_control_packet(peer, frame.bytes(), &mut dst, ctx.rng, ctx.now) {
+            // Control frames use the same datagram scratch as data packets.
+            // A fixed 1 KiB stack buffer cannot hold a full-size FEC shard
+            // (20-byte extension header + up to `max_shard_len` bytes of
+            // payload + transport header, padding and AEAD tag), and the
+            // resulting `BufferTooSmall` used to drop the shard silently.
+            match self.encrypt_control_packet(peer, frame.bytes(), ctx.scratch, ctx.rng, ctx.now) {
                 Ok(length) => {
                     let Some(endpoint) = peer.endpoint() else {
                         peer.extension().push_control(frame);
                         break;
                     };
                     ctx.io
-                        .send_datagram(endpoint, Some(peer), &dst[..length], None);
+                        .send_datagram(endpoint, Some(peer), &ctx.scratch[..length], None);
                     peer.add_tx(length as u64);
                     peer.extension().note_frame_sent(frame.kind(), ctx.now);
                     if frame.kind() == ControlKind::FecShard {
@@ -1268,7 +1272,13 @@ impl Device {
                     peer.extension().push_control(frame);
                     break;
                 }
-                Err(_) => {}
+                Err(error) => {
+                    // Losing a control frame is a real defect (buffer shape,
+                    // MTU mismatch, ...), so it is counted and logged instead
+                    // of being swallowed by an empty match arm.
+                    peer.extension().note_control_drop();
+                    warn!("dropping {:?} control frame: {error}", frame.kind());
+                }
             }
         }
         sent
@@ -1723,13 +1733,22 @@ impl Device {
         } else {
             peer.set_endpoint_from_packet(source);
         }
+        // Counters belong to one keypair. Feedback from the previous keypair
+        // (still accepted for data during a rekey) must not enter the ACK
+        // tracker or the BBR epoch of the current one, exactly like the
+        // kernel, which checks `keypair->internal_id` before observing.
+        let current_keypair = peer
+            .current_keypair()
+            .is_some_and(|current| Arc::ptr_eq(&current, &keypair));
         self.timers_any_authenticated_packet_traversal(&peer, ctx.rng, ctx.now);
         self.timers_any_authenticated_packet_received(&peer);
         self.keep_key_fresh_receiving(&peer, timings, ctx)?;
         if let Some(kind) = umbrawg_proto::control::extension_kind(plaintext) {
-            return self.handle_extension(&peer, kind, counter, plaintext, ctx);
+            return self.handle_extension(&peer, kind, counter, plaintext, current_keypair, ctx);
         }
-        peer.extension().observe_received(counter, ctx.now);
+        if current_keypair {
+            peer.extension().observe_received(counter, ctx.now);
+        }
         if plaintext.is_empty() || plaintext[0] == 0 {
             return Ok(IncomingOutcome::Keepalive);
         }
@@ -1745,17 +1764,21 @@ impl Device {
         Ok(IncomingOutcome::Delivered(length))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn handle_extension<R: RngCore, S: PacketIo>(
         &self,
         peer: &Arc<Peer>,
         kind: ControlKind,
         counter: u64,
         plaintext: &[u8],
+        current_keypair: bool,
         ctx: &mut IoContext<'_, R, S>,
     ) -> Result<IncomingOutcome> {
         match kind {
             ControlKind::Caps => {
-                peer.extension().observe_control(counter, ctx.now);
+                if current_keypair {
+                    peer.extension().observe_control(counter, ctx.now);
+                }
                 let Ok(caps) = Caps::decode(plaintext) else {
                     return Ok(IncomingOutcome::Dropped);
                 };
@@ -1763,6 +1786,13 @@ impl Device {
                 Ok(IncomingOutcome::Keepalive)
             }
             ControlKind::Ack => {
+                if !current_keypair {
+                    // An ACK decrypted with a previous keypair names a counter
+                    // space that no longer exists. Processing it would
+                    // acknowledge records of the current epoch by accident, so
+                    // it is ignored (the kernel compares `keypair_id` too).
+                    return Ok(IncomingOutcome::Keepalive);
+                }
                 peer.extension().observe_control(counter, ctx.now);
                 let Ok(ack) = Ack::decode(plaintext) else {
                     return Ok(IncomingOutcome::Dropped);
@@ -1771,7 +1801,9 @@ impl Device {
                 Ok(IncomingOutcome::Keepalive)
             }
             ControlKind::FecShard => {
-                peer.extension().observe_received(counter, ctx.now);
+                if current_keypair {
+                    peer.extension().observe_received(counter, ctx.now);
+                }
                 let Ok((header, payload)) = FecShardHeader::decode(plaintext) else {
                     peer.extension().note_fec_reject();
                     return Ok(IncomingOutcome::Dropped);
@@ -1978,6 +2010,11 @@ impl Device {
             peer.aead_algorithm(),
         ));
         self.install_keypair(&peer, &keypair, true);
+        // The initiator switched its send stream to the new keypair here, so
+        // the old ACK/BBR/FEC state belongs to a dead nonce space. The
+        // responder does the same when it promotes this keypair on the first
+        // authentic packet; capabilities survive on both sides.
+        peer.extension().reset_feedback();
         peer.set_endpoint_from_packet(source);
         peer.add_rx(RESPONSE_SIZE as u64);
         let timings = self.timings();

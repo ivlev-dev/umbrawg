@@ -277,6 +277,17 @@ fn has_new_handshake(device: &Device, peer: &Peer, at: Instant) -> bool {
         .any(|event| event.peer == peer.id() && event.kind == TimerKind::NewHandshake)
 }
 
+/// Waits for a fresh real-time TAI64N timestamp bucket.
+///
+/// WireGuard rejects an initiation whose timestamp is not strictly greater
+/// than the last consumed one, and [`umbrawg_crypto::tai64n::Tai64N::now`]
+/// quantizes nanoseconds to ~16.7 ms. Tests drive the device with simulated
+/// `Instant`s, so a second handshake in the same run still has to wait for the
+/// wall clock to leave the previous bucket.
+fn wait_for_fresh_timestamp() {
+    std::thread::sleep(Duration::from_millis(25));
+}
+
 fn complete_handshake(pair: &mut Pair, now: Instant) {
     {
         let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
@@ -1641,4 +1652,321 @@ fn fec_shards_are_visible_to_bbr() {
     let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
     assert!(stats.delivered > 0, "ACKed shards must count as delivered");
     assert_eq!(stats.inflight, 0);
+}
+
+const FEC_UNDERLAY_SHARD_LEN: u16 = 1385;
+const FEC_TUN_MTU: usize = 1352;
+
+fn fec_ext_config() -> ExtConfig {
+    ExtConfig {
+        bbr: BbrMode::On,
+        fec: FecMode::Fixed { k: 2, m: 1 },
+        ack_interval: 2,
+        max_shard_len: FEC_UNDERLAY_SHARD_LEN,
+    }
+}
+
+fn exchange_caps(pair: &mut Pair, now: Instant) {
+    let flags = CapsFlags::BBR | CapsFlags::ACK | CapsFlags::FEC;
+    send_caps_frame(pair, true, flags, 2, 1, now);
+    deliver_all(pair, true, now);
+    send_caps_frame(pair, false, flags, 2, 1, now);
+    deliver_all(pair, false, now);
+}
+
+/// Sends a batch through FEC and forwards the produced datagrams to the other
+/// side. Returns the number of datagrams the FEC encoder laid out.
+fn send_fec_batch(pair: &mut Pair, from_a: bool, packets: &[&[u8]], now: Instant) -> usize {
+    let mut output = vec![0u8; 65_535];
+    let layout = if from_a {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_batch(&pair.peer_b, packets, &mut output, &mut ctx)
+            .unwrap()
+            .layout
+    } else {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_b);
+        pair.b
+            .send_batch(&pair.peer_a, packets, &mut output, &mut ctx)
+            .unwrap()
+            .layout
+    };
+    let ranges: Vec<std::ops::Range<usize>> = layout
+        .groups()
+        .iter()
+        .flat_map(|group| group.ranges())
+        .collect();
+    for range in &ranges {
+        if from_a {
+            pair.io_a.send_datagram(
+                pair.addr_a,
+                Some(&pair.peer_b),
+                &output[range.clone()],
+                None,
+            );
+        } else {
+            pair.io_b.send_datagram(
+                pair.addr_b,
+                Some(&pair.peer_a),
+                &output[range.clone()],
+                None,
+            );
+        }
+    }
+    ranges.len()
+}
+
+fn full_size_packet(marker: u8) -> Vec<u8> {
+    ipv4_packet(
+        [10, 0, 0, 1],
+        [10, 0, 0, 2],
+        &vec![marker; FEC_TUN_MTU - 20],
+    )
+}
+
+fn full_size_packet_back(marker: u8) -> Vec<u8> {
+    ipv4_packet(
+        [10, 0, 0, 2],
+        [10, 0, 0, 1],
+        &vec![marker; FEC_TUN_MTU - 20],
+    )
+}
+
+#[test]
+fn rekey_keeps_fec_caps_and_flushes_full_size_shards() {
+    let mut pair = pair(ObfParams::default());
+    let ext = fec_ext_config();
+    pair.a.set_ext_config(ext);
+    pair.b.set_ext_config(ext);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    exchange_caps(&mut pair, now);
+
+    // A complete block before the rekey, so the initiator has non-zero BBR
+    // state that must be discarded by the keypair switch.
+    let first = full_size_packet(0x11);
+    let second = full_size_packet(0x22);
+    assert_eq!(
+        send_fec_batch(&mut pair, true, &[&first, &second], now),
+        3,
+        "k=2, m=1 must produce three full-size shards"
+    );
+    deliver_all(&mut pair, true, now);
+    assert_eq!(pair.io_b.delivered.len(), 2);
+
+    {
+        let later = now + Duration::from_millis(5);
+        let mut ctx = IoContext::new(&mut pair.rng, later, &mut pair.scratch, &mut pair.io_b);
+        pair.b.flush_staged(&pair.peer_a, &mut ctx).unwrap();
+    }
+    deliver_all(&mut pair, false, now + Duration::from_millis(5));
+    assert!(
+        pair.a
+            .bbr_stats(&pair.peer_b)
+            .expect("bbr is enabled")
+            .delivered
+            > 0,
+        "the ACK round must move the initiator BBR state"
+    );
+
+    // A partial block in the encoder at the moment of the rekey. Its shard is
+    // bigger than the old 1 KiB control buffer.
+    let third = full_size_packet(0x33);
+    assert_eq!(
+        send_fec_batch(&mut pair, true, &[&third], now + Duration::from_millis(6)),
+        0,
+        "a partial block is not emitted before the flush"
+    );
+    let encoded_before = pair
+        .a
+        .fec_stats(&pair.peer_b)
+        .expect("FEC is configured")
+        .blocks_encoded;
+    let decoded_before = pair
+        .b
+        .fec_stats(&pair.peer_a)
+        .expect("FEC is configured")
+        .blocks_decoded;
+
+    pair.io_a.sent.clear();
+    pair.io_b.sent.clear();
+    pair.io_b.delivered.clear();
+
+    let rekey_at = now + Duration::from_secs(6);
+    let before = pair.peer_b.current_keypair().expect("keypair");
+    wait_for_fresh_timestamp();
+    complete_handshake(&mut pair, rekey_at);
+    assert!(
+        !Arc::ptr_eq(&before, &pair.peer_b.current_keypair().expect("keypair")),
+        "the test must install a new keypair"
+    );
+
+    let initiator = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
+    assert_eq!(
+        initiator.delivered, 0,
+        "the initiator must start a fresh BBR epoch after a rekey"
+    );
+    assert!(
+        initiator.inflight > 0,
+        "the shard flushed at the rekey must enter the new BBR ring"
+    );
+    let encoded = pair
+        .a
+        .fec_stats(&pair.peer_b)
+        .expect("FEC is configured")
+        .blocks_encoded;
+    assert!(
+        encoded > encoded_before,
+        "the partial block must be flushed into shard frames at the rekey"
+    );
+    assert_eq!(
+        pair.io_b.delivered.len(),
+        1,
+        "the full-size shard flushed at the rekey must be decoded, not dropped"
+    );
+    assert_eq!(pair.io_b.delivered[0].1.len(), FEC_TUN_MTU);
+    let rx = pair.b.fec_stats(&pair.peer_a).expect("FEC is configured");
+    assert_eq!(
+        rx.blocks_decoded,
+        decoded_before + 1,
+        "the flushed full-size shard must be decoded"
+    );
+    assert_eq!(
+        rx.dropped_disabled, 0,
+        "the responder must keep the initiator CAPS across the rekey"
+    );
+
+    // The responder keeps the initiator CAPS too: it must still emit FEC
+    // shards after promoting the new keypair.
+    let fourth = full_size_packet_back(0x44);
+    let fifth = full_size_packet_back(0x55);
+    pair.io_a.delivered.clear();
+    assert_eq!(
+        send_fec_batch(&mut pair, false, &[&fourth, &fifth], rekey_at),
+        3,
+        "the responder must keep FEC TX enabled across the rekey"
+    );
+    deliver_all(&mut pair, false, rekey_at);
+    assert_eq!(pair.io_a.delivered.len(), 2);
+}
+
+#[test]
+fn config_change_flushes_full_size_shards_instead_of_stranding_them() {
+    let mut pair = pair(ObfParams::default());
+    let ext = fec_ext_config();
+    pair.a.set_ext_config(ext);
+    pair.b.set_ext_config(ext);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    exchange_caps(&mut pair, now);
+
+    let packet = full_size_packet(0x66);
+    assert_eq!(
+        send_fec_batch(&mut pair, true, &[&packet], now),
+        0,
+        "one packet of a k=2 block produces no datagram yet"
+    );
+    pair.io_a.sent.clear();
+    pair.io_b.delivered.clear();
+
+    // Disabling FEC on the sender must release the block it just flushed.
+    pair.a.set_ext_config(ExtConfig {
+        fec: FecMode::Off,
+        ..ext
+    });
+    {
+        let later = now + Duration::from_millis(1);
+        let mut ctx = IoContext::new(&mut pair.rng, later, &mut pair.scratch, &mut pair.io_a);
+        pair.a.flush_staged(&pair.peer_b, &mut ctx).unwrap();
+    }
+    assert!(
+        pair.io_a.sent.iter().any(|sent| sent.payload.len() > 1024),
+        "the full-size shard must leave the device, not be dropped by a 1 KiB buffer"
+    );
+
+    deliver_all(&mut pair, true, now + Duration::from_millis(1));
+    assert_eq!(pair.io_b.delivered.len(), 1);
+    assert_eq!(pair.io_b.delivered[0].1.len(), FEC_TUN_MTU);
+    assert_eq!(
+        pair.b
+            .fec_stats(&pair.peer_a)
+            .expect("FEC is configured")
+            .blocks_decoded,
+        1
+    );
+}
+
+#[test]
+fn stale_ack_from_the_previous_keypair_is_ignored() {
+    let mut pair = pair(ObfParams::default());
+    let ext = ExtConfig {
+        bbr: BbrMode::On,
+        ..ExtConfig::default()
+    };
+    pair.a.set_ext_config(ext);
+    pair.b.set_ext_config(ext);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    let flags = CapsFlags::BBR | CapsFlags::ACK;
+    send_caps_frame(&mut pair, true, flags, 0, 0, now);
+    deliver_all(&mut pair, true, now);
+    send_caps_frame(&mut pair, false, flags, 0, 0, now);
+    deliver_all(&mut pair, false, now);
+
+    let one = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"one");
+    send_data(&mut pair, true, &one, now);
+    deliver_all(&mut pair, true, now);
+    {
+        let later = now + Duration::from_millis(5);
+        let mut ctx = IoContext::new(&mut pair.rng, later, &mut pair.scratch, &mut pair.io_b);
+        pair.b.flush_staged(&pair.peer_a, &mut ctx).unwrap();
+    }
+    let stale_ack = pair.io_b.take_sent();
+    assert!(
+        !stale_ack.is_empty(),
+        "the receiver must ACK the first keypair"
+    );
+
+    let rekey_at = now + Duration::from_secs(6);
+    let before = pair.peer_b.current_keypair().expect("keypair");
+    wait_for_fresh_timestamp();
+    complete_handshake(&mut pair, rekey_at);
+    assert!(
+        !Arc::ptr_eq(&before, &pair.peer_b.current_keypair().expect("keypair")),
+        "the test must install a new keypair"
+    );
+    assert_eq!(
+        pair.a
+            .bbr_stats(&pair.peer_b)
+            .expect("bbr is enabled")
+            .delivered,
+        0
+    );
+
+    // The first data packet of the new epoch reuses counter 2, exactly the
+    // `largest_counter` of the ACK captured above (keepalive 0, CAPS 1).
+    let three = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"three");
+    send_data(&mut pair, true, &three, rekey_at + Duration::from_millis(1));
+
+    let deliver_at = rekey_at + Duration::from_millis(2);
+    for packet in stale_ack {
+        deliver_one(
+            packet,
+            pair.addr_b,
+            &pair.a,
+            &mut pair.io_a,
+            &mut pair.rng,
+            deliver_at,
+            &mut pair.scratch,
+        );
+    }
+
+    assert_eq!(
+        pair.a
+            .bbr_stats(&pair.peer_b)
+            .expect("bbr is enabled")
+            .delivered,
+        0,
+        "an ACK decrypted with the previous keypair must not acknowledge the new epoch"
+    );
 }
