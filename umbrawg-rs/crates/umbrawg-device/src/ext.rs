@@ -585,6 +585,14 @@ const BBR_MAX_PACKETS: usize = 1024;
 const BBR_MAX_BYTES: usize = 4 * 1024 * 1024;
 /// Pacer delay below which a queued packet is released for transmission.
 const BBR_RELEASE_DELAY: Duration = Duration::from_micros(500);
+/// How long the congestion window may hold the queue before the pacer
+/// releases packets without it.
+///
+/// The window is only freed by ACKs, so a run of lost ACKs would otherwise
+/// pin `inflight` at the limit and stall the tunnel forever. Five milliseconds
+/// is shorter than the retransmission-free tolerance of the FEC path and long
+/// enough not to fight a healthy window that oscillates around the limit.
+const BBR_CWND_STALL_TIMEOUT: Duration = Duration::from_millis(5);
 
 /// One queued packet inside [`BbrQueue::bytes`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -654,6 +662,12 @@ struct BbrQueue {
     slots: VecDeque<BbrSlot>,
     head: usize,
     live_bytes: usize,
+    /// When the congestion window first refused a packet, if it still does.
+    ///
+    /// `None` means the window is not the limiter (or an ACK has freed it);
+    /// `Some(t)` means the queue is cwnd-blocked since `t` and the emergency
+    /// release is armed.
+    cwnd_blocked_since: Option<Instant>,
 }
 
 impl BbrQueue {
@@ -663,6 +677,7 @@ impl BbrQueue {
             slots: VecDeque::new(),
             head: 0,
             live_bytes: 0,
+            cwnd_blocked_since: None,
         }
     }
 
@@ -675,6 +690,15 @@ impl BbrQueue {
         }
         self.head = 0;
         self.live_bytes = 0;
+        self.cwnd_blocked_since = None;
+    }
+
+    /// Marks the congestion window as freed by feedback.
+    ///
+    /// An ACK moves bytes out of `inflight`, so the window has to be trusted
+    /// again instead of waiting out the stall timeout.
+    fn note_feedback(&mut self) {
+        self.cwnd_blocked_since = None;
     }
 
     #[cfg(test)]
@@ -718,16 +742,75 @@ impl BbrQueue {
         self.head = 0;
     }
 
+    /// Releases the packets allowed by the pacer and the congestion window.
+    ///
+    /// The window limits the batch to `effective_cwnd - inflight` bytes, but
+    /// the head packet is always released at least once: a window that rounds
+    /// down to zero (or to less than one datagram) must never strand the
+    /// queue. The next releases are then held back until an ACK frees the
+    /// window, and after [`BBR_CWND_STALL_TIMEOUT`] without feedback the
+    /// window is ignored for one batch so missing ACKs cannot stall the
+    /// tunnel.
+    ///
+    /// The gate uses [`Bbr::effective_cwnd`] rather than the modelled window:
+    /// on a short RTT the modelled `2 * BDP` window is smaller than one
+    /// ACK interval of paced bytes, and gating on it would limit throughput by
+    /// the peer's ACK cadence rather than by the path.
+    ///
+    /// `cwnd_gate` is `false` when the peer never advertised ACK support: no
+    /// in-flight accounting happens in that case, so only the pacer applies.
+    /// It is also `false` on a clean path (see [`Bbr::loss_limited`]): the
+    /// window is a congestion response, and before any loss cut it would only
+    /// mirror — and undercut — the pacer.
     fn drain_into(
         &mut self,
         max_packets: usize,
         bbr: &Bbr,
+        cwnd_gate: bool,
         now: Instant,
         batch: &mut BbrBatch,
     ) -> usize {
+        let head_len = self.slots.front().map_or(0, |slot| u64::from(slot.len));
+        let allowance = if cwnd_gate {
+            bbr.effective_cwnd().saturating_sub(bbr.inflight())
+        } else {
+            u64::MAX
+        };
+        // The head packet does not fit the remaining window: either release
+        // it once (grace) or, once the stall timeout expired, ignore the
+        // window for the whole batch. Only a cwnd refusal arms the timer: a
+        // pacer refusal resolves on its own and must not look like a stall.
+        let paced = bbr.next_send_delay(head_len as usize, now) <= BBR_RELEASE_DELAY;
+        let mut bypass = false;
+        if !cwnd_gate || self.slots.is_empty() {
+            self.cwnd_blocked_since = None;
+        } else if paced {
+            if head_len > allowance {
+                match self.cwnd_blocked_since {
+                    None => self.cwnd_blocked_since = Some(now),
+                    Some(since) => {
+                        bypass = now.saturating_duration_since(since) >= BBR_CWND_STALL_TIMEOUT;
+                        if !bypass {
+                            // Waiting for feedback or the timeout: hold the
+                            // queue instead of releasing one packet per call,
+                            // which would defeat the window entirely.
+                            return 0;
+                        }
+                    }
+                }
+            } else {
+                self.cwnd_blocked_since = None;
+            }
+        }
+        let limit = if cwnd_gate && !bypass {
+            Some(allowance)
+        } else {
+            None
+        };
+
         let mut taken = 0usize;
         let mut end = self.head;
-        let mut drained_bytes = 0usize;
+        let mut drained_bytes = 0u64;
         for slot in &self.slots {
             if taken >= max_packets {
                 break;
@@ -735,8 +818,12 @@ impl BbrQueue {
             if bbr.next_send_delay(slot.len as usize, now) > BBR_RELEASE_DELAY {
                 break;
             }
+            let len = u64::from(slot.len);
+            if taken > 0 && limit.is_some_and(|limit| len > limit.saturating_sub(drained_bytes)) {
+                break;
+            }
             end = slot.start as usize + slot.len as usize;
-            drained_bytes = drained_bytes.saturating_add(slot.len as usize);
+            drained_bytes = drained_bytes.saturating_add(len);
             taken += 1;
         }
         if taken == 0 {
@@ -764,7 +851,9 @@ impl BbrQueue {
                     len: slot.len,
                 }));
             self.head = end;
-            self.live_bytes = self.live_bytes.saturating_sub(drained_bytes);
+            self.live_bytes = self
+                .live_bytes
+                .saturating_sub(usize::try_from(drained_bytes).unwrap_or(usize::MAX));
         }
         taken
     }
@@ -1105,6 +1194,9 @@ impl PeerExtension {
             ),
             now,
         );
+        // The ACK moved bytes out of `inflight`: the queue may send again and
+        // must not sit out the stall timeout.
+        self.bbr_queue.note_feedback();
         // A hole that was already missing one ACK ago is a real loss, not
         // reordering: report it so STARTUP can exit and `inflight_hi` can be
         // cut. The very first ACK only establishes the reference point.
@@ -1175,7 +1267,15 @@ impl PeerExtension {
         let Some(bbr) = self.bbr.as_ref() else {
             return 0;
         };
-        self.bbr_queue.drain_into(max_packets, bbr, now, batch)
+        // The window is a reaction to congestion, not a send limit of its own.
+        // On a clean path it must not replace the pacer: the ACK cadence would
+        // then impose a ceiling below the path rate. Only once a loss cut has
+        // bounded the pipe (`inflight_hi < cwnd`, which `PROBE_UP` can exceed)
+        // does the window carry information the pacer does not already have.
+        let cwnd_gate =
+            self.peer_caps.contains(CapsFlags::ACK) && bbr.full_bw_reached() && bbr.loss_limited();
+        self.bbr_queue
+            .drain_into(max_packets, bbr, cwnd_gate, now, batch)
     }
 
     pub(crate) fn pacing_delay(&mut self, bytes: usize, now: Instant) -> Duration {
@@ -1680,6 +1780,455 @@ mod tests {
             1
         );
         assert_eq!(batch.iter().next().map(<[u8]>::len), Some(1400));
+    }
+
+    /// Payload used by the BBR tests: the MSS of [`BBR_CONFIG`], so
+    /// `min_cwnd = 4 * MSS` and every window figure is a whole packet count.
+    const DATA_LEN: usize = 1900;
+
+    fn bbr_acked_ext(base: Instant) -> PeerExtension {
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        ext.handle_caps(caps(CapsFlags::BBR | CapsFlags::ACK, 0, 0), base);
+        ext
+    }
+
+    fn data_packets(count: usize) -> Vec<Vec<u8>> {
+        (0..count)
+            .map(|index| vec![u8::try_from(index).unwrap(); DATA_LEN])
+            .collect()
+    }
+
+    fn charge_inflight(ext: &mut PeerExtension, packets: usize, now: Instant) -> u64 {
+        charge_inflight_from(ext, 0, packets, now)
+    }
+
+    fn charge_inflight_from(
+        ext: &mut PeerExtension,
+        first_counter: u64,
+        packets: usize,
+        now: Instant,
+    ) -> u64 {
+        for counter in first_counter..first_counter + packets as u64 {
+            ext.on_packet_sent(counter, DATA_LEN, FrameKind::Data, now);
+        }
+        ext.bbr_stats().expect("bbr is enabled").inflight
+    }
+
+    /// Effective window used by the gate, mirrored from
+    /// `Bbr::effective_cwnd`: the modelled window or one 5 ms ACK interval of
+    /// paced bytes, capped at 4 MiB.
+    fn effective_cwnd(ext: &PeerExtension) -> u64 {
+        let stats = ext.bbr_stats().expect("bbr is enabled");
+        let floor = (stats.pacing_rate * 5 / 1000).min(4 * 1024 * 1024);
+        stats.cwnd.max(floor)
+    }
+
+    /// Charges more datagrams than the effective window holds.
+    fn fill_window(ext: &mut PeerExtension, first_counter: u64, now: Instant) {
+        let fill = usize::try_from(effective_cwnd(ext) / DATA_LEN as u64).unwrap() + 1;
+        charge_inflight_from(ext, first_counter, fill, now);
+    }
+
+    /// Drives the controller until `STARTUP` declares the path full.
+    ///
+    /// A quick exchange first primes a 500 µs `min_rtt`, so the modelled window
+    /// stays at or below twice the bytes the pacer emits per round and the
+    /// controller never considers itself application limited. Every round then
+    /// sends sixteen datagrams and acknowledges exactly those one millisecond
+    /// later, which measures the same delivered rate round after round: no
+    /// bandwidth growth, so the controller leaves `STARTUP`.
+    fn reach_full_bw(ext: &mut PeerExtension, base: Instant) -> Instant {
+        ext.on_packet_sent(0, DATA_LEN, FrameKind::Data, base);
+        ext.on_ack(
+            &Ack {
+                largest_counter: 0,
+                ack_delay_us: 0,
+                ecn_ce: false,
+                received: 1,
+            },
+            base + Duration::from_micros(500),
+        );
+
+        let mut counter = 1u64;
+        let mut now = base;
+        for round in 1..=5u64 {
+            now = base + Duration::from_millis(2 * round);
+            for _ in 0..16 {
+                ext.on_packet_sent(counter, DATA_LEN, FrameKind::Data, now);
+                counter += 1;
+            }
+            ext.on_ack(
+                &Ack {
+                    largest_counter: counter - 1,
+                    ack_delay_us: 0,
+                    ecn_ce: false,
+                    received: u64::MAX,
+                },
+                now + Duration::from_millis(1),
+            );
+        }
+        assert!(
+            ext.bbr.as_ref().expect("bbr is enabled").full_bw_reached(),
+            "STARTUP must declare the path full"
+        );
+        assert_eq!(ext.bbr_stats().expect("bbr is enabled").inflight, 0);
+        now + Duration::from_millis(1)
+    }
+
+    fn loss_limited(ext: &PeerExtension) -> bool {
+        ext.bbr.as_ref().expect("bbr is enabled").loss_limited()
+    }
+
+    /// Drives the controller into a loss-limited window.
+    ///
+    /// The clean plateau is followed by a faster exchange (so `2 * BDP` lifts
+    /// above the bound), then by a lost burst that cuts `inflight_hi`. The cut
+    /// clamps `cwnd` to the new bound, so the gain cycle is walked with the
+    /// watchdog until `PROBE_UP` may exceed it again — the only state in which
+    /// the window holds a loss-derived limit.
+    fn reach_loss_limited(ext: &mut PeerExtension, base: Instant) -> Instant {
+        let mut now = reach_full_bw(ext, base);
+        assert!(!loss_limited(ext), "a clean plateau is not loss limited");
+
+        let mut counter = 400u64;
+        now += Duration::from_millis(1);
+        for _ in 0..16 {
+            ext.on_packet_sent(counter, DATA_LEN, FrameKind::Data, now);
+            counter += 1;
+        }
+        ext.on_ack(
+            &Ack {
+                largest_counter: counter - 1,
+                ack_delay_us: 0,
+                ecn_ce: false,
+                received: u64::MAX,
+            },
+            now + Duration::from_micros(500),
+        );
+
+        now += Duration::from_millis(1);
+        for _ in 0..32 {
+            ext.on_packet_sent(counter, DATA_LEN, FrameKind::Data, now);
+            counter += 1;
+        }
+        for lost in counter - 32..counter {
+            ext.bbr
+                .as_mut()
+                .expect("bbr is enabled")
+                .on_loss(lost, now + Duration::from_micros(100));
+        }
+        assert!(
+            ext.bbr_stats().expect("bbr is enabled").inflight_hi < u64::MAX,
+            "the burst must cut the loss bound"
+        );
+
+        let mut steps = 0;
+        while !loss_limited(ext) {
+            assert!(
+                steps < 8,
+                "PROBE_UP must let the window exceed the loss bound"
+            );
+            now += Duration::from_millis(1);
+            ext.on_timer(now);
+            steps += 1;
+        }
+        now
+    }
+
+    #[test]
+    fn bbr_gate_ignores_a_startup_window() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        assert!(!ext.bbr.as_ref().expect("bbr is enabled").full_bw_reached());
+
+        let packets = data_packets(8);
+        let inflight = charge_inflight(&mut ext, 8, base);
+        let window = ext.bbr_stats().expect("bbr is enabled").cwnd;
+        assert!(
+            inflight >= window,
+            "in-flight {inflight} must already exceed the window {window}"
+        );
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+
+        // `STARTUP` is still probing the path: only the pacer applies.
+        let mut batch = BbrBatch::new();
+        assert_eq!(
+            ext.bbr_drain_into(base + Duration::from_secs(1), 16, &mut batch),
+            packets.len()
+        );
+        assert_eq!(
+            batch.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            packets
+        );
+        assert!(ext.bbr_queue.slots.is_empty());
+    }
+
+    #[test]
+    fn bbr_gate_ignores_a_clean_plateau() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        let now = reach_full_bw(&mut ext, base);
+        assert!(!loss_limited(&ext), "no loss cut reached the controller");
+
+        let packets = data_packets(6);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+        fill_window(&mut ext, 1000, now);
+        assert!(
+            ext.bbr_stats().expect("bbr is enabled").inflight > effective_cwnd(&ext),
+            "the window is exhausted"
+        );
+
+        // The window is not a loss response here, so it must not hold the
+        // queue back: the pacer has already limited the rate.
+        let mut batch = BbrBatch::new();
+        assert_eq!(
+            ext.bbr_drain_into(now + Duration::from_secs(1), 16, &mut batch),
+            packets.len()
+        );
+        assert_eq!(
+            batch.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            packets
+        );
+        assert!(ext.bbr_queue.slots.is_empty());
+    }
+
+    #[test]
+    fn bbr_gate_applies_after_a_loss_cut() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        let now = reach_loss_limited(&mut ext, base);
+
+        let packets = data_packets(4);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+        fill_window(&mut ext, 1000, now);
+        assert!(
+            ext.bbr_stats().expect("bbr is enabled").inflight > effective_cwnd(&ext),
+            "the window is exhausted"
+        );
+
+        let later = now + Duration::from_secs(1);
+        let mut batch = BbrBatch::new();
+        assert_eq!(ext.bbr_drain_into(later, 8, &mut batch), 1);
+        assert_eq!(batch.iter().next(), Some(packets[0].as_slice()));
+        // The grace packet is not repeated: without feedback the window holds.
+        assert_eq!(
+            ext.bbr_drain_into(later + Duration::from_millis(1), 8, &mut batch),
+            0
+        );
+        assert_eq!(ext.bbr_queue.slots.len(), 3);
+    }
+
+    #[test]
+    fn bbr_cwnd_limits_the_drained_batch() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        let now = reach_loss_limited(&mut ext, base);
+        let packets = data_packets(6);
+        // Two datagrams of allowance, plus less than one datagram of slack.
+        let fill = usize::try_from(effective_cwnd(&ext) / DATA_LEN as u64).unwrap() - 2;
+        charge_inflight_from(&mut ext, 1000, fill, now);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+
+        let mut batch = BbrBatch::new();
+        assert_eq!(
+            ext.bbr_drain_into(now + Duration::from_secs(1), 8, &mut batch),
+            2
+        );
+        assert_eq!(batch.len(), 2);
+        assert_eq!(batch.iter().next(), Some(packets[0].as_slice()));
+        assert_eq!(
+            batch.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            packets[..2]
+        );
+        assert_eq!(ext.bbr_queue.slots.len(), 4);
+        assert_eq!(ext.bbr_queue.live_bytes(), 4 * DATA_LEN);
+    }
+
+    #[test]
+    fn bbr_cwnd_releases_at_least_one_packet_when_full() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        let now = reach_loss_limited(&mut ext, base);
+        let packets = data_packets(4);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+        fill_window(&mut ext, 1000, now);
+
+        let later = now + Duration::from_secs(1);
+        let mut batch = BbrBatch::new();
+        assert_eq!(ext.bbr_drain_into(later, 8, &mut batch), 1);
+        assert_eq!(batch.iter().next(), Some(packets[0].as_slice()));
+        assert_eq!(
+            ext.bbr_drain_into(later + Duration::from_millis(1), 8, &mut batch),
+            0
+        );
+        assert_eq!(ext.bbr_queue.slots.len(), 3);
+    }
+
+    #[test]
+    fn bbr_ack_reenables_the_cwnd_blocked_queue() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        let now = reach_loss_limited(&mut ext, base);
+        let packets = data_packets(4);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+
+        let fill = usize::try_from(effective_cwnd(&ext) / DATA_LEN as u64).unwrap() + 1;
+        charge_inflight_from(&mut ext, 1000, fill, now);
+        let largest = 1000 + fill as u64 - 1;
+
+        let later = now + Duration::from_secs(1);
+        let mut batch = BbrBatch::new();
+        assert_eq!(ext.bbr_drain_into(later, 8, &mut batch), 1);
+        assert_eq!(
+            ext.bbr_drain_into(later + Duration::from_millis(1), 8, &mut batch),
+            0
+        );
+
+        // An ACK drains the whole window, so the rest leaves in queue order
+        // without waiting for the stall timeout.
+        ext.on_ack(
+            &Ack {
+                largest_counter: largest,
+                ack_delay_us: 0,
+                ecn_ce: false,
+                received: u64::MAX,
+            },
+            later + Duration::from_millis(2),
+        );
+        assert_eq!(
+            ext.bbr_drain_into(later + Duration::from_millis(2), 8, &mut batch),
+            3
+        );
+        assert_eq!(
+            batch.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            packets[1..]
+        );
+        assert!(ext.bbr_queue.slots.is_empty());
+        assert_eq!(ext.bbr_queue.live_bytes(), 0);
+    }
+
+    #[test]
+    fn bbr_cwnd_stall_timeout_bypasses_the_window() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        let now = reach_loss_limited(&mut ext, base);
+        let packets = data_packets(4);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+        fill_window(&mut ext, 1000, now);
+
+        let blocked = now + Duration::from_secs(1);
+        let mut batch = BbrBatch::new();
+        assert_eq!(ext.bbr_drain_into(blocked, 8, &mut batch), 1);
+        assert_eq!(
+            ext.bbr_drain_into(blocked + Duration::from_millis(4), 8, &mut batch),
+            0
+        );
+        // No ACK arrived: after the timeout the window stops holding the queue.
+        assert_eq!(
+            ext.bbr_drain_into(blocked + BBR_CWND_STALL_TIMEOUT, 8, &mut batch),
+            3
+        );
+        assert_eq!(
+            batch.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            packets[1..]
+        );
+        assert!(ext.bbr_queue.slots.is_empty());
+    }
+
+    #[test]
+    fn bbr_cwnd_stall_ignores_a_pacer_hold() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        let now = reach_loss_limited(&mut ext, base);
+        let packets = data_packets(4);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+        // Charging the whole window at `now` also overspends the pacer.
+        fill_window(&mut ext, 1000, now);
+
+        // At `now` the pacer, not the window, is the limiter: no packet leaves
+        // and the stall timer must stay disarmed.
+        let mut batch = BbrBatch::new();
+        assert_eq!(ext.bbr_drain_into(now, 8, &mut batch), 0);
+        assert_eq!(ext.bbr_queue.cwnd_blocked_since, None);
+
+        // Once pacing allows, the window is seen as the limiter and the grace
+        // packet goes out.
+        let later = now + Duration::from_secs(1);
+        assert_eq!(ext.bbr_drain_into(later, 8, &mut batch), 1);
+        assert_eq!(ext.bbr_queue.cwnd_blocked_since, Some(later));
+    }
+
+    #[test]
+    fn bbr_cwnd_gate_uses_the_ack_interval_floor() {
+        let base = Instant::now();
+        let mut ext = bbr_acked_ext(base);
+        let now = reach_loss_limited(&mut ext, base);
+
+        let stats = ext.bbr_stats().expect("bbr is enabled");
+        let floor = (stats.pacing_rate * 5 / 1000).min(4 * 1024 * 1024);
+        assert!(
+            floor > stats.cwnd,
+            "the floor must dominate: cwnd {} floor {floor}",
+            stats.cwnd
+        );
+
+        // Fill the modelled window: a raw-cwnd gate would hold the queue now.
+        let fill = usize::try_from(stats.cwnd / DATA_LEN as u64).unwrap() + 1;
+        charge_inflight_from(&mut ext, 1000, fill, now);
+        let inflight = ext.bbr_stats().expect("bbr is enabled").inflight;
+        assert!(inflight >= stats.cwnd, "the raw window is full");
+
+        let room = effective_cwnd(&ext).saturating_sub(inflight);
+        let count = usize::try_from(room / DATA_LEN as u64).unwrap().min(20);
+        assert!(count > 0, "the floor must leave room for the batch");
+        let packets = data_packets(count);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+
+        // `effective_cwnd - inflight` is the floor minus the window, which
+        // fits the whole batch: the ACK cadence does not throttle the queue.
+        let mut batch = BbrBatch::new();
+        assert_eq!(
+            ext.bbr_drain_into(now + Duration::from_secs(1), 32, &mut batch),
+            count
+        );
+        assert!(ext.bbr_queue.slots.is_empty());
+        assert_eq!(
+            batch.iter().map(<[u8]>::to_vec).collect::<Vec<_>>(),
+            packets
+        );
+    }
+
+    #[test]
+    fn bbr_without_ack_caps_paces_without_a_window() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        let later = base + Duration::from_secs(1);
+        let packets = data_packets(8);
+        for packet in &packets {
+            assert!(ext.bbr_enqueue(packet));
+        }
+
+        let mut batch = BbrBatch::new();
+        assert_eq!(ext.bbr_drain_into(later, 8, &mut batch), 8);
+        assert!(ext.bbr_queue.slots.is_empty());
     }
 
     #[test]

@@ -48,6 +48,19 @@ const HI_GROWTH_DIVISOR: u64 = 64;
 const RATE_SANITY_FACTOR: u64 = 4;
 /// Largest peer-reported ACK delay accepted from the wire.
 const MAX_ACK_DELAY_NS: u64 = NS_PER_SEC;
+/// Time span of paced bytes the congestion window must always cover.
+///
+/// The peer acknowledges every 8..=16 datagrams or after 2..=5 ms, so on a
+/// short RTT the modelled window (`2 * BDP`) can hold less than one ACK
+/// interval of paced traffic. A sender restricted to that window goes idle
+/// between ACKs, and its rate becomes a function of the peer's ACK timer plus
+/// our own ACK wake-up latency (the idle poll ceiling) instead of the path.
+/// The floor keeps one worst-case ACK interval in flight and removes that
+/// dependency.
+const CWND_FLOOR_NS: u64 = 5_000_000;
+/// Upper bound for the floor, so a bogus pacing rate cannot lift it without
+/// limit.
+const CWND_FLOOR_MAX: u64 = 4 * 1024 * 1024;
 
 fn dur_ns(duration: Duration) -> u64 {
     duration.as_nanos().min(u128::from(u64::MAX)) as u64
@@ -234,9 +247,55 @@ impl Bbr {
         self.inflight
     }
 
+    /// Congestion window used to gate transmission.
+    ///
+    /// Returns [`Bbr::cwnd`] or the bytes paced in one worst-case ACK
+    /// interval ([`CWND_FLOOR_NS`]), whichever is larger:
+    ///
+    /// ```text
+    /// effective = max(cwnd, min(pacing_rate * 5 ms, 4 MiB))
+    /// ```
+    ///
+    /// The modelled window is `2 * BDP`, which on a small RTT is smaller than
+    /// the amount the pacer can emit between two ACKs. Gating on it directly
+    /// would leave the sender idle for the rest of every ACK interval and tie
+    /// throughput to the peer's ACK cadence. The floor is capped at 4 MiB so
+    /// that a bogus rate sample cannot open the window without bound.
+    ///
+    /// [`Bbr::cwnd`] and [`BbrStats::cwnd`] keep reporting the modelled
+    /// window, so statistics still describe the controller itself.
+    pub fn effective_cwnd(&self) -> u64 {
+        let floor =
+            u128::from(self.pacing_rate) * u128::from(CWND_FLOOR_NS) / u128::from(NS_PER_SEC);
+        let floor = u64::try_from(floor).unwrap_or(u64::MAX).min(CWND_FLOOR_MAX);
+        self.cwnd.max(floor)
+    }
+
     /// Current mode of the state machine.
     pub fn mode(&self) -> Mode {
         self.mode
+    }
+
+    /// Whether `STARTUP` already declared the path full.
+    ///
+    /// Until then the window is a growth artefact rather than a measurement of
+    /// the path: it is derived from an estimate that is still doubling every
+    /// round, and gating transmission on it throttles the very ACK stream that
+    /// feeds the estimate. Callers that use the window as a send limit (rather
+    /// than as a statistic) must wait for this flag.
+    pub fn full_bw_reached(&self) -> bool {
+        self.full_bw_reached
+    }
+
+    /// Whether the path has already signalled congestion.
+    ///
+    /// `inflight_hi` starts unbounded ([`u64::MAX`]) and is only lowered by a
+    /// loss or ECN response, so `inflight_hi < cwnd` means the bound is
+    /// measured and the window is currently probing above it. On a clean path
+    /// the flag stays `false` and the window carries no information the pacer
+    /// does not already have.
+    pub fn loss_limited(&self) -> bool {
+        self.inflight_hi < self.cwnd
     }
 
     /// Whether one more datagram of `len` bytes may be sent right now.
@@ -927,5 +986,150 @@ mod tests {
 
         assert_eq!(bbr.inflight(), 0);
         assert_eq!(bbr.stats().delivered, 1400);
+    }
+
+    #[test]
+    fn loss_limited_is_false_until_the_path_signals_congestion() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        assert!(!bbr.loss_limited(), "inflight_hi starts unbounded");
+
+        // A clean, acknowledged round sets a bandwidth estimate and a window
+        // but never touches the loss bound.
+        for counter in 0..8u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        bbr.on_ack(
+            &Ack::new(7, u64::MAX, Duration::ZERO, false),
+            base + Duration::from_millis(1),
+        );
+        assert_eq!(bbr.inflight_hi, u64::MAX);
+        assert!(!bbr.loss_limited());
+    }
+
+    #[test]
+    fn loss_limited_follows_the_cut_upper_bound() {
+        let mut bbr = Bbr::new(BbrConfig::default());
+        let cwnd = bbr.cwnd();
+
+        bbr.inflight_hi = cwnd - 1;
+        assert!(bbr.loss_limited(), "a bound below the window limits it");
+        bbr.inflight_hi = cwnd;
+        assert!(!bbr.loss_limited());
+        bbr.inflight_hi = cwnd + 1;
+        assert!(!bbr.loss_limited());
+        bbr.inflight_hi = u64::MAX;
+        assert!(!bbr.loss_limited());
+    }
+
+    #[test]
+    fn loss_cut_lowers_the_bound_and_keeps_the_window_clamped() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        for counter in 0..8u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        bbr.on_ack(
+            &Ack::new(7, u64::MAX, Duration::ZERO, false),
+            base + Duration::from_millis(1),
+        );
+        assert_eq!(bbr.inflight_hi, u64::MAX);
+
+        // A whole round lost in STARTUP is a congestion signal.
+        for counter in 8..16u64 {
+            bbr.on_send(counter, 1400, base + Duration::from_millis(2));
+        }
+        for counter in 8..16u64 {
+            bbr.on_loss(counter, base + Duration::from_millis(3));
+        }
+
+        assert!(bbr.inflight_hi < u64::MAX, "the cut must bound the pipe");
+        assert!(bbr.full_bw_reached(), "loss ends STARTUP");
+        // Every window update clamps `cwnd` to the bound, so the flag only
+        // becomes true again once PROBE_UP is allowed to exceed it.
+        assert_eq!(bbr.loss_limited(), bbr.inflight_hi < bbr.cwnd);
+        assert!(!bbr.loss_limited());
+    }
+
+    #[test]
+    fn full_bw_reached_exposes_the_startup_exit() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        assert!(!bbr.full_bw_reached());
+        assert!(!bbr.stats().full_bw_reached);
+
+        // One acknowledged round provides a bandwidth estimate.
+        for counter in 0..8u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        bbr.on_ack(
+            &Ack::new(7, u64::MAX, Duration::ZERO, false),
+            base + Duration::from_millis(1),
+        );
+        assert!(!bbr.full_bw_reached(), "STARTUP is still probing");
+
+        // A burst of losses in STARTUP ends the probing phase.
+        for counter in 8..16u64 {
+            bbr.on_send(counter, 1400, base + Duration::from_millis(2));
+        }
+        for counter in 8..16u64 {
+            bbr.on_loss(counter, base + Duration::from_millis(3));
+        }
+        assert!(bbr.full_bw_reached());
+        assert!(bbr.stats().full_bw_reached);
+    }
+
+    #[test]
+    fn effective_cwnd_keeps_a_window_above_the_floor() {
+        let bbr = Bbr::new(BbrConfig::default());
+        // 4 * 1400 bytes over a 50 ms initial RTT: the floor is 560 bytes,
+        // far below the modelled window.
+        assert_eq!(bbr.pacing_rate(), 112_000);
+        assert!(bbr.cwnd() > bbr.pacing_rate() * CWND_FLOOR_NS / NS_PER_SEC);
+        assert_eq!(bbr.effective_cwnd(), bbr.cwnd());
+    }
+
+    #[test]
+    fn effective_cwnd_covers_one_ack_interval_on_a_short_rtt() {
+        let bbr = Bbr::new(BbrConfig {
+            initial_rtt: Duration::from_millis(1),
+            ..BbrConfig::default()
+        });
+        // 5600 bytes per millisecond: one 5 ms ACK interval is 28 000 bytes.
+        assert_eq!(bbr.cwnd(), 5600);
+        assert_eq!(bbr.pacing_rate(), 5_600_000);
+        assert_eq!(bbr.effective_cwnd(), 28_000);
+        assert!(bbr.effective_cwnd() > bbr.cwnd());
+    }
+
+    #[test]
+    fn effective_cwnd_floor_is_capped() {
+        let bbr = Bbr::new(BbrConfig {
+            initial_rtt: Duration::from_micros(1),
+            ..BbrConfig::default()
+        });
+        assert!(bbr.pacing_rate() * CWND_FLOOR_NS / NS_PER_SEC > CWND_FLOOR_MAX);
+        assert_eq!(bbr.effective_cwnd(), CWND_FLOOR_MAX);
+    }
+
+    #[test]
+    fn effective_cwnd_follows_the_pacing_rate_after_an_ack() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig {
+            initial_rtt: Duration::from_millis(1),
+            ..BbrConfig::default()
+        });
+        for counter in 0..8u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        bbr.on_ack(
+            &Ack::new(7, u64::MAX, Duration::ZERO, false),
+            base + Duration::from_millis(1),
+        );
+        let stats = bbr.stats();
+        let floor = stats.pacing_rate * CWND_FLOOR_NS / NS_PER_SEC;
+        assert!(floor > stats.cwnd);
+        assert_eq!(bbr.effective_cwnd(), floor);
+        assert_eq!(stats.cwnd, bbr.cwnd());
     }
 }
