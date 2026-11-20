@@ -1,8 +1,8 @@
 %global debug_package %{nil}
-%global upstream_version 0.3.0
+%global upstream_version 0.4.0
 
 Name:           umbrawg-dkms
-Version:        0.3.0
+Version:        0.4.0
 Release:        1%{?dist}
 Epoch:          1
 URL:            https://github.com/ivlev-dev/umbrawg
@@ -86,6 +86,9 @@ exit 0
 %{_usrsrc}/umbrawg-%{version}
 
 %changelog
+* Fri Nov 20 2026 Yuri Egorov <ye@umbra.org> - 0.4.0-1
+- Export BBR/FEC metrics, keypair epochs, underlay MTU policy and cwnd gating
+
 * Fri Nov 20 2026 Yuri Egorov <ye@umbra.org> - 0.3.0-1
 - Add BBRv3 pacing and Reed-Solomon FEC with CAPS/ACK feedback.
 

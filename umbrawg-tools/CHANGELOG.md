@@ -3,6 +3,20 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.0] — 2026-11-20
+
+### Добавлено
+
+- `underlay-mtu` в `uwg show/set`: MTU пути, от которого считаются бюджет
+  FEC-шарда и MTU интерфейса при включённом FEC.
+- `uwg show <if> bbr-stats` (`mode`, `cwnd`, `inflight`, `pacing_rate`,
+  `btl_bw`, `min_rtt_ns`, `round_lost`, `peers`) и `fec-stats`
+  (`blocks_encoded`, `shards_sent`, `blocks_decoded`, `packets_recovered`,
+  `decode_fail`, `dropped_bounds`, `dropped_disabled`).
+- Разбор новых netlink-атрибутов `UWGDEVICE_A_UNDERLAY_MTU` (40),
+  `UWGDEVICE_A_BBR_STATS` (39) и `UWGDEVICE_A_FEC_STATS` (38) в
+  `netlink-packet-umbrawg`.
+
 ## [0.3.0] — 2026-11-20
 
 ### Добавлено

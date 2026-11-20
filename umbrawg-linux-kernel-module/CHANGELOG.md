@@ -3,6 +3,29 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.0] — 2026-11-20
+
+### Безопасность обфускации
+
+- Нулевой ключ header protection выключает защиту (RCU-указатель NULL).
+- Multicast-группа unknown-peer требует `CAP_NET_ADMIN`; уведомления
+  ограничены per-device rate limit.
+- Окно random trailer ограничено MTU подложки, `DisableCookies` сохраняет
+  per-IP rate limit инициаций.
+
+### BBR и FEC
+
+- Счётчики FEC и вложенные атрибуты `UWGDEVICE_A_FEC_STATS`/`BBR_STATS`
+  в GET_DEVICE.
+- Эпоха keypair в BBR-ринге: смена keypair очищает ring, ACK чужого
+  keypair игнорируется.
+- `UWGDEVICE_A_UNDERLAY_MTU` (40): при включённом FEC MTU интерфейса
+  уменьшается так, чтобы шард помещался в датаграмму, и восстанавливается
+  при выключении.
+- `cwnd` применяется как ACK-clocked гейт после loss-cut; floor
+  `pacing_rate × 5 мс` и аварийный таймаут 5 мс.
+- Self-tests расширены (FEC/EXT/BBR), добавлена KUnit-suite для FEC/ext.
+
 ## [0.3.0] — 2026-11-20
 
 ### BBRv3 и FEC

@@ -3,6 +3,31 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.0] — 2026-11-20
+
+### Безопасность обфускации
+
+- Нулевой `HeaderProtectionKey` трактуется как выключенная защита.
+- Наблюдаемое окно UDP-трейлера ограничено 2 КиБ, чтобы пир не раздувал
+  исходящий трафик.
+- `DisableCookies` больше не отключает rate limit инициаций.
+
+### BBR и FEC
+
+- Счётчики FEC (`FecStats`) и `Device::fec_stats`, `DecodedBlock::recovered`.
+- BBR-ринг привязан к keypair: ACK старого keypair игнорируется.
+- Лимит FEC-шарда и MTU TUN выводятся из `UMBRAWG_UNDERLAY_MTU`; датаграмма
+  шарда не превышает бюджет подложки.
+- `cwnd` применяется как ACK-clocked гейт после loss-cut
+  (`full_bw_reached && inflight_hi < cwnd`) с floor `pacing_rate × 5 мс`
+  и аварийным таймаутом, чтобы не создавать sleep-потолок.
+- Детерминированный фаззинг FEC-декодера (20 000 итераций).
+
+### Совместимость
+
+- `DecodedBlock::recovered` — новое публичное поле (для 0.x допустимо,
+  но ломает struct-literal у внешних потребителей `umbrawg-fec`).
+
 ## [0.3.0] — 2026-11-20
 
 ### BBRv3 и FEC

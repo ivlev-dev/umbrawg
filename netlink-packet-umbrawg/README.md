@@ -189,7 +189,7 @@ so use the preflight when you need a trustworthy result.
 
 Release mechanics:
 
-- the tag has to match `v<version>` from `Cargo.toml` (`v0.3.0` right now);
+- the tag has to match `v<version>` from `Cargo.toml` (`v0.4.0` right now);
   otherwise the `версия` job fails before anything is built;
 - `workflow_dispatch` takes an optional `version` input for a manual dry check;
 - no secrets are required: nothing is pushed to crates.io or the AUR. Publishing

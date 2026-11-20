@@ -1,3 +1,16 @@
+umbrawg-linux-kmod (1:0.4.0-1) unstable; urgency=medium
+
+  * Export BBR/FEC counters and BBR statistics over netlink.
+  * Bind BBR ring state to the keypair and ignore ACKs from an old keypair.
+  * Derive FEC shard budget and TUN MTU from the configured underlay MTU.
+  * Apply cwnd as a loss-informed ACK-clocked gate.
+  * Treat an all-zero header protection key as disabled.
+  * Restrict unknown-peer multicast to CAP_NET_ADMIN and rate-limit events.
+  * Cap the learned UDP window and keep the initiation rate limit with cookies off.
+  * Add FEC/extension self-tests and a KUnit suite.
+
+ -- Alex Ivlev <ai@itegroup.ru>  Fri, 20 Nov 2026 21:00:00 +0300
+
 umbrawg-linux-kmod (1:0.3.0-1) unstable; urgency=medium
 
   * Add BBRv3 pacing and Reed-Solomon FEC for kernel data-plane.

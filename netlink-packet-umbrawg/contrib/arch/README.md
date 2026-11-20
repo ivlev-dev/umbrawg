@@ -6,7 +6,7 @@ AUR-совместимые заготовки пакета Rust-крейта `ne
 
 | Пакет | Каталог | Тип |
 |---|---|---|
-| `rust-netlink-packet-umbrawg` | `rust-netlink-packet-umbrawg/` | стабильный, source — архив тега `v0.3.0` |
+| `rust-netlink-packet-umbrawg` | `rust-netlink-packet-umbrawg/` | стабильный, source — архив тега `v0.4.0` |
 | `rust-netlink-packet-umbrawg-git` | `rust-netlink-packet-umbrawg-git/` | VCS, `#branch=main` |
 
 ## Зачем пакет
@@ -35,7 +35,7 @@ AUR-совместимые заготовки пакета Rust-крейта `ne
 `-git`-пакета `pkgver` выглядит как `0.3.0.r12.g1a2b3c4`, и такой суффикс не
 является корректной semver-версией, с которой cargo умеет сопоставлять
 зависимость `netlink-packet-umbrawg = "0.3"`. Поэтому для `-git` каталог
-называется по версии из `Cargo.toml` (сейчас `0.3.0`).
+называется по версии из `Cargo.toml` (сейчас `0.4.0`).
 
 ## Использование
 
@@ -74,13 +74,13 @@ ls /tmp/pkg/usr/share/cargo/registry/netlink-packet-umbrawg-*/
 создать тестовый проект с `netlink-packet-umbrawg = "0.3"`,
 `[source.crates-io] replace-with = "vendored-sources"`,
 `directory = .../usr/share/cargo/registry` и выполнить `cargo build --offline`.
-Проверено на хосте: `rust-netlink-packet-umbrawg-git` (`0.3.0`) собирается,
+Проверено на хосте: `rust-netlink-packet-umbrawg-git` (`0.4.0`) собирается,
 `cargo` находит крейт в каталоге-реестре из пакета и собирает тестовый
 бинарник с `cargo build --offline` при подмене crates.io на этот каталог.
 
 ## Публикация в AUR
 
-1. Поставить тег `v0.3.0`.
+1. Поставить тег `v0.4.0`.
 2. В `rust-netlink-packet-umbrawg/` обновить `pkgver`/`pkgrel`, затем:
 
    ```sh

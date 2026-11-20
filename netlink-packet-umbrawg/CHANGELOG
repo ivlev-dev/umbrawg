@@ -1,5 +1,10 @@
 # Changelog
-## [Unreleased]
+## [0.4.0] — 2026-11-20
+### Added
+ - `UWGDEVICE_A_UNDERLAY_MTU` (40) device attribute.
+ - `UWGDEVICE_A_FEC_STATS` (38) and `UWGDEVICE_A_BBR_STATS` (39) nested
+   attributes with `FecStats`/`BbrStats` types.
+
 ### Fixes
  - Fuzzing (`cargo-fuzz` 0.13, 10 minutes per target) found a panic in
    `UmbrawgAllowedIpAttr::parse`: an empty `UWGALLOWEDIP_A_CIDR_MASK` payload

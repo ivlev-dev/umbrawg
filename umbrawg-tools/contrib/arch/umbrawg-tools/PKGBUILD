@@ -1,9 +1,9 @@
 # Maintainer: Yuri Egorov <ye@umbra.org>
 pkgname=umbrawg-tools
-pkgver=0.2.0
+pkgver=0.4.0
 pkgrel=1
 _netlink_pkg=netlink-packet-umbrawg
-_netlink_ver=0.3.0
+_netlink_ver=0.4.0
 pkgdesc="UmbraWG command line tools: uwg and uwg-quick"
 arch=('x86_64' 'aarch64')
 url="https://github.com/ivlev-dev/umbrawg"

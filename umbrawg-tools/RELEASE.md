@@ -7,26 +7,26 @@
 
 | Репозиторий | Пакет(ы) | Версия | Тег |
 |---|---|---|---|
-| `netlink-packet-umbrawg` | крейт, `rust-netlink-packet-umbrawg` | `0.3.0` | `v0.3.0` |
-| `umbrawg-tools` | `uwg`, `uwg-quick`, `umbrawg-tools` | `0.3.0` | `v0.3.0` |
-| `umbrawg-rs` | демон `umbrawg`, `umbrawg-daemon` | `0.3.0` | `v0.3.0` |
-| `umbrawg-linux-kernel-module` | DKMS-модуль | `0.3.0` | `v0.3.0` |
+| `netlink-packet-umbrawg` | крейт, `rust-netlink-packet-umbrawg` | `0.4.0` | `v0.4.0` |
+| `umbrawg-tools` | `uwg`, `uwg-quick`, `umbrawg-tools` | `0.4.0` | `v0.4.0` |
+| `umbrawg-rs` | демон `umbrawg`, `umbrawg-daemon` | `0.4.0` | `v0.4.0` |
+| `umbrawg-linux-kernel-module` | DKMS-модуль | `0.4.0` | `v0.4.0` |
 
-Каноническая строка версии модуля — `0.3.0`. Пакетные менеджеры
-нормализуют её: Arch и RPM используют `0.3.0`, Debian — upstream `0.3.0`
-без revision. `modinfo` показывает `0.3.0`.
+Каноническая строка версии модуля — `0.4.0`. Пакетные менеджеры
+нормализуют её: Arch и RPM используют `0.4.0`, Debian — upstream `0.4.0`
+без revision. `modinfo` показывает `0.4.0`.
 
 ## Порядок тегов
 
 Теги ставятся и пушатся строго по порядку:
 
-1. `netlink-packet-umbrawg` — `v0.3.0`.
-2. `umbrawg-tools` — `v0.3.0` (зависит от netlink 0.3.0 и его lock).
-3. `umbrawg-rs` — `v0.3.0`.
-4. `umbrawg-linux-kernel-module` — `v0.3.0`.
+1. `netlink-packet-umbrawg` — `v0.4.0`.
+2. `umbrawg-tools` — `v0.4.0` (зависит от netlink 0.4.0 и его lock).
+3. `umbrawg-rs` — `v0.4.0`.
+4. `umbrawg-linux-kernel-module` — `v0.4.0`.
 
 Причина: `umbrawg-tools/Cargo.lock` собран против `netlink-packet-umbrawg`
-0.3.0. Если сначала выпустить tools, CI возьмёт netlink из `main` со старой
+0.4.0. Если сначала выпустить tools, CI возьмёт netlink из `main` со старой
 версией и `cargo fetch --locked` упадёт.
 
 ## Перед тегом (в каждом репозитории)
@@ -69,7 +69,7 @@ src/tests/netlink-parity.sh
 
 1. `cargo publish -p netlink-packet-umbrawg` из `netlink-packet-umbrawg`.
 2. Для публикации `uwg`/`uwg-quick` сначала опубликуй внутренние крейты
-   `umbrawg-config` и `umbrawg-ctl` (версии `0.3.0`), затем `uwg` и
+   `umbrawg-config` и `umbrawg-ctl` (версии `0.4.0`), затем `uwg` и
    `uwg-quick`. Зависимости уже содержат `version` + `path`.
 3. Для `umbrawg-rs` публикация не планируется: демон распространяется
    пакетами и tarball'ами.
@@ -108,7 +108,7 @@ scripts/package/build-rpm.sh
 
 Для deb модуля версия берётся из `debian/changelog` и подставляется в
 `dkms.conf`/`Makefile` в `debian/rules`; каталог один —
-`/usr/src/umbrawg-0.3.0`.
+`/usr/src/umbrawg-0.4.0`.
 
 ## Проверка релиза
 
@@ -135,8 +135,8 @@ scripts/package/build-rpm.sh
   TUN MTU 1420 датаграмма 1512 Б не влезает — включается IP-фрагментация
   (TCP падает в ~2.4 раза). Демон предупреждает; для таких профилей нужен
   TUN MTU ≤1380 или underlay 9000. Oversized-кадров GSO не даёт (≤1514).
-- **Версия модуля**: каноническая `0.3.0`; `Makefile`/`dkms.conf`
-  по умолчанию содержат `0.3.0` и переопределяются упаковкой. Реши, нужно ли
+- **Версия модуля**: каноническая `0.4.0`; `Makefile`/`dkms.conf`
+  по умолчанию содержат `0.4.0` и переопределяются упаковкой. Реши, нужно ли
   синхронизировать исходники.
 - **AUR**: нужен аккаунт и SSH-ключ; публикация через `scripts/aur-publish.sh`
   после тегов и `updpkgsums`.
