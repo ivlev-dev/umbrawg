@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use rand_core::RngCore;
 use umbrawg_cc::{Ack as BbrAck, Bbr, BbrConfig, BbrStats};
-use umbrawg_fec::{EncodedBlock, FecConfig, FecDecoder, FecEncoder, FecShard};
+use umbrawg_fec::{
+    DecodedBlock, EncodedBlock, FecConfig, FecDecoder, FecEncoder, FecError, FecShard,
+};
 use umbrawg_proto::control::{Ack, Caps, CapsFlags, ControlKind, FecShardHeader};
 
 /// Maximum number of CAPS frames sent to one peer per handshake.
@@ -195,6 +197,25 @@ impl FecMode {
             Self::Fixed { k, m } => FecConfig::new(k, m).ok(),
         }
     }
+}
+
+/// Per-peer FEC accounting exposed for diagnostics and future exports.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FecStats {
+    /// Blocks emitted by the encoder, including partial flushes.
+    pub blocks_encoded: u64,
+    /// Shards handed to the transport for transmission.
+    pub shards_sent: u64,
+    /// Blocks released by the decoder.
+    pub blocks_decoded: u64,
+    /// Data shards restored from parity during decoding.
+    pub packets_recovered: u64,
+    /// Shards rejected by the decoder or by header validation.
+    pub decode_fail: u64,
+    /// Shards rejected because their header or geometry was out of bounds.
+    pub dropped_bounds: u64,
+    /// Shards dropped because FEC was not negotiated or is disabled.
+    pub dropped_disabled: u64,
 }
 
 /// Device-wide extension configuration.
@@ -754,6 +775,7 @@ pub(crate) struct PeerExtension {
     fec_tx: Option<FecEncoder>,
     fec_rx: Option<FecDecoder>,
     fec_active: bool,
+    fec_stats: FecStats,
     loss: LossWindow,
     adaptive_clean_since: Option<Instant>,
     fec_deadline: Option<Instant>,
@@ -786,6 +808,7 @@ impl PeerExtension {
             fec_tx: None,
             fec_rx: None,
             fec_active: false,
+            fec_stats: FecStats::default(),
             loss: LossWindow::default(),
             adaptive_clean_since: None,
             fec_deadline: None,
@@ -872,6 +895,7 @@ impl PeerExtension {
             .as_mut()
             .and_then(|encoder| encoder.flush_with_rng(&mut self.jitter));
         if let Some(block) = block {
+            self.fec_stats.blocks_encoded = self.fec_stats.blocks_encoded.saturating_add(1);
             self.queue_fec_frames(&block);
         }
         self.fec_deadline = None;
@@ -978,7 +1002,10 @@ impl PeerExtension {
             .as_mut()
             .map_or(Ok(None), |encoder| encoder.push_with_rng(packet, jitter));
         match &result {
-            Ok(Some(_)) => self.fec_deadline = None,
+            Ok(Some(_)) => {
+                self.fec_deadline = None;
+                self.fec_stats.blocks_encoded = self.fec_stats.blocks_encoded.saturating_add(1);
+            }
             Ok(None) if self.fec_deadline.is_none() => {
                 let delay = self
                     .jitter
@@ -999,9 +1026,14 @@ impl PeerExtension {
         }
         self.fec_deadline = None;
         let jitter = &mut self.jitter;
-        self.fec_tx
+        let block = self
+            .fec_tx
             .as_mut()
-            .and_then(|encoder| encoder.flush_with_rng(jitter))
+            .and_then(|encoder| encoder.flush_with_rng(jitter));
+        if block.is_some() {
+            self.fec_stats.blocks_encoded = self.fec_stats.blocks_encoded.saturating_add(1);
+        }
+        block
     }
 
     pub(crate) fn fec_packet_limit(&self) -> Option<usize> {
@@ -1276,30 +1308,81 @@ impl PeerExtension {
         }
     }
 
+    /// Returns FEC accounting for this peer, or `None` when FEC is disabled.
+    pub(crate) fn fec_stats(&self) -> Option<FecStats> {
+        (self.config.fec != FecMode::Off).then_some(self.fec_stats)
+    }
+
+    /// Accounts for one shard handed to the transport.
+    pub(crate) fn note_fec_shard_sent(&mut self) {
+        self.fec_stats.shards_sent = self.fec_stats.shards_sent.saturating_add(1);
+    }
+
+    /// Accounts for a shard rejected before decoding (bad or out-of-bounds header).
+    pub(crate) fn note_fec_reject(&mut self) {
+        self.fec_stats.decode_fail = self.fec_stats.decode_fail.saturating_add(1);
+        self.fec_stats.dropped_bounds = self.fec_stats.dropped_bounds.saturating_add(1);
+    }
+
+    fn account_decoded(&mut self, blocks: &[DecodedBlock]) {
+        for block in blocks {
+            self.fec_stats.blocks_decoded = self.fec_stats.blocks_decoded.saturating_add(1);
+            let recovered = u64::try_from(block.recovered).unwrap_or(u64::MAX);
+            self.fec_stats.packets_recovered =
+                self.fec_stats.packets_recovered.saturating_add(recovered);
+        }
+    }
+
     pub(crate) fn fec_poll(&mut self, now: Instant) -> Vec<Vec<u8>> {
-        let Some(decoder) = self.fec_rx() else {
-            return Vec::new();
+        let blocks = {
+            let Some(decoder) = self.fec_rx() else {
+                return Vec::new();
+            };
+            decoder.poll(now)
         };
-        decoder
-            .poll(now)
-            .into_iter()
-            .flat_map(|block| block.packets)
-            .collect()
+        self.account_decoded(&blocks);
+        blocks.into_iter().flat_map(|block| block.packets).collect()
     }
 
     pub(crate) fn fec_decode(&mut self, shard: FecShard<'_>, now: Instant) -> Vec<Vec<u8>> {
-        let Some(decoder) = self.fec_rx() else {
-            return Vec::new();
+        let result = {
+            let Some(decoder) = self.fec_rx() else {
+                self.fec_stats.dropped_disabled = self.fec_stats.dropped_disabled.saturating_add(1);
+                return Vec::new();
+            };
+            decoder.push_at(shard, now)
         };
-        match decoder.push_at(shard, now) {
+        match result {
             Ok(blocks) => {
-                let packets: Vec<Vec<u8>> =
-                    blocks.into_iter().flat_map(|block| block.packets).collect();
-                packets
+                self.account_decoded(&blocks);
+                blocks.into_iter().flat_map(|block| block.packets).collect()
             }
-            Err(_) => Vec::new(),
+            Err(error) => {
+                self.fec_stats.decode_fail = self.fec_stats.decode_fail.saturating_add(1);
+                if is_bounds_error(error) {
+                    self.fec_stats.dropped_bounds = self.fec_stats.dropped_bounds.saturating_add(1);
+                }
+                Vec::new()
+            }
         }
     }
+}
+
+fn is_bounds_error(error: FecError) -> bool {
+    matches!(
+        error,
+        FecError::TooManyShards { .. }
+            | FecError::InvalidIndex { .. }
+            | FecError::InvalidShardLen { .. }
+            | FecError::ShardLenTooLarge { .. }
+            | FecError::PayloadLenMismatch { .. }
+            | FecError::InvalidPacketLen { .. }
+            | FecError::ConfigMismatch { .. }
+            | FecError::ShardLenMismatch { .. }
+            | FecError::ZeroDataShards
+            | FecError::ZeroParityShards
+            | FecError::PacketTooLarge { .. }
+    )
 }
 
 impl std::fmt::Debug for PeerExtension {
@@ -1876,6 +1959,115 @@ mod tests {
                 .len();
         }
         packets
+    }
+
+    #[test]
+    fn fec_encode_counters_track_full_and_partial_blocks() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        });
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+
+        assert!(ext.fec_push(&[1u8; 20], base).unwrap().is_none());
+        assert_eq!(ext.fec_stats().unwrap().blocks_encoded, 0);
+        let block = ext.fec_push(&[2u8; 20], base).unwrap().expect("full block");
+        assert_eq!(block.shards.len(), 3);
+        assert_eq!(ext.fec_stats().unwrap().blocks_encoded, 1);
+
+        assert!(ext.fec_push(&[3u8; 20], base).unwrap().is_none());
+        let partial = ext
+            .fec_flush_due(base + Duration::from_millis(5))
+            .expect("partial block is due");
+        assert_eq!(partial.m, 0);
+        assert_eq!(ext.fec_stats().unwrap().blocks_encoded, 2);
+    }
+
+    #[test]
+    fn fec_decode_counters_track_recovery_and_failures() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        });
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+        let (shard_len, shards) = fec_block_fixture();
+
+        let packets = ext.fec_decode(
+            FecShard {
+                block_id: 4,
+                index: 0,
+                k: 2,
+                m: 1,
+                shard_len,
+                payload: &shards[0],
+            },
+            base,
+        );
+        assert!(packets.is_empty());
+        let packets = ext.fec_decode(
+            FecShard {
+                block_id: 4,
+                index: 2,
+                k: 2,
+                m: 1,
+                shard_len,
+                payload: &shards[2],
+            },
+            base,
+        );
+        assert_eq!(packets.len(), 2);
+
+        let stats = ext.fec_stats().expect("fec is configured");
+        assert_eq!(stats.blocks_decoded, 1);
+        assert_eq!(stats.packets_recovered, 1);
+        assert_eq!(stats.decode_fail, 0);
+
+        let oversized = vec![0u8; usize::from(umbrawg_fec::MAX_SHARD_LEN) + 1];
+        assert!(ext
+            .fec_decode(
+                FecShard {
+                    block_id: 5,
+                    index: 0,
+                    k: 2,
+                    m: 1,
+                    shard_len: umbrawg_fec::MAX_SHARD_LEN + 1,
+                    payload: &oversized,
+                },
+                base,
+            )
+            .is_empty());
+        let stats = ext.fec_stats().expect("fec is configured");
+        assert_eq!(stats.decode_fail, 1);
+        assert_eq!(stats.dropped_bounds, 1);
+        assert_eq!(stats.blocks_decoded, 1);
+    }
+
+    #[test]
+    fn fec_shards_are_dropped_when_fec_is_disabled() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::default();
+        let (shard_len, shards) = fec_block_fixture();
+        assert!(ext
+            .fec_decode(
+                FecShard {
+                    block_id: 0,
+                    index: 0,
+                    k: 2,
+                    m: 1,
+                    shard_len,
+                    payload: &shards[0],
+                },
+                base,
+            )
+            .is_empty());
+        assert_eq!(ext.fec_stats.dropped_disabled, 1);
+        assert!(ext.fec_stats().is_none());
     }
 
     #[test]

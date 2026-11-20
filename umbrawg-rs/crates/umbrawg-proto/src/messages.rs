@@ -138,6 +138,14 @@ pub mod limits {
     /// Default UDP window used for trailer sizing.
     pub const DEFAULT_UDP_WINDOW: u32 = 500;
 
+    /// Upper bound of the observed UDP window used for trailer sizing.
+    ///
+    /// The window is the largest datagram a peer sent us; a 1500-byte path MTU
+    /// plus the transport header, authentication tag and random padding stays
+    /// below 2 KiB. Larger values would let a peer inflate our egress without
+    /// bound, so observations above this cap are ignored.
+    pub const MAX_UDP_WINDOW: u32 = 2048;
+
     /// Maximum age of a cookie secret in seconds.
     pub const COOKIE_SECRET_MAX_AGE: u64 = 120;
 

@@ -29,6 +29,12 @@ pub struct DecodedBlock {
     pub block_id: u32,
     /// Packets of the block in their original order.
     pub packets: Vec<Vec<u8>>,
+    /// Number of data shards restored from parity shards.
+    ///
+    /// Zero when every data shard arrived intact and the block was merely
+    /// released, and also when the block timed out and only the received data
+    /// shards were returned.
+    pub recovered: usize,
 }
 
 /// Reassembles packets from received Reed-Solomon shards.
@@ -152,6 +158,7 @@ impl FecDecoder {
             shards: vec![None; total],
             present: 0,
             packets: None,
+            recovered: 0,
         });
         let index = usize::from(shard.index);
         let Some(slot) = block.shards.get_mut(index) else {
@@ -169,8 +176,12 @@ impl FecDecoder {
         if block.packets.is_none() && block.present >= data_shards {
             if block.m == 0 {
                 block.packets = Some(extract_packets(&block.shards, data_shards));
+                block.recovered = 0;
             } else if let Ok(code) = &self.code {
-                block.packets = decode_block(code, &mut block.shards);
+                if let Some((packets, recovered)) = decode_block(code, &mut block.shards) {
+                    block.packets = Some(packets);
+                    block.recovered = recovered;
+                }
             }
         }
         let mut output = self.evict_over_capacity();
@@ -250,6 +261,7 @@ impl FecDecoder {
             if let Some(block) = self.blocks.get_mut(&seq) {
                 let data_shards = usize::from(block.k);
                 block.packets = Some(extract_packets(&block.shards, data_shards));
+                block.recovered = 0;
             }
         }
     }
@@ -274,6 +286,7 @@ impl FecDecoder {
                 output.push(DecodedBlock {
                     block_id: block.block_id,
                     packets,
+                    recovered: block.recovered,
                 });
             }
         }
@@ -295,6 +308,7 @@ impl FecDecoder {
                         output.push(DecodedBlock {
                             block_id: block.block_id,
                             packets,
+                            recovered: block.recovered,
                         });
                     }
                 }
@@ -331,14 +345,16 @@ struct Block {
     shards: Vec<Option<Vec<u8>>>,
     present: usize,
     packets: Option<Vec<Vec<u8>>>,
+    recovered: usize,
 }
 
-fn decode_block(code: &RSCode, shards: &mut [Option<Vec<u8>>]) -> Option<Vec<Vec<u8>>> {
+fn decode_block(code: &RSCode, shards: &mut [Option<Vec<u8>>]) -> Option<(Vec<Vec<u8>>, usize)> {
     let k = code.k();
-    if shards[..k].iter().any(Option::is_none) && !recover(code, shards) {
+    let recovered = shards[..k].iter().filter(|shard| shard.is_none()).count();
+    if recovered > 0 && !recover(code, shards) {
         return None;
     }
-    Some(extract_packets(shards, k))
+    Some((extract_packets(shards, k), recovered))
 }
 
 fn recover(code: &RSCode, shards: &mut [Option<Vec<u8>>]) -> bool {

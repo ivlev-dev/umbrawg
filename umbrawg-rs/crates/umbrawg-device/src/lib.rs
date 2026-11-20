@@ -26,7 +26,7 @@ pub use device::{
     SentBatch, TimerEvent,
 };
 pub use error::{DeviceError, Result};
-pub use ext::{BbrMode, ExtConfig, FecMode};
+pub use ext::{BbrMode, ExtConfig, FecMode, FecStats};
 pub use gso::{BatchLayout, GroSegments, GsoGroup, MAX_GSO_GROUPS, MAX_GSO_SEGMENTS};
 pub use index::{IndexEntry, IndexTable};
 pub use io::{

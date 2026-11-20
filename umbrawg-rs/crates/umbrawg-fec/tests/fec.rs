@@ -127,6 +127,7 @@ fn roundtrip_without_loss() {
         let decoded = decode_with_erasures(config, block, &[]);
         assert_eq!(decoded.len(), 1, "k={k} m={m}");
         assert_eq!(decoded[0].block_id, block.block_id);
+        assert_eq!(decoded[0].recovered, 0, "k={k} m={m}");
         assert_eq!(decoded[0].packets, packets, "k={k} m={m}");
     }
 }
@@ -157,6 +158,11 @@ fn check_all_erasure_patterns(k: u8, m: u8) {
             .collect();
         let decoded = decode_with_erasures(config, block, &erased);
         assert_eq!(decoded.len(), 1, "k={k} m={m} mask={mask:b}");
+        let lost_data = erased
+            .iter()
+            .filter(|index| **index < usize::from(k))
+            .count();
+        assert_eq!(decoded[0].recovered, lost_data, "k={k} m={m} mask={mask:b}");
         assert_eq!(decoded[0].packets, packets, "k={k} m={m} mask={mask:b}");
         checked += 1;
     }
@@ -181,6 +187,7 @@ fn recovers_single_data_shard_for_k1_m1() {
     let blocks = encode(config, 64, &packets);
     let decoded = decode_with_erasures(config, &blocks[0], &[0]);
     assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].recovered, 1);
     assert_eq!(decoded[0].packets, packets);
 }
 

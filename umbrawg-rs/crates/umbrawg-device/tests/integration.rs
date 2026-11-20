@@ -357,6 +357,23 @@ fn handshake_establishes_sessions_on_both_devices() {
 }
 
 #[test]
+fn zero_header_protection_key_is_plain_on_the_wire() {
+    let params = ObfParams {
+        header_protection_key: Some(key(0)),
+        ..ObfParams::default()
+    };
+    let mut pair = pair(params);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"zero key");
+    send_data(&mut pair, true, &packet, now);
+    deliver_all(&mut pair, true, now);
+    assert_eq!(pair.io_b.delivered.len(), 1);
+    assert_eq!(pair.io_b.delivered[0].1, packet);
+}
+
+#[test]
 fn initiation_flood_enables_under_load_and_cookie_reply() {
     let mut pair = pair(ObfParams::default());
     let now = Instant::now();
@@ -1534,8 +1551,16 @@ fn fec_shards_are_visible_to_bbr() {
     assert!(stats.inflight > 0, "FEC shards must enter the BBR ring");
     assert_eq!(stats.delivered, 0);
 
+    let tx = pair.a.fec_stats(&pair.peer_b).expect("FEC is configured");
+    assert_eq!(tx.blocks_encoded, 1);
+    assert_eq!(tx.shards_sent, 3);
+
     deliver_all(&mut pair, true, now);
     assert_eq!(pair.io_b.delivered.len(), 2);
+    let rx = pair.b.fec_stats(&pair.peer_a).expect("FEC is configured");
+    assert_eq!(rx.blocks_decoded, 1);
+    assert!(rx.packets_recovered <= 1);
+    assert_eq!(rx.decode_fail, 0);
 
     {
         let later = now + Duration::from_millis(5);

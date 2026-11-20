@@ -448,6 +448,36 @@ fn zero_key_disables_protection() {
     assert_eq!(data, [1, 2, 3, 4]);
 }
 
+#[test]
+fn zero_key_keeps_detect_and_open_incoming_plain() {
+    let mut params = no_obfuscation();
+    params
+        .set_param("header_protection_key", &"00".repeat(32))
+        .unwrap();
+    // A zero key must not enforce the 12-byte nonce prefix either.
+    params.set_param("s4", "4").unwrap();
+    assert!(params.validate().is_ok());
+
+    let obfuscator = Obfuscator::new(&params);
+    assert!(!obfuscator.has_header_protection());
+    let mut rng = TestRng::new(17);
+    let mut packet = vec![0u8; 4 + 16 + 16];
+    obfuscator
+        .begin_transport(&mut rng, &mut packet, 0x1122_3344, 7)
+        .expect("zero key must disable the header protection prefix check");
+    let original = packet.clone();
+
+    let detected = obfuscator.detect(&packet).expect("detect without HP");
+    assert_eq!(detected.kind, MessageKind::Transport);
+    assert_eq!(detected.padding, 4);
+
+    let opened = obfuscator
+        .open_incoming(&mut packet)
+        .expect("open_incoming without HP");
+    assert_eq!(opened.kind, MessageKind::Transport);
+    assert_eq!(packet, original, "open_incoming must not unmask the header");
+}
+
 struct CountingRng {
     inner: TestRng,
     fills: usize,

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwap;
+use log::warn;
 use parking_lot::{Mutex, RwLock};
 use rand_core::{OsRng, RngCore};
 
@@ -28,6 +29,7 @@ use crate::allowedips::PeerId;
 use crate::buffer::{BufferPool, DEFAULT_BUFFER_SIZE};
 use crate::error::{DeviceError, Result};
 pub use crate::ext::BbrBatch;
+use crate::ext::FecStats;
 use crate::gso::BatchLayout;
 use crate::index::IndexTable;
 use crate::io::{
@@ -167,6 +169,7 @@ pub struct Device {
     staging_pool: Arc<BufferPool>,
     incoming_drops: IncomingDropCounters,
     ext_config: RwLock<crate::ExtConfig>,
+    cookies_disabled_logged: AtomicBool,
 }
 
 impl Device {
@@ -185,7 +188,7 @@ impl Device {
         let cookie_checker = identity
             .as_ref()
             .map(|identity| CookieChecker::new(identity, &mut OsRng, Instant::now()));
-        Ok(Self {
+        let device = Self {
             private_key: RwLock::new(private_key),
             identity: RwLock::new(identity),
             cookie_checker: RwLock::new(cookie_checker),
@@ -212,7 +215,23 @@ impl Device {
             )),
             incoming_drops: IncomingDropCounters::default(),
             ext_config: RwLock::new(config.ext),
-        })
+            cookies_disabled_logged: AtomicBool::new(false),
+        };
+        device.note_cookie_policy();
+        Ok(device)
+    }
+
+    fn note_cookie_policy(&self) {
+        if self.obfuscation().disable_cookies {
+            if !self.cookies_disabled_logged.swap(true, Ordering::Relaxed) {
+                warn!(
+                    "disable_cookies is enabled: cookie challenges are skipped, \
+                     but the per-IP initiation rate limit stays active"
+                );
+            }
+        } else {
+            self.cookies_disabled_logged.store(false, Ordering::Relaxed);
+        }
     }
 
     #[must_use]
@@ -419,6 +438,7 @@ impl Device {
     pub fn set_obfuscation(&self, params: ObfParams) -> Result<()> {
         params.validate()?;
         self.obfuscation.store(Arc::new(params));
+        self.note_cookie_policy();
         Ok(())
     }
 
@@ -875,6 +895,7 @@ impl Device {
             ctx.io
                 .send_datagram(endpoint, Some(peer), &dst[..length], None);
             peer.add_tx(length as u64);
+            peer.extension().note_fec_shard_sent();
             sent += 1;
         }
         Ok(sent)
@@ -936,6 +957,7 @@ impl Device {
                 return Err(DeviceError::PacketTooLarge);
             }
             offset += length;
+            peer.extension().note_fec_shard_sent();
         }
         Ok(offset)
     }
@@ -1237,6 +1259,9 @@ impl Device {
                         .send_datagram(endpoint, Some(peer), &dst[..length], None);
                     peer.add_tx(length as u64);
                     peer.extension().note_frame_sent(frame.kind(), ctx.now);
+                    if frame.kind() == ControlKind::FecShard {
+                        peer.extension().note_fec_shard_sent();
+                    }
                     sent += 1;
                 }
                 Err(DeviceError::NoKeypair | DeviceError::KeypairExpired) => {
@@ -1487,6 +1512,12 @@ impl Device {
     #[must_use]
     pub fn fec_packet_limit(&self, peer: &Peer) -> Option<usize> {
         peer.extension().fec_packet_limit()
+    }
+
+    /// Returns per-peer FEC accounting, or `None` when FEC is disabled.
+    #[must_use]
+    pub fn fec_stats(&self, peer: &Peer) -> Option<FecStats> {
+        peer.extension().fec_stats()
     }
 
     pub fn after_batch_sent<R: RngCore, S: DatagramSink>(
@@ -1742,9 +1773,11 @@ impl Device {
             ControlKind::FecShard => {
                 peer.extension().observe_received(counter, ctx.now);
                 let Ok((header, payload)) = FecShardHeader::decode(plaintext) else {
+                    peer.extension().note_fec_reject();
                     return Ok(IncomingOutcome::Dropped);
                 };
                 if header.validate().is_err() {
+                    peer.extension().note_fec_reject();
                     return Ok(IncomingOutcome::Dropped);
                 }
                 let shard = FecShard {
@@ -1808,19 +1841,24 @@ impl Device {
         let mut address = [0u8; 18];
         let address_len = endpoint_bytes(source, &mut address);
         let params = self.obfuscation.load();
-        if self.under_load() && !params.disable_cookies {
-            let valid = {
-                let checker = self.cookie_checker.read();
-                let Some(checker) = checker.as_ref() else {
-                    return Ok(IncomingOutcome::Dropped);
+        if self.under_load() {
+            if !params.disable_cookies {
+                let valid = {
+                    let checker = self.cookie_checker.read();
+                    let Some(checker) = checker.as_ref() else {
+                        return Ok(IncomingOutcome::Dropped);
+                    };
+                    checker.check_mac2(body, &address[..address_len], ctx.now)
                 };
-                checker.check_mac2(body, &address[..address_len], ctx.now)
-            };
-            if !valid {
-                let sender = read_u32(body, 4);
-                self.send_cookie_reply(body, sender, source, ctx)?;
-                return Ok(IncomingOutcome::Cookie);
+                if !valid {
+                    let sender = read_u32(body, 4);
+                    self.send_cookie_reply(body, sender, source, ctx)?;
+                    return Ok(IncomingOutcome::Cookie);
+                }
             }
+            // Even without the cookie challenge, an initiation must stay
+            // rate limited: otherwise `disable_cookies` turns the expensive
+            // handshake path into a flood oracle.
             if !self.rate_limiter.allow(source.ip(), ctx.now) {
                 return Ok(IncomingOutcome::Dropped);
             }
@@ -2407,6 +2445,89 @@ mod tests {
         assert!(
             orders.iter().any(|order| order != &vec![0, 1, 2, 3, 4, 5]),
             "some blocks must leave systematic order"
+        );
+    }
+
+    struct NullIo;
+
+    impl DatagramSink for NullIo {
+        fn send_datagram(
+            &mut self,
+            _endpoint: SocketAddr,
+            _peer: Option<&Peer>,
+            _payload: &[u8],
+            _gso_size: Option<usize>,
+        ) {
+        }
+    }
+
+    impl PacketIo for NullIo {
+        fn deliver(&mut self, _peer: &Peer, _packet: &[u8]) {}
+    }
+
+    #[test]
+    fn disable_cookies_keeps_the_initiation_rate_limit() {
+        use umbrawg_noise::{CookieGenerator, Handshake, StaticIdentity};
+
+        let server_key = Key::from_bytes([0x22; 32]);
+        let params = ObfParams {
+            disable_cookies: true,
+            ..ObfParams::default()
+        };
+        let device = Device::new(DeviceConfig {
+            private_key: Some(server_key),
+            obfuscation: params,
+            ..DeviceConfig::default()
+        })
+        .unwrap();
+        let server_public = device.public_key().expect("server key is configured");
+        device.set_under_load_threshold(1);
+
+        let mut rng = TestRng(11);
+        let now = Instant::now();
+        let mut io = NullIo;
+        let mut scratch = [0u8; 4096];
+        let mut outcomes = Vec::new();
+        for index in 0..6u8 {
+            let identity = StaticIdentity::from_bytes([0x40 + index; 32]);
+            let mut handshake =
+                Handshake::new(&identity, server_public, Key::from_bytes([0u8; 32]));
+            let mut body = handshake
+                .create_initiation(
+                    &identity,
+                    &mut rng,
+                    MESSAGE_HANDSHAKE_INITIATION,
+                    u32::from(index) + 1,
+                    Tai64N::now(),
+                )
+                .unwrap();
+            CookieGenerator::new(server_public)
+                .add_macs(&mut body, now)
+                .unwrap();
+            let source: SocketAddr = format!("10.0.0.1:{}", 1000 + u16::from(index))
+                .parse()
+                .unwrap();
+            let mut config = PeerConfig::new(identity.public_key());
+            config.endpoint = Some(source);
+            device.add_peer(config).unwrap();
+            let mut ctx = IoContext::new(&mut rng, now, &mut scratch, &mut io);
+            outcomes.push(
+                device
+                    .handle_initiation(&mut body, 0, source, &mut ctx)
+                    .unwrap(),
+            );
+        }
+
+        assert!(
+            outcomes[..5]
+                .iter()
+                .all(|outcome| *outcome == IncomingOutcome::Handshake),
+            "the first burst may pass before the bucket is drained: {outcomes:?}"
+        );
+        assert_eq!(
+            outcomes[5],
+            IncomingOutcome::Dropped,
+            "without cookies the rate limiter must still reject initiations"
         );
     }
 

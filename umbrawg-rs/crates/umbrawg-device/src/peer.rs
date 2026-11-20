@@ -9,7 +9,7 @@ use parking_lot::{Mutex, RwLock};
 use umbrawg_crypto::aead::Algorithm;
 use umbrawg_crypto::{Key, PublicKey};
 use umbrawg_noise::{CookieGenerator, Handshake, HandshakeState, StaticIdentity};
-use umbrawg_proto::messages::limits::{DEFAULT_UDP_WINDOW, MAX_STAGED_PACKETS};
+use umbrawg_proto::messages::limits::{DEFAULT_UDP_WINDOW, MAX_STAGED_PACKETS, MAX_UDP_WINDOW};
 use umbrawg_uapi::Cipher;
 
 use crate::allowedips::{AllowedIp, PeerId};
@@ -283,7 +283,15 @@ impl Peer {
         self.udp_window.load(Ordering::Relaxed)
     }
 
+    /// Grows the traffic-shaping window up to [`MAX_UDP_WINDOW`].
+    ///
+    /// The observed window feeds trailer and padding sizing, so a peer must
+    /// not be able to inflate it arbitrarily: observations above the cap are
+    /// ignored instead of moving the window.
     pub fn observe_udp_window(&self, window: u32) {
+        if window > MAX_UDP_WINDOW {
+            return;
+        }
         self.udp_window.fetch_max(window, Ordering::Relaxed);
     }
 
@@ -587,6 +595,21 @@ mod tests {
     }
 
     #[test]
+    fn observed_udp_window_never_exceeds_the_cap() {
+        let peer = peer();
+        peer.observe_udp_window(MAX_UDP_WINDOW / 2);
+        assert_eq!(peer.udp_window(), MAX_UDP_WINDOW / 2);
+        peer.observe_udp_window(MAX_UDP_WINDOW);
+        assert_eq!(peer.udp_window(), MAX_UDP_WINDOW);
+        peer.observe_udp_window(MAX_UDP_WINDOW + 32_000);
+        assert_eq!(
+            peer.udp_window(),
+            MAX_UDP_WINDOW,
+            "oversized observations must be ignored"
+        );
+    }
+
+    #[test]
     fn endpoint_updates_only_on_change() {
         let peer = peer();
         let first: SocketAddr = "10.0.0.1:51820".parse().unwrap();
@@ -594,9 +617,11 @@ mod tests {
         assert!(peer.set_endpoint_from_packet(first));
         assert_eq!(peer.endpoint(), Some(first));
         assert!(!peer.set_endpoint_from_packet(first));
-        peer.observe_udp_window(9000);
+        peer.observe_udp_window(900);
         assert!(!peer.set_endpoint_from_packet(first));
-        assert_eq!(peer.udp_window(), 9000);
+        assert_eq!(peer.udp_window(), 900);
+        peer.observe_udp_window(MAX_UDP_WINDOW + 4096);
+        assert_eq!(peer.udp_window(), 900, "oversized observations are ignored");
         assert!(peer.set_endpoint_from_packet(second));
         assert_eq!(peer.udp_window(), DEFAULT_UDP_WINDOW);
         peer.set_roaming_disabled(true);
