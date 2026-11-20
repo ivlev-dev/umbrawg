@@ -1,0 +1,118 @@
+name: Bench interop
+
+on:
+  push:
+    branches:
+      - master
+      - "feature/**"
+    paths:
+      - "bench/**"
+      - "umbrawg-rs/**"
+      - "umbrawg-linux-kernel-module/**"
+      - ".github/workflows/bench-ci.yml"
+  pull_request:
+    paths:
+      - "bench/**"
+      - "umbrawg-rs/**"
+      - "umbrawg-linux-kernel-module/**"
+      - ".github/workflows/bench-ci.yml"
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Разделение нагрузки: сборка, detect-тесты и PLAN_ONLY идут на каждом
+# push/PR, потому что они дешёвые и не требуют root. Полный interop
+# (netns, insmod, tc, tcpdump, iperf3) требует root, занимает раннер на
+# несколько минут и чувствителен к соседям, поэтому запускается только на
+# push в master, вручную (workflow_dispatch) и ночью по cron. В PR этого
+# достаточно: сборка ловит ошибки компиляции, PLAN_ONLY — рассинхрон
+# CASES/known_case/print_plan, detect-тесты — регрессии анализатора.
+jobs:
+  bench:
+    name: build and interop
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v4
+
+      - name: Проверить синтаксис скриптов
+        run: bash -n bench/wire-ext.sh bench/ext-tests.sh bench/ext-matrix.sh
+
+      - name: Установить Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Кэш Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            umbrawg-rs -> umbrawg-rs/target
+            umbrawg-tools -> umbrawg-tools/target
+
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc build-essential clang libelf-dev lld llvm kmod \
+            iperf3 iproute2 python3 tcpdump
+          sudo apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
+
+      - name: Собрать kernel-модуль (LLVM=1)
+        run: |
+          set -euo pipefail
+          kdir="/lib/modules/$(uname -r)/build"
+          if [ ! -d "$kdir" ]; then
+            echo "::error::нет заголовков ядра для $(uname -r) ($kdir)"
+            exit 1
+          fi
+          make -C umbrawg-linux-kernel-module/src -j"$(nproc)" LLVM=1 "KERNELDIR=$kdir"
+          test -f umbrawg-linux-kernel-module/src/umbrawg.ko
+          modinfo -F vermagic umbrawg-linux-kernel-module/src/umbrawg.ko
+
+      - name: Собрать Rust-демон и uwg
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path umbrawg-rs/Cargo.toml -p umbrawg
+          cargo build --release --locked --manifest-path umbrawg-tools/Cargo.toml -p uwg
+          test -x umbrawg-rs/target/release/umbrawg
+          test -x umbrawg-tools/target/release/uwg
+
+      - name: Detect-тесты
+        run: python3 bench/tests/test-detect.py
+
+      - name: PLAN_ONLY для interop-кейсов
+        env:
+          CASES: mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec
+        run: PLAN_ONLY=1 bash bench/ext-tests.sh
+
+      - name: Полный interop (root)
+        if: >-
+          github.event_name == 'workflow_dispatch' ||
+          github.event_name == 'schedule' ||
+          (github.event_name == 'push' && github.ref == 'refs/heads/master')
+        env:
+          DUR: "2"
+          CASES: mixed-fec21 kernel-fec21 rust2-fec21
+        run: |
+          set -euo pipefail
+          sudo -E env DUR="$DUR" CASES="$CASES" bash bench/ext-tests.sh
+
+      - name: Загрузить логи interop
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-interop-logs
+          path: bench/tmp/ext-tests-*
+          if-no-files-found: ignore
+          retention-days: 14

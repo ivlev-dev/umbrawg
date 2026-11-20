@@ -62,6 +62,7 @@ TUN1=10.9.0.2
 CAP_PID=""
 SRV_PID=""
 DPID=""
+DPID2=""
 CONF0=""
 CONF1=""
 READY=0
@@ -111,26 +112,35 @@ cleanup() {
         ip netns exec "$ONS" pkill -x iperf3 2>/dev/null
     fi
     if [ "${KEEP:-0}" = "1" ]; then
-        log "KEEP=1: netns $NS0/$NS1, module and logs are left in place"
+        log "KEEP=1: netns $NS0/$NS1, module/daemons and logs are left in place"
         log "inspect: ip netns exec $NS0 bash | ip netns exec $NS1 bash"
-        log "cleanup: ip netns del $NS0; ip netns del $NS1; rmmod umbrawg"
+        if [ "${IMPL:-}" = "rust2" ]; then
+            log "cleanup: ip netns pids $NS0 $NS1 | xargs -r kill; ip netns del $NS0; ip netns del $NS1"
+        else
+            log "cleanup: ip netns del $NS0; ip netns del $NS1; rmmod umbrawg"
+        fi
         return 0
     fi
     if [ -n "${DPID:-}" ]; then
         kill "$DPID" 2>/dev/null
     fi
+    if [ -n "${DPID2:-}" ]; then
+        kill "$DPID2" 2>/dev/null
+        wait "$DPID2" 2>/dev/null
+    fi
     remove_namespaces
     rm -f /var/run/umbrawg/uwg0.sock /var/run/umbrawg/uwg1.sock
     [ -n "${CONF0:-}" ] && rm -f "$CONF0"
     [ -n "${CONF1:-}" ] && rm -f "$CONF1"
-    rmmod umbrawg 2>/dev/null
+    [ "${IMPL:-}" = "rust2" ] || rmmod umbrawg 2>/dev/null
     return 0
 }
 
-if [ "$(id -u)" -ne 0 ]; then
-    die "root is required (netns, insmod, tcpdump)"
-fi
-[ "$IMPL" = "rust" ] || [ "$IMPL" = "kernel" ] || die "IMPL must be rust or kernel"
+[ "$(id -u)" -ne 0 ] && die "root is required (netns, insmod, tcpdump)"
+case "$IMPL" in
+    rust|rust2|kernel) ;;
+    *) die "IMPL must be rust, rust2 or kernel" ;;
+esac
 [ "$DIR" = "k0" ] || [ "$DIR" = "k1" ] || die "DIR must be k0 or k1"
 validate_fec "$KFEC" || die "KFEC must be off, adaptive or K:M"
 validate_fec "$RFEC" || die "RFEC must be off, adaptive or K:M"
@@ -139,10 +149,12 @@ validate_bbr "$RBBR" || die "RBBR must be off, monitor or on"
 case "$NETEM_LOSS" in
     ''|*[!0-9.]*) die "NETEM_LOSS must be a percentage number" ;;
 esac
-[ -f "$KO" ] || die "kernel module not found: $KO"
 [ -x "$UWG" ] || die "uwg binary not found: $UWG"
-if [ "$IMPL" = "rust" ]; then
+if [ "$IMPL" = "rust" ] || [ "$IMPL" = "rust2" ]; then
     [ -x "$RUST" ] || die "rust daemon not found: $RUST"
+fi
+if [ "$IMPL" != "rust2" ]; then
+    [ -f "$KO" ] || die "kernel module not found: $KO"
 fi
 command -v iperf3 >/dev/null 2>&1 || die "iperf3 not found"
 command -v python3 >/dev/null 2>&1 || die "python3 not found"
@@ -153,12 +165,14 @@ mkdir -p "$(dirname "$OUT")" /var/run/umbrawg
 
 remove_namespaces
 rm -f /var/run/umbrawg/uwg0.sock /var/run/umbrawg/uwg1.sock
-rmmod umbrawg 2>/dev/null || true
-[ -e /sys/module/umbrawg ] && die "module umbrawg is busy and cannot be unloaded"
+if [ "$IMPL" != "rust2" ]; then
+    rmmod umbrawg 2>/dev/null || true
+    [ -e /sys/module/umbrawg ] && die "module umbrawg is busy and cannot be unloaded"
 
-modprobe udp_tunnel 2>/dev/null || true
-modprobe ip6_udp_tunnel 2>/dev/null || true
-insmod "$KO" >"$OUT-insmod.log" 2>&1 || die "insmod failed: $(tail -3 "$OUT-insmod.log" 2>/dev/null)"
+    modprobe udp_tunnel 2>/dev/null || true
+    modprobe ip6_udp_tunnel 2>/dev/null || true
+    insmod "$KO" >"$OUT-insmod.log" 2>&1 || die "insmod failed: $(tail -3 "$OUT-insmod.log" 2>/dev/null)"
+fi
 
 ip netns add "$NS0" || die "cannot create netns $NS0"
 ip netns add "$NS1" || die "cannot create netns $NS1"
@@ -207,29 +221,6 @@ else
     PEER_BBR=$RBBR
 fi
 
-ip netns exec "$KNS" ip link add "$KIF" type umbrawg || die "cannot create $KIF in $KNS"
-
-if [ "$IMPL" = "rust" ]; then
-    RUST_ENV=(UMBRAWG_BBR="$PEER_BBR" UMBRAWG_FEC="$PEER_FEC")
-    [ -n "$FEC_SHARD" ] && RUST_ENV+=(UMBRAWG_FEC_SHARD="$FEC_SHARD")
-    [ -n "$ACK_INTERVAL" ] && RUST_ENV+=(UMBRAWG_ACK_INTERVAL="$ACK_INTERVAL")
-    [ -n "$UMBRAWG_THREADS" ] && RUST_ENV+=(UMBRAWG_THREADS="$UMBRAWG_THREADS")
-    ip netns exec "$ONS" env "${RUST_ENV[@]}" "$RUST" --foreground "$OIF" >"$OUT-$IMPL.log" 2>&1 &
-    DPID=$!
-    for _ in $(seq 1 50); do
-        [ -S "/var/run/umbrawg/$OIF.sock" ] && break
-        sleep 0.1
-    done
-    [ -S "/var/run/umbrawg/$OIF.sock" ] || die "rust daemon did not create $OIF: $(tail -3 "$OUT-$IMPL.log" 2>/dev/null)"
-else
-    ip netns exec "$ONS" ip link add "$OIF" type umbrawg || die "cannot create $OIF in $ONS"
-fi
-
-ip -n "$NS0" addr add "$TUN0/24" dev uwg0
-ip -n "$NS1" addr add "$TUN1/24" dev uwg1
-ip -n "$NS0" link set uwg0 mtu "$TUNMTU" up
-ip -n "$NS1" link set uwg1 mtu "$TUNMTU" up
-
 if [ "$DIR" = "k0" ]; then
     FEC_SIDE0=$KFEC; BBR_SIDE0=$KBBR
     FEC_SIDE1=$PEER_FEC; BBR_SIDE1=$PEER_BBR
@@ -237,6 +228,50 @@ else
     FEC_SIDE0=$PEER_FEC; BBR_SIDE0=$PEER_BBR
     FEC_SIDE1=$KFEC; BBR_SIDE1=$KBBR
 fi
+
+RUST_ENV_BASE=()
+[ -n "$FEC_SHARD" ] && RUST_ENV_BASE+=(UMBRAWG_FEC_SHARD="$FEC_SHARD")
+[ -n "$ACK_INTERVAL" ] && RUST_ENV_BASE+=(UMBRAWG_ACK_INTERVAL="$ACK_INTERVAL")
+[ -n "$UMBRAWG_THREADS" ] && RUST_ENV_BASE+=(UMBRAWG_THREADS="$UMBRAWG_THREADS")
+
+start_rust_daemon() {
+    local ns=$1 ifname=$2 fec=$3 bbr=$4 logfile=$5
+    ip netns exec "$ns" env UMBRAWG_BBR="$bbr" UMBRAWG_FEC="$fec" "${RUST_ENV_BASE[@]+"${RUST_ENV_BASE[@]}"}" \
+        "$RUST" --foreground "$ifname" >"$logfile" 2>&1 &
+    LAST_PID=$!
+}
+
+wait_rust_socket() {
+    local ifname=$1 logfile=$2
+    for _ in $(seq 1 50); do
+        [ -S "/var/run/umbrawg/$ifname.sock" ] && return 0
+        sleep 0.1
+    done
+    log "rust daemon did not create $ifname: $(tail -3 "$logfile" 2>/dev/null)"
+    return 1
+}
+
+if [ "$IMPL" = "rust2" ]; then
+    start_rust_daemon "$NS0" uwg0 "$FEC_SIDE0" "$BBR_SIDE0" "$OUT-rust-ns0.log"
+    DPID=$LAST_PID
+    start_rust_daemon "$NS1" uwg1 "$FEC_SIDE1" "$BBR_SIDE1" "$OUT-rust-ns1.log"
+    DPID2=$LAST_PID
+    wait_rust_socket uwg0 "$OUT-rust-ns0.log" || die "rust2 daemon (ns0) is not ready"
+    wait_rust_socket uwg1 "$OUT-rust-ns1.log" || die "rust2 daemon (ns1) is not ready"
+elif [ "$IMPL" = "rust" ]; then
+    ip netns exec "$KNS" ip link add "$KIF" type umbrawg || die "cannot create $KIF in $KNS"
+    start_rust_daemon "$ONS" "$OIF" "$PEER_FEC" "$PEER_BBR" "$OUT-$IMPL.log"
+    DPID=$LAST_PID
+    wait_rust_socket "$OIF" "$OUT-$IMPL.log" || die "rust daemon did not create $OIF"
+else
+    ip netns exec "$KNS" ip link add "$KIF" type umbrawg || die "cannot create $KIF in $KNS"
+    ip netns exec "$ONS" ip link add "$OIF" type umbrawg || die "cannot create $OIF in $ONS"
+fi
+
+ip -n "$NS0" addr add "$TUN0/24" dev uwg0
+ip -n "$NS1" addr add "$TUN1/24" dev uwg1
+ip -n "$NS0" link set uwg0 mtu "$TUNMTU" up
+ip -n "$NS1" link set uwg1 mtu "$TUNMTU" up
 
 K0=$("$UWG" genkey) || die "uwg genkey failed"
 K1=$("$UWG" genkey) || die "uwg genkey failed"
@@ -252,8 +287,10 @@ write_conf() {
         printf '[Interface]\n'
         printf 'PrivateKey = %s\n' "$priv"
         printf 'ListenPort = %s\n' "$port"
-        printf 'FEC = %s\n' "$fec"
-        printf 'BBR = %s\n' "$bbr"
+        if [ "$IMPL" != "rust2" ]; then
+            printf 'FEC = %s\n' "$fec"
+            printf 'BBR = %s\n' "$bbr"
+        fi
         printf '\n[Peer]\n'
         printf 'PublicKey = %s\n' "$peer"
         printf 'AllowedIPs = 10.9.0.0/24\n'

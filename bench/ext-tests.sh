@@ -25,7 +25,7 @@ ADAPTIVE_TCP_TOL=${ADAPTIVE_TCP_TOL:-0.12}
 MAX_PING_LOSS_LOSSY=${MAX_PING_LOSS_LOSSY:-20}
 SETUP_EST=${SETUP_EST:-9}
 
-CASES=${CASES:-"mixed-fec21 kernel-fec21 profile-mismatch adaptive-clean bbr-fec-clean clean-fec21"}
+CASES=${CASES:-"mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec profile-mismatch adaptive-clean bbr-fec-clean clean-fec21"}
 
 RUN_ID=${RUN_ID:-$(date +%Y%m%d-%H%M%S)}
 LOG_DIR=${LOG_DIR:-$HERE/tmp/ext-tests-$RUN_ID}
@@ -43,7 +43,7 @@ read -r -a CASE_LIST <<< "$CASES"
 
 known_case() {
     case "$1" in
-        mixed-fec21|kernel-fec21|profile-mismatch|adaptive-clean|bbr-fec-clean|clean-fec21) return 0 ;;
+        mixed-fec21|kernel-fec21|rust2-fec21|rust2-bbr-fec|profile-mismatch|adaptive-clean|bbr-fec-clean|clean-fec21) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -79,6 +79,8 @@ print_plan() {
         case "$name" in
             mixed-fec21) printf 'PLAN   command: IMPL=rust KFEC=2:1 RFEC=2:1 NETEM_LOSS=2\n' ;;
             kernel-fec21) printf 'PLAN   command: IMPL=kernel KFEC=2:1 NETEM_LOSS=2\n' ;;
+            rust2-fec21) printf 'PLAN   command: IMPL=rust2 KFEC=2:1 RFEC=2:1 NETEM_LOSS=2\n' ;;
+            rust2-bbr-fec) printf 'PLAN   command: IMPL=rust2 KFEC=2:1 RFEC=2:1 KBBR=on RBBR=on NETEM_LOSS=0\n' ;;
             profile-mismatch) printf 'PLAN   command: IMPL=rust KFEC=2:1 RFEC=8:2 NETEM_LOSS=2\n' ;;
             adaptive-clean) printf 'PLAN   command: IMPL=rust KFEC=off RFEC=off NETEM_LOSS=0; IMPL=rust KFEC=adaptive RFEC=adaptive NETEM_LOSS=0\n' ;;
             bbr-fec-clean) printf 'PLAN   command: IMPL=rust KFEC=2:1 RFEC=2:1 KBBR=on RBBR=on NETEM_LOSS=0\n' ;;
@@ -255,6 +257,23 @@ case_kernel_fec21() {
     chk_cmp tcp gt "$R_TCP" 0
     chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_FEC"
     chk_ping_lossy
+    chk_frag
+}
+
+case_rust2_fec21() {
+    run_wire "$RUN_TAG-rust2-fec21" rust2 2:1 2:1 off off 2
+    chk_result || return 0
+    chk_cmp tcp gt "$R_TCP" 0
+    chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_FEC"
+    chk_ping_lossy
+    chk_frag
+}
+
+case_rust2_bbr_fec() {
+    run_wire "$RUN_TAG-rust2-bbr-fec" rust2 2:1 2:1 on on 0
+    chk_result || return 0
+    chk_cmp tcp gt "$R_TCP" "$MIN_TCP_BBR_FEC"
+    chk_cmp udp_loss eq "$R_UDPLOSS" 0
     chk_frag
 }
 
