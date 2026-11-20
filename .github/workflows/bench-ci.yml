@@ -68,7 +68,7 @@ jobs:
             iperf3 iproute2 python3 tcpdump
           sudo apt-get install -y --no-install-recommends "linux-headers-$(uname -r)"
 
-      - name: Собрать kernel-модуль (LLVM=1)
+      - name: Собрать kernel-модуль
         run: |
           set -euo pipefail
           kdir="/lib/modules/$(uname -r)/build"
@@ -76,7 +76,9 @@ jobs:
             echo "::error::нет заголовков ядра для $(uname -r) ($kdir)"
             exit 1
           fi
-          make -C umbrawg-linux-kernel-module/src -j"$(nproc)" LLVM=1 "KERNELDIR=$kdir"
+          # Заголовки ядра на раннере собраны gcc, поэтому LLVM=1 здесь
+          # несовместим с их флагами; для проверки сборки достаточно gcc.
+          make -C umbrawg-linux-kernel-module/src -j"$(nproc)" "KERNELDIR=$kdir"
           test -f umbrawg-linux-kernel-module/src/umbrawg.ko
           modinfo -F vermagic umbrawg-linux-kernel-module/src/umbrawg.ko
 
