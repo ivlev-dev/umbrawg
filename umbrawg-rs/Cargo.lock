@@ -1041,7 +1041,7 @@ checksum = "b6f5e870be6c3b371b77fe0ee0bafb859fa4964b4404c27de1d380043c4dda20"
 
 [[package]]
 name = "umbrawg"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "env_logger",
  "libc",
@@ -1059,7 +1059,7 @@ dependencies = [
 
 [[package]]
 name = "umbrawg-bench"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "criterion",
  "rand_core",
@@ -1072,11 +1072,11 @@ dependencies = [
 
 [[package]]
 name = "umbrawg-cc"
-version = "0.1.0"
+version = "0.3.0"
 
 [[package]]
 name = "umbrawg-crypto"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "aes-gcm",
  "blake2",
@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "umbrawg-device"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "arc-swap",
  "log",
@@ -1109,14 +1109,14 @@ dependencies = [
 
 [[package]]
 name = "umbrawg-fec"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "rand_core",
 ]
 
 [[package]]
 name = "umbrawg-noise"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "rand_core",
  "subtle",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "umbrawg-proto"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "rand_core",
  "thiserror",
@@ -1138,7 +1138,7 @@ dependencies = [
 
 [[package]]
 name = "umbrawg-transport"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "thiserror",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "umbrawg-tun"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "log",
@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "umbrawg-uapi"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "libc",
  "log",

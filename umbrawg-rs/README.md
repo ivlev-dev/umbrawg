@@ -1,6 +1,6 @@
 # UmbraWG userspace (Rust)
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
 
 Userspace daemon for the UmbraWG protocol (WireGuard-compatible Noise IK with
 UmbraWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
@@ -111,7 +111,7 @@ duplicate the `tar.gz` archives from `rs-ci.yml`:
 
 Release mechanics:
 
-- the tag has to match `v<version>` from `Cargo.toml` (`v0.1.0` right now);
+- the tag has to match `v<version>` from `Cargo.toml` (`v0.3.0` right now);
   `workflow_dispatch` takes an optional `version` input for a manual check;
 - no secrets are needed — the AUR upload stays manual;
 - the release job uses `concurrency: release-<ref>` with `cancel-in-progress:

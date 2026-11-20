@@ -159,11 +159,10 @@ src/tests/netlink-parity.sh
 
 ## Известные проблемы
 
-- Версии упаковки согласованы на `3.1.20261113-02` (`3.1.20261113_02` в RPM
-  `Version`): `src/version.h`, `debian/changelog`, `umbrawg-dkms.spec` и
-  Arch-пакеты. `src/Makefile` (`UMBRAWG_VERSION`) и `src/dkms.conf` по
-  умолчанию содержат `1.0.0` и переопределяются при сборке пакетов. Осталось
-  проставить тег `v3.1.20261113-02`.
+- Версии упаковки согласованы на `0.3.0` (`0.3.0` в RPM `Version`):
+  `src/version.h`, `src/Makefile`, `src/dkms.conf`, `debian/changelog`,
+  `umbrawg-dkms.spec`. Arch-пакеты в `contrib/arch/` ещё не обновлены.
+  Осталось проставить тег `v0.3.0`.
 - Если инициирует ядро, первая попытка handshake теряется, когда userspace-демон
   ещё не забиндил UDP-порт; соединение поднимается на ретрае через 5 с. Порядок
   настройки: сначала userspace, затем ядро.
@@ -199,7 +198,7 @@ src/tests/netlink-parity.sh
 4. UDP GRO на сокете модуля — только если профилирование подтвердит, что
    приём датаграмм стал узким местом одиночного пира (ожидание 2–4%).
 5. CI: сборка против 7.x, netns-тесты, `-Werror`.
-6. Проставить тег `v3.1.20261113-02`: версии `umbrawg-dkms.spec` и `debian`
+6. Проставить тег `v0.3.0`: версии `umbrawg-dkms.spec` и `debian`
    уже согласованы, после тега остаётся `updpkgsums` для стабильного AUR-пакета.
 
 Не возвращаться к P0-3/P0-4 и TX-коалесингу, threaded NAPI не отключать без
@@ -214,22 +213,20 @@ src/tests/netlink-parity.sh
     `uapi/umbrawg.h`, исходники) и сборка модуля из **упакованных** исходников;
   - `rpm` (`fedora:latest`) — тарбол из чекаута, `Version:` в
     `umbrawg-dkms.spec` заменяется на версию из `src/version.h` в форме
-    `3.1.20261113_02` (дефис в RPM `Version` недопустим), затем `rpmbuild -ba`
+    `0.3.0` (дефис в RPM `Version` недопустим), затем `rpmbuild -ba`
     и проверка `rpm -qlp`;
   - `deb` (`debian:trixie`) — `dpkg-buildpackage -b -us -uc`, проверка
     содержимого `.deb`. Нужен пакет `dh-dkms`: в trixie addon `--with dkms`
     вынесен отдельно, без него `dh clean` падает;
   - `релиз` на тег `v*` — `.pkg.tar.zst`, `.rpm`, `.deb`, `SHA256SUMS`.
-- Версия тега = `UMBRAWG_VERSION` из `src/version.h` (`v3.1.20261113-02`).
+- Версия тега = `UMBRAWG_VERSION` из `src/version.h` (`v0.3.0`).
   Тегов пока нет.
 - Секретов не нужно: AUR и Copr не затрагиваются, публикация ручная.
-- **`debian/changelog` содержит legacy-версию `1.0.0`**, поэтому `.deb`
-  называется `umbrawg-dkms_1.0.0_all.deb` и ставит `/usr/src/umbrawg-1.0.0`;
-  job `deb` выводит предупреждение. Перед реальным релизом changelog нужно
-  поднять. Проверено вручную: при версии `3.1.20261113-02` в changelog
-  `dh_dkms` и `override_dh_auto_install` создают в пакете оба каталога
-  (`umbrawg-1.0.0` и `umbrawg-3.1.20261113`), то есть одной правки changelog
-  недостаточно — надо чинить `debian/rules`.
+- `debian/changelog`, `umbrawg-dkms.spec`, `src/version.h`, `src/Makefile`
+  и `src/dkms.conf` согласованы на `0.3.0`; `.deb` ставит
+  `/usr/src/umbrawg-0.3.0`. Перед первым релизом остаётся проверить
+  `debian/rules` на предмет создания второго каталога из legacy-версии и
+  обновить `contrib/arch/` (`updpkgsums`).
 - RPM собирается с версией из `version.h`, Arch-пакет — по `UMBRAWG_VERSION`;
   `.deb` — по `debian/changelog`. Перед первым релизом версии нужно свести.
 - DKMS-пакеты содержат только исходники: для сборки на машине нужны

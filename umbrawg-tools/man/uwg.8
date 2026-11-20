@@ -1,4 +1,4 @@
-.TH UWG 8 "2026-11-16" "UmbraWG" "System Administration"
+.TH UWG 8 "2026-11-20" "UmbraWG" "System Administration"
 
 .SH NAME
 uwg \- set and retrieve configuration of UmbraWG interfaces
@@ -73,14 +73,21 @@ enable them only on networks without port-restricted NAT.
 Firewall mark as a decimal value or \fB0x\fP-prefixed hexadecimal value.
 .TP
 \fBbbr\fP \fI<off|monitor|on>\fP
-BBRv3 mode of the userspace daemon. \fBmonitor\fP estimates congestion
-state from feedback without pacing, \fBon\fP enables pacing and limits.
+BBRv3 mode, applied to both kernel and userspace interfaces. \fBmonitor\fP
+estimates congestion state from feedback without pacing, \fBon\fP enables
+the token-bucket pacer. The default is \fBoff\fP; enable it on both peers.
+BBR is not negotiated: the kernel module does not set the BBR bit in CAPS,
+so a peer without the extension provides no feedback.
 .TP
 \fBfec\fP \fI<off|adaptive|K:M>\fP
-Forward error correction mode of the userspace daemon. \fBadaptive\fP
-enables parity after measured loss; \fBK:M\fP uses \fIK\fP data and \fIM\fP
-parity shards, where \fIK\fP and \fIM\fP are at least 1 and \fIK\fP+\fIM\fP
-does not exceed 255.
+Forward error correction mode, applied to both kernel and userspace
+interfaces. \fBadaptive\fP uses a 2:1 profile that is enabled after measured
+loss above 1% and disabled after five seconds below 0.2%; \fBK:M\fP uses
+\fIK\fP data and \fIM\fP parity shards. Both peers must use the same
+\fIK\fP:\fIM\fP profile. The kernel data plane accepts \fIK\fP from 1 to 8
+and \fIM\fP from 1 to 2; values outside these ranges are rejected with
+\fBEINVAL\fP. The userspace daemon accepts up to 255 total shards, but only
+the kernel ranges interoperate with the module.
 .TP
 \fBprivate-key\fP \fI<file>\fP
 Reads the private key from a file. A device or empty file removes the key.
@@ -155,8 +162,10 @@ The \fB[Interface]\fP section accepts:
 \fBRekeyAfterTime\fP, \fBRekeyTimeout\fP, \fBRejectAfterTime\fP,
 \fBKeepaliveTimeout\fP, \fBMaxHandshakeAttempts\fP, \fBRandomTrailers\fP,
 \fBDisableCookies\fP.
-\fBBBR\fP and \fBFEC\fP configure the userspace daemon and have no effect on
-kernel interfaces.
+\fBBBR\fP and \fBFEC\fP configure both backends: the module receives them
+through netlink attributes \fBUWGDEVICE_A_BBR\fP and \fBUWGDEVICE_A_FEC\fP,
+the userspace daemon through the UAPI keys \fBbbr=\fP and \fBfec=\fP. With
+both disabled, no extension frames or padding are added.
 .PP
 Each \fB[Peer]\fP section accepts \fBPublicKey\fP, \fBPresharedKey\fP,
 \fBAdvancedSecurity\fP, \fBCipher\fP, \fBAllowedIPs\fP, \fBEndpoint\fP, and
@@ -170,6 +179,28 @@ The \fBuwg-quick\fP-only keys \fBAddress\fP, \fBDNS\fP, \fBMTU\fP, \fBTable\fP,
 \fBPreUp\fP, \fBPostUp\fP, \fBPreDown\fP, \fBPostDown\fP, and \fBSaveConfig\fP
 are rejected by \fBuwg\fP and are documented in
 .BR uwg-quick (8).
+
+.SH NOTES
+.B BBR
+and
+.B FEC
+change the shape of the outer UDP flow: BBR paces packets and FEC adds
+parity shards and acknowledgement frames. The implementation randomises
+control-frame padding, ACK cadence, shard lengths and shard order, but a
+tunnel with these options is still more regular than plain traffic. Use
+.BR detect.py
+from the bench directory to estimate DPI-resistance before deploying.
+
+FEC transmits a packet as a shard only when it fits the kernel MTU budget
+(\fIMTU\fP minus 50 bytes); full-size TCP segments therefore fall back to
+the legacy path and stay unprotected. This avoids IP fragmentation on the
+underlay. Keep the underlay MTU at least 17 bytes above the TUN MTU.
+
+Adaptive FEC estimates loss from the incoming direction and assumes
+symmetric loss. One-way loss on the outgoing path does not enable FEC on the
+affected sender. Recovered packets are delivered to the tunnel but are not
+marked in ACK feedback, so BBR may still treat the corresponding hole as a
+loss.
 
 .SH ENVIRONMENT
 .TP

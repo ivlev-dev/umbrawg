@@ -1,5 +1,5 @@
 Name:           umbrawg-tools
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        Rust command-line tools for the UmbraWG VPN
 License:        GPL-2.0-only
@@ -77,6 +77,10 @@ install -d -m0700 %{buildroot}%{_sysconfdir}/umbrawg
 %{_unitdir}/umbrawg@.service
 
 %changelog
+* Fri Nov 20 2026 Yuri Egorov <ye@umbra.org> - 0.3.0-1
+- Add BBRv3 and FEC configuration for kernel and userspace interfaces
+- Document netlink BBR/FEC attributes and obfuscation trade-offs
+
 * Mon Nov 16 2026 Yuri Egorov <ye@umbra.org> - 0.2.0-1
 - Initial Rust-based package with uwg, uwg-quick, man pages, completions,
   and systemd units

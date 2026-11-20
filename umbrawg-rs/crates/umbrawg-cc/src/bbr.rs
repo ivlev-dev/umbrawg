@@ -24,7 +24,8 @@ const FULL_BW_THRESHOLD: u64 = 1250;
 /// Rounds without such growth before the pipe is declared full.
 const FULL_BW_ROUNDS: u32 = 3;
 /// Per-round loss ratio (percent) that triggers the loss response.
-const LOSS_THRESHOLD_PCT: u64 = 2;
+// Random loss must not shrink the window; match the kernel controller.
+const LOSS_THRESHOLD_PCT: u64 = 20;
 /// Upper bound for the loss compensation of rate samples (percent).
 const LOSS_COMPENSATION_MAX_PCT: u64 = 25;
 /// RTT window length.

@@ -49,7 +49,7 @@ impl DeviceControl for Device {
                 key: "fec".to_owned(),
                 value: value.to_owned(),
             })?;
-            if fec.config().is_none() {
+            if fec != crate::FecMode::Off && fec.config().is_none() {
                 return Err(UapiError::InvalidValue {
                     key: "fec".to_owned(),
                     value: value.to_owned(),

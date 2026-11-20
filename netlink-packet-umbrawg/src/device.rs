@@ -3,9 +3,11 @@
 //! Builder for `UWG_CMD_SET_DEVICE` messages.
 
 use crate::{
-    attribute::UmbrawgAttribute,
+    attribute::{fec_pack, UmbrawgAttribute},
+    bbr::BbrMode,
     constants::{UWGDEVICE_F_REPLACE_PEERS, UWG_KEY_LEN},
     error::UmbrawgConfigError,
+    fec::FecMode,
     message::{UmbrawgCmd, UmbrawgMessage},
     peer_config::UmbrawgPeerConfig,
     range::u32_range_unpack,
@@ -86,6 +88,11 @@ pub const INTERMEDIATE_SPEC_MAX_LEN: usize = u16::MAX as usize - 5;
 /// values of the wrong length with
 /// [`UmbrawgConfigError::InvalidKeyLength`].
 ///
+/// BBR and FEC are configured with [`bbr`](Self::bbr) and [`fec`](Self::fec)
+/// using the typed [`BbrMode`] and [`FecMode`] enums; both are restored by
+/// [`from_message`](Self::from_message), so a `UWG_CMD_GET_DEVICE` reply
+/// survives a configuration round trip.
+///
 /// # Example
 ///
 /// ```
@@ -135,6 +142,8 @@ pub struct UmbrawgDeviceConfig {
     max_handshake_attempts: Option<u32>,
     random_trailers: Option<bool>,
     disable_cookies: Option<bool>,
+    bbr: Option<BbrMode>,
+    fec: Option<FecMode>,
     peers: Vec<UmbrawgPeerConfig>,
 }
 
@@ -175,6 +184,8 @@ impl UmbrawgDeviceConfig {
             max_handshake_attempts: None,
             random_trailers: None,
             disable_cookies: None,
+            bbr: None,
+            fec: None,
             peers: Vec::new(),
         }
     }
@@ -489,6 +500,24 @@ impl UmbrawgDeviceConfig {
         self
     }
 
+    /// Sets the BBR congestion control mode (`UWGDEVICE_A_BBR`).
+    ///
+    /// The mode is emitted as a `u8`: `0` off, `1` monitor, `2` on.
+    pub fn bbr(mut self, mode: BbrMode) -> Self {
+        self.bbr = Some(mode);
+        self
+    }
+
+    /// Sets the forward error correction mode (`UWGDEVICE_A_FEC`).
+    ///
+    /// The mode is emitted as a `u32`: `0` off, `1` adaptive, otherwise
+    /// `(K << 8) | M`. [`build`](Self::build) rejects
+    /// [`FecMode::Fixed`] shard counts that the kernel does not accept.
+    pub fn fec(mut self, mode: FecMode) -> Self {
+        self.fec = Some(mode);
+        self
+    }
+
     /// Adds a peer to the message.
     pub fn peer(mut self, peer: UmbrawgPeerConfig) -> Self {
         self.peers.push(peer);
@@ -632,6 +661,18 @@ impl UmbrawgDeviceConfig {
         if let Some(disabled) = self.disable_cookies {
             attributes.push(UmbrawgAttribute::DisableCookies(disabled));
         }
+        if let Some(mode) = self.bbr {
+            attributes.push(UmbrawgAttribute::Bbr(mode.as_u8()));
+        }
+        if let Some(mode) = self.fec {
+            let value = match mode {
+                FecMode::Off => crate::attribute::FEC_OFF,
+                FecMode::Adaptive => crate::attribute::FEC_ADAPTIVE,
+                FecMode::Fixed { k, m } => fec_pack(k, m)
+                    .ok_or(UmbrawgConfigError::InvalidFecShards { k, m })?,
+            };
+            attributes.push(UmbrawgAttribute::Fec(value));
+        }
         if !self.peers.is_empty() {
             let peers = self
                 .peers
@@ -648,16 +689,17 @@ impl UmbrawgDeviceConfig {
     ///
     /// Read-only attributes of `UWG_CMD_GET_DEVICE` replies are ignored:
     /// public keys, byte counters, handshake timestamps and unknown
-    /// attributes are dropped. When a reply carries both an interface name
-    /// and an interface index, the index is dropped because
+    /// attributes are dropped. The BBR and FEC modes are restored from
+    /// `UWGDEVICE_A_BBR` and `UWGDEVICE_A_FEC`. When a reply carries both an
+    /// interface name and an interface index, the index is dropped because
     /// `UWG_CMD_SET_DEVICE` accepts exactly one of them.
     ///
     /// # Errors
     ///
     /// Returns [`UmbrawgConfigError`] when the message carries a command
     /// other than [`UmbrawgCmd::GetDevice`] or [`UmbrawgCmd::SetDevice`],
-    /// or when an attribute cannot be represented by the builder, such as a
-    /// malformed magic header spec.
+    /// when a BBR or FEC payload is invalid, or when an attribute cannot be
+    /// represented by the builder, such as a malformed magic header spec.
     pub fn from_message(
         msg: &UmbrawgMessage,
     ) -> Result<Self, UmbrawgConfigError> {
@@ -789,10 +831,18 @@ impl UmbrawgDeviceConfig {
                 UmbrawgAttribute::DisableCookies(disabled) => {
                     config.disable_cookies = Some(*disabled);
                 }
+                UmbrawgAttribute::Bbr(value) => {
+                    config.bbr = Some(BbrMode::from_u8(*value).ok_or(
+                        UmbrawgConfigError::InvalidBbrMode { value: *value },
+                    )?);
+                }
+                UmbrawgAttribute::Fec(value) => {
+                    config.fec = Some(FecMode::from_u32(*value).ok_or(
+                        UmbrawgConfigError::InvalidFecValue { value: *value },
+                    )?);
+                }
                 UmbrawgAttribute::PublicKey(_)
                 | UmbrawgAttribute::Peer(_)
-                | UmbrawgAttribute::Bbr(_)
-                | UmbrawgAttribute::Fec(_)
                 | UmbrawgAttribute::Other(_) => {}
             }
         }

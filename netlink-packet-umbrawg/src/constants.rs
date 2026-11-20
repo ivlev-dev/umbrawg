@@ -12,6 +12,13 @@
 /// `NLA_EXACT_LEN` attributes.
 pub const UWG_KEY_LEN: usize = 32;
 
+/// Version of the `umbrawg` generic netlink family (`UWG_GENL_VERSION`).
+///
+/// Mirrors the UmbraWG 3.x UAPI header; the wire format of the attributes
+/// emitted by this crate (packed `u64` magic headers, `u32` keepalive ranges)
+/// is the version 3 format.
+pub const UWG_GENL_VERSION: u8 = 3;
+
 /// Dumps the state of a UmbraWG device.
 pub const UWG_CMD_GET_DEVICE: u8 = 0;
 

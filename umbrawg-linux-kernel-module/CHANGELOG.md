@@ -3,7 +3,44 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
-## [Не выпущено]
+## [0.3.0] — 2026-11-20
+
+### BBRv3 и FEC
+
+- CAPS/ACK/FEC_SHARD внутри AEAD-payload (wire-version 1): обмен
+  возможностями, ACK с bitmap 64 бита, Reed-Solomon шарды.
+- Kernel FEC: систематический RS GF(256) `0x11d`, fixed-профили
+  `K=1..8, M=1..2`, adaptive 2:1 с включением при loss > 1% после
+  прогрева 1024 пакетов и выключением через 5 с при < 0.2%.
+- FEC-TX бюджет `mtu - 50` (`mtu + 2 - 8 - 12 - 2*16`), случайный
+  `shard_len + 0..31`, случайный порядок шардов, джиттер блока
+  `0.5..2 мс`. Полноразмерные TCP-сегменты уходят legacy без
+  фрагментации.
+- Kernel BBR: token-bucket пейсер, Startup/ProbeBW/ProbeRTT, ring 4096,
+  loss-сигнал из дыр bitmap/watermark, GSO для FEC-шардов, кэш RS-матрицы,
+  header protection под RCU. `cwnd` — телеметрия, к отправке не
+  применяется; `SO_TXTIME`/EDT не используются.
+- Netlink: `UWGDEVICE_A_BBR=36` (`u8 0/1/2`) и `UWGDEVICE_A_FEC=37`
+  (`0`, `1`, `(K<<8)|M`); неподдерживаемые профили отклоняются `-EINVAL`.
+
+### Обфускация
+
+- Случайный padding control-кадров `0..15`, случайная ACK-каденция
+  (`8..16` пакетов или `2..5 мс`), случайный DSCP handshake, хвосты
+  FEC-шардов и перемешивание порядка.
+
+### Исправлено
+
+- FEC-таймеры: `timer_shutdown_sync`, флаг `disabled`, корректный порядок
+  с `synchronize_net`; устранён UAF при удалении пира.
+- CAPS: ограниченное число попыток, ответ только на изменившийся профиль,
+  отсутствие пинг-понга; смена `bbr`/`fec` через netlink переотправляет
+  CAPS.
+- ACK: валидация `largest`/`ack_delay`, ACK-на-ACK исключён, на простое
+  ACK не отправляется.
+- Приём: `get_unaligned_*` вместо кастов `skb->data`.
+- FEC RX: проверка `k/m/index/shard_len`, сброс состояния по keypair,
+  ограничение числа блоков.
 
 ### Добавлено
 

@@ -79,7 +79,7 @@ You may need to install kernel headers and/or build essentials packages before r
     sudo make dkms-install
     sudo dkms add -m umbrawg -v 1.0.0
     sudo dkms build -m umbrawg -v 1.0.0
-    sudo dkms install -m umbrawg -v 1.0.0
+    sudo dkms install -m umbrawg -v 0.3.0
     ```
 
     > [!NOTE]
@@ -133,7 +133,7 @@ Requirements and behaviour:
 
 | Job | Image | Contents |
 |---|---|---|
-| `версия` | `ubuntu-latest` | reads `UMBRAWG_VERSION` from `src/version.h` (`3.1.20261113-02`), derives the RPM-safe form (`3.1.20261113_02`) and requires the tag to be `v<version>` |
+| `версия` | `ubuntu-latest` | reads `UMBRAWG_VERSION` from `src/version.h` (`0.3.0`), derives the RPM-safe form (`0.3.0`) and requires the tag to be `v<version>` |
 | `arch` | `archlinux:latest` | `makepkg -f --noconfirm --nodeps` for `contrib/arch/umbrawg-dkms-git`, verifies `/usr/src/umbrawg-<pkgver>/` (`dkms.conf` with `PACKAGE_VERSION` and the `MAKE="make LLVM=1 …"` line, `version.h`, `uapi/umbrawg.h`, sources) and compiles the module from the **packaged** sources |
 | `rpm` | `fedora:latest` | builds the source tarball from the checkout, replaces `Version:` in `umbrawg-dkms.spec` with the RPM-safe version, runs `rpmbuild -ba` and checks `rpm -qlp` for the same file set |
 | `deb` | `debian:trixie` | `dpkg-buildpackage -b -us -uc` and checks the `/usr/src/umbrawg-*` payload of the `.deb` |
@@ -143,16 +143,16 @@ Notes:
 
 - no secrets are needed; nothing is uploaded to the AUR or Copr, both stay
   manual;
-- the tag must be `v3.1.20261113-02` (no tag exists yet). `workflow_dispatch`
+- the tag must be `v0.3.0` (no tag exists yet). `workflow_dispatch`
   accepts an optional `version` input for a manual check;
 - the `deb` job installs `dh-dkms` on top of `dkms`: on Debian trixie the
   `--with dkms` debhelper addon is a separate package, without it
   `dpkg-buildpackage` fails in `dh clean`;
-- `debian/changelog` и `umbrawg-dkms.spec` несут версию `3.1.20261113-02`
-  (`3.1.20261113_02` в RPM-поле `Version`), поэтому `.deb` называется
-  `umbrawg-dkms_3.1.20261113-02_all.deb` и ставит
-  `/usr/src/umbrawg-3.1.20261113-02`; `src/Makefile` и `src/dkms.conf`
-  по умолчанию содержат `1.0.0`, упаковщики переопределяют их;
+- `debian/changelog` и `umbrawg-dkms.spec` несут версию `0.3.0`
+  (`0.3.0` в RPM-поле `Version`), поэтому `.deb` называется
+  `umbrawg-dkms_0.3.0_all.deb` и ставит
+  `/usr/src/umbrawg-0.3.0`; `src/Makefile` и `src/dkms.conf`
+  по умолчанию содержат `0.3.0`, упаковщики переопределяют их;
 - the DKMS packages ship sources only, so building them on the target machine
   needs kernel headers (`linux-headers`, `kernel-devel`, `linux-headers-$(uname -r)`)
   and a toolchain; `dkms` is the only hard dependency;

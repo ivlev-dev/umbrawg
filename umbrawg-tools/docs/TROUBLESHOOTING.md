@@ -586,7 +586,7 @@ lsmod | grep umbrawg
 
 Ожидаемо: `vermagic` совпадает с `uname -r` (с учётом локальной версии),
 `modprobe` не ругается, `lsmod` показывает модуль. Версия у ручной сборки —
-`UMBRAWG_VERSION` (по умолчанию `1.0.0`), у пакета — `3.1.20261113-02`.
+`UMBRAWG_VERSION` (по умолчанию `0.3.0`), у пакета — `0.3.0`.
 
 **Источник.** `umbrawg-linux-kernel-module/README.md` (Important, Manual
 build, CI — определение компилятора по `CONFIG_CC_IS_CLANG`); `TODO.md`
@@ -639,18 +639,17 @@ build); `TODO.md` модуля.
    # Arch: пакет заголовков соответствующего ядра, например linux-headers
    ```
 
-2. Ручной DKMS-цикл (для исходников из `src/`, версия по умолчанию `1.0.0`):
+2. Ручной DKMS-цикл (для исходников из `src/`, версия по умолчанию `0.3.0`):
 
    ```sh
    cd umbrawg-linux-kernel-module/src
    sudo make dkms-install
    sudo dkms add -m umbrawg -v 1.0.0
    sudo dkms build -m umbrawg -v 1.0.0
-   sudo dkms install -m umbrawg -v 1.0.0
+   sudo dkms install -m umbrawg -v 0.3.0
    ```
 
-   Для пакета версия — `3.1.20261113-02` (Arch/RPM нормализуют дефис в
-   подчёркивание). Если сборка пакета не удалась, `.install`-скрипт не
+   Для пакета версия — `0.3.0`. Если сборка пакета не удалась, `.install`-скрипт не
    прерывает установку, а советует `dkms autoinstall`:
 
    ```sh

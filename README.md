@@ -67,6 +67,10 @@ cd go && go build ./... && go test ./...
 
 ## Документация
 
+- Расширение протокола (CAPS/ACK/FEC_SHARD, BBRv3, бюджет MTU) —
+  [`docs/PROTOCOL-EXT.md`](docs/PROTOCOL-EXT.md).
+- Состояние BBRv3/FEC, финальные замеры и ограничения —
+  [`docs/BBR-FEC-STATUS.md`](docs/BBR-FEC-STATUS.md).
 - Производительность и отклонённые эксперименты —
   `umbrawg-linux-kernel-module/docs/PERFORMANCE.md`.
 - Дизайн шардирования — `umbrawg-linux-kernel-module/docs/PEER-SHARDING.md`

@@ -10,9 +10,10 @@ use netlink_packet_generic::{GenlBuffer, GenlHeader};
 use pretty_assertions::assert_eq;
 
 use crate::{
-    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
-    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgDeviceConfig,
-    UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgTimeSpec,
+    BbrMode, FecMode, UmbrawgAddressFamily, UmbrawgAllowedIp,
+    UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd,
+    UmbrawgDeviceConfig, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
+    UmbrawgTimeSpec,
 };
 
 fn roundtrip_msg(msg: UmbrawgMessage) -> UmbrawgMessage {
@@ -1004,4 +1005,55 @@ fn test_fec_pack_and_unpack() {
     assert_eq!(fec_pack(200, 100), None);
     assert_eq!(fec_unpack(FEC_OFF), None);
     assert_eq!(fec_unpack(FEC_ADAPTIVE), None);
+}
+
+#[test]
+fn test_bbr_mode_conversions() {
+    assert_eq!(BbrMode::Off.as_u8(), 0);
+    assert_eq!(BbrMode::Monitor.as_u8(), 1);
+    assert_eq!(BbrMode::On.as_u8(), crate::attribute::BBR_MAX);
+    for mode in [BbrMode::Off, BbrMode::Monitor, BbrMode::On] {
+        assert_eq!(BbrMode::from_u8(mode.as_u8()), Some(mode));
+        assert_eq!(u8::from(mode), mode.as_u8());
+    }
+    for value in 3..=u8::MAX {
+        assert_eq!(BbrMode::from_u8(value), None);
+    }
+}
+
+#[test]
+fn test_fec_mode_conversions() {
+    assert_eq!(FecMode::Off.to_u32(), Some(0));
+    assert_eq!(FecMode::Adaptive.to_u32(), Some(1));
+    assert_eq!(FecMode::Fixed { k: 2, m: 1 }.to_u32(), Some(0x0201));
+    assert_eq!(FecMode::Fixed { k: 8, m: 2 }.to_u32(), Some(0x0802));
+    assert_eq!(FecMode::Fixed { k: 0, m: 1 }.to_u32(), None);
+    assert_eq!(FecMode::Fixed { k: 200, m: 100 }.to_u32(), None);
+
+    for mode in [
+        FecMode::Off,
+        FecMode::Adaptive,
+        FecMode::Fixed { k: 2, m: 1 },
+        FecMode::Fixed { k: 8, m: 2 },
+        FecMode::Fixed { k: 254, m: 1 },
+    ] {
+        assert_eq!(FecMode::from_u32(mode.to_u32().unwrap()), Some(mode));
+    }
+
+    for value in [2u32, 0x00ff, 0x0100, 0xff01, 0x010000] {
+        assert_eq!(FecMode::from_u32(value), None);
+    }
+}
+
+#[test]
+fn test_family_version_matches_uapi() {
+    use netlink_packet_generic::GenlFamily;
+
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: Vec::new(),
+    };
+    assert_eq!(msg.version(), crate::constants::UWG_GENL_VERSION);
+    assert_eq!(msg.version(), 3);
+    assert_eq!(UmbrawgMessage::family_name(), "umbrawg");
 }

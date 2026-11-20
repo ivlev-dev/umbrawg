@@ -1,3 +1,12 @@
+umbrawg-tools (0.3.0) unstable; urgency=medium
+
+  * BBRv3 and FEC for kernel and userspace interfaces.
+  * Wire extension CAPS/ACK/FEC_SHARD, adaptive 2:1 FEC and BBR pacing.
+  * Obfuscated ACK cadence, control-frame padding and FEC shard layout.
+  * Fixes from the 2026-11-20 audit, including FEC profile validation.
+
+ -- Yuri Egorov <ye@umbra.org>  Fri, 20 Nov 2026 20:00:00 +0300
+
 umbrawg-tools (0.2.0) unstable; urgency=medium
 
   * Rust-based package built from the Cargo workspace.

@@ -1,6 +1,6 @@
 # umbrawg-tools
 
-![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.2.0-blue.svg)
+![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
 
 Rust-утилиты для настройки UmbraWG: `uwg` и `uwg-quick`.
 
@@ -154,7 +154,7 @@ lintian dist/umbrawg-tools_*.deb
   `version` (без префикса `v`) сверяется с `Cargo.toml`:
 
   ```sh
-  gh workflow run packaging.yml -f version=0.2.0
+  gh workflow run packaging.yml -f version=0.3.0
   ```
 
 Каждый build-job выкладывает артефакт со сроком хранения 14 дней:
@@ -179,7 +179,7 @@ lintian dist/umbrawg-tools_*.deb
   из lock или обновите `Cargo.lock`.
 - Arch `-git` PKGBUILD тянет исходники сам: `master` tools и `main` netlink из
   GitHub, локальный checkout для него не используется. Пакет поэтому
-  VCS-снимок (`pkgver` вида `0.2.0.r<N>.g<хэш>`), а job дополнительно проверяет,
+  VCS-снимок (`pkgver` вида `0.3.0.r<N>.g<хэш>`), а job дополнительно проверяет,
   что версия в имени файла начинается с версии из `Cargo.toml`: тег должен
   указывать на HEAD той ветки, которую клонирует PKGBUILD.
 - Стабильный Arch-пакет собирается только если в

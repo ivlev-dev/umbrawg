@@ -17,11 +17,12 @@ python3 bench-report.py results-20261116-120000.csv --md report.md --agg agg.csv
 
 ## Тесты расширения BBR/FEC
 
-`bench/wire-ext.sh` и `bench/ext-matrix.sh` проверяют расширение `BBR`/`FEC`
-на той же топологии, что и остальной стенд: два netns, veth, kernel-модуль
-`umbrawg`; вторая сторона — Rust-демон (`IMPL=rust`) или ещё один
-kernel-интерфейс (`IMPL=kernel`). `wire-ext.sh` делает один прогон (ping, TCP,
-UDP, pcap), `ext-matrix.sh` прогоняет матрицу и собирает CSV.
+`bench/wire-ext.sh`, `bench/ext-matrix.sh` и `bench/ext-tests.sh` проверяют
+расширение `BBR`/`FEC` на той же топологии, что и остальной стенд: два netns,
+veth, kernel-модуль `umbrawg`; вторая сторона — Rust-демон (`IMPL=rust`) или
+ещё один kernel-интерфейс (`IMPL=kernel`). `wire-ext.sh` делает один прогон
+(ping, TCP, UDP, pcap), `ext-matrix.sh` прогоняет матрицу и собирает CSV,
+`ext-tests.sh` — набор interop-кейсов с порогами и кодом возврата.
 
 Нужны root, собранные `umbrawg.ko`, `uwg` и (для `IMPL=rust`) демон
 `umbrawg`. Пути переопределяются через `KO`, `UWG`, `RUST`. Стенд
@@ -108,6 +109,75 @@ UDP при `UDP_RATE`; `ping_loss` — потери ICMP (`SKIP` при `SKIP_PI
 — `OK` или причина отказа. Логи прогонов лежат в
 `bench/tmp/ext-matrix-<RUN_ID>/`. В конце печатается сводка по
 `impl/fec/bbr/loss` (медианы) и списки фрагментированных и упавших прогонов.
+
+### Interop-проверки (ext-tests.sh)
+
+`bench/ext-tests.sh` — готовый набор из шести interop-кейсов с порогами:
+каждый кейс вызывает `wire-ext.sh` (один или два раза), разбирает его
+`RESULT`-строку и печатает `PASS`/`FAIL` с причиной. Код возврата: `0` — все
+кейсы прошли, `1` — есть `FAIL`, `2` — ошибка конфигурации (неизвестный кейс,
+нет root, нет `wire-ext.sh`). Скрипт не заменяет матрицу: он отвечает на
+вопрос «не сломали ли расширение», а не «насколько быстро».
+
+```bash
+PLAN_ONLY=1 bash bench/ext-tests.sh              # план без root и трафика
+sudo bash bench/ext-tests.sh                     # все 6 кейсов, DUR=2
+sudo DUR=3 bash bench/ext-tests.sh               # длиннее и стабильнее
+sudo CASES="mixed-fec21 profile-mismatch" bash bench/ext-tests.sh
+sudo FAILFAST=1 KEEP=1 CASES="mixed-fec21" bash bench/ext-tests.sh
+```
+
+| Кейс | Что запускается | Условия PASS |
+|---|---|---|
+| `mixed-fec21` | `IMPL=rust`, `2:1` с обеих сторон, loss 2% в обе стороны | `result=OK`, TCP>0, `udp_loss<1`, `ping_loss=0`, `frag=0` |
+| `kernel-fec21` | `IMPL=kernel`, `2:1`, loss 2% в обе стороны | то же: FEC восстанавливает потери в kernel↔kernel |
+| `profile-mismatch` | kernel `2:1`, Rust `8:2`, loss 2% | TCP>0, `udp_loss` в `[1..4]`, `ping_loss=0`: несовпадение профилей уходит в legacy без чёрной дыры |
+| `adaptive-clean` | два прогона: `off` и `adaptive`, loss 0 | `udp_loss<0.05`, `tcp_adaptive >= (1-0.12)*tcp_off` — adaptive на чистом канале не включается и не платит overhead |
+| `bbr-fec-clean` | `IMPL=rust`, `2:1`, `BBR=on`, loss 0 | TCP ≥ 500 Мбит/с, `udp_loss<0.05`, `frag=0` |
+| `clean-fec21` | `IMPL=kernel`, `2:1`, loss 0 | TCP ≥ 1000 Мбит/с на 9k underlay, `udp_loss<0.05` |
+
+Пороги вынесены в переменные: `MIN_TCP_CLEAN_FEC` (1000),
+`MIN_TCP_BBR_FEC` (500), `MAX_UDP_LOSS_FEC` (1), `MAX_UDP_LOSS_CLEAN` (0.05),
+`MATCH_UDP_LOSS_MIN`/`MATCH_UDP_LOSS_MAX` (1/4), `ADAPTIVE_TCP_TOL` (0.12).
+Пороги про Мбит/с зависят от машины: на слабом или занятом стенде их
+опускают, а не «подгоняют» результат.
+
+Формат вывода:
+
+```
+[ext-tests] [1/7] run ...-mixed-fec21 impl=rust fec=2:1/2:1 bbr=off/off loss=2
+[ext-tests] [1/7] done 14s result=OK tcp=663.0 udp=399.9 udp_loss=0.2 ping=0 frag=0
+[ext-tests] CASE mixed-fec21 PASS  14s  info=[result=OK tcp=663.0>0 udp_loss=0.2<1 ping_loss=0==0 frag=0==0]
+[ext-tests] CASE bbr-fec-clean FAIL  21s  failed=[tcp=380.0 (нужно >=500)]
+[ext-tests]     info=[result=OK udp_loss=0<0.05 frag=0==0]
+[ext-tests] done: cases=6/6 pass=5 fail=1 runs=7/7 in 92s
+[ext-tests] failed cases: bbr-fec-clean
+```
+
+`info` — фактические значения и проверенные границы, `failed` — что именно
+не сошлось. `frag=SKIP` в `info` означает, что `tcpdump` недоступен и
+фрагментацию проверить нельзя (не ошибка); `result=FAIL_*` — `wire-ext.sh` не
+поднял туннель или уронил iperf3. Логи и артефакты прогонов лежат в
+`bench/tmp/ext-tests-<RUN_ID>/<tag>.log` и `<tag>-wire.*`.
+
+Переменные: `CASES` (список кейсов через пробел, порядок сохраняется), `DUR`
+(2), `DIR`, `UMTU`, `TUNMTU`, `NETEM_BOTH`, `UDP_RATE`, `SKIP_PING`, `KEEP`,
+`FAILFAST`, `RUN_ID`/`RUN_TAG`, `LOG_DIR`, `WIRE`, плюс пути стенда `KO`,
+`UWG`, `RUST` (пробрасываются в `wire-ext.sh`). `KEEP=1` оставляет netns и
+модуль после первого же прогона, поэтому следующие прогоны упадут — сочетайте
+его с `CASES`.
+
+**Время.** Семь прогонов при `DUR=2` — около 2 минут, при `DUR=3` — около
+3 минут (плюс настройка ≈9 с на прогон). `PLAN_ONLY=1` печатает кейсы,
+команды, число прогонов и оценку времени, не требуя root.
+
+**Новый кейс.** Добавьте имя в `known_case`, число прогонов в `runs_of`,
+функцию `case_<имя_через_подчёркивания>` (она вызывает `run_wire tag impl
+kfec rfec kbbr rbbr loss` и проверки `chk_cmp`/`chk_ping`/`chk_frag`), строку
+в `CASES` по умолчанию, команду в `print_plan` и строку в таблицу выше.
+`run_wire` заполняет `R_TCP`, `R_UDP`, `R_UDPLOSS`, `R_PING`, `R_FRAG`,
+`R_RESULT`; `chk_cmp` добавляет проверку в `info`/`failed` и возвращает
+ненулевой код при провале.
 
 ### Как читать результат
 
@@ -405,6 +475,8 @@ discover, но ломает оговорённое имя файла.
 
 ```bash
 bash -n bench.sh bench-lib.sh tests/test-bench-lib.sh
+bash -n bench/wire-ext.sh bench/ext-matrix.sh bench/ext-tests.sh
+PLAN_ONLY=1 bash bench/ext-tests.sh
 bash tests/test-bench-lib.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 bench/tests/test-detect.py

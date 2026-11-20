@@ -6,12 +6,15 @@ use netlink_packet_core::{
 use netlink_packet_generic::{GenlFamily, GenlHeader};
 
 use crate::{
-    constants::{UWG_CMD_GET_DEVICE, UWG_CMD_SET_DEVICE, UWG_CMD_UNKNOWN_PEER},
+    constants::{
+        UWG_CMD_GET_DEVICE, UWG_CMD_SET_DEVICE, UWG_CMD_UNKNOWN_PEER,
+        UWG_GENL_VERSION,
+    },
     UmbrawgAttribute,
 };
 
 const UWG_FAMILY_NAME: &str = "umbrawg";
-const UWG_FAMILY_VERSION: u8 = 2;
+const UWG_FAMILY_VERSION: u8 = UWG_GENL_VERSION;
 
 /* =========================
    CMD
@@ -70,8 +73,9 @@ impl From<u8> for UmbrawgCmd {
 /// [`GenlMessage`](netlink_packet_generic::GenlMessage).
 ///
 /// The family name is `"umbrawg"`, the family version emitted by this crate
-/// is `2`. The wire format of the attributes does not depend on it: the
-/// crate parses strings, `u32` and packed `u64` ranges alike.
+/// is [`UWG_GENL_VERSION`](crate::constants::UWG_GENL_VERSION), i.e. `3`, the
+/// version of the UmbraWG 3.x UAPI. The wire format of the attributes does not
+/// depend on it: the crate parses strings, `u32` and packed `u64` ranges alike.
 ///
 /// Build `UWG_CMD_SET_DEVICE` messages with
 /// [`UmbrawgDeviceConfig`](crate::UmbrawgDeviceConfig); use the

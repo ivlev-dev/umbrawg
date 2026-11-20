@@ -3,13 +3,20 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
-## [Не выпущено]
+## [0.3.0] — 2026-11-20
 
 ### Добавлено
 
 - `BBR = off|monitor|on` и `FEC = off|adaptive|K:M` в `[Interface]`,
   команды `uwg set <if> bbr|fec ...`, `uwg show <if> bbr|fec` и
-  UAPI-ключи `bbr=`/`fec=` для userspace-демона.
+  UAPI-ключи `bbr=`/`fec=` для userspace-демона. Для модуля ядра те же
+  значения уходят netlink-атрибутами `UWGDEVICE_A_BBR` (36) и
+  `UWGDEVICE_A_FEC` (37); `adaptive` — это профиль 2:1, fixed-профили
+  ядра ограничены `K<=8, M<=2`, неподдерживаемые значения возвращают
+  `EINVAL`.
+- `uwg show`/`showconf` печатают `bbr` и `fec` для обоих бэкендов;
+  man page `uwg(8)` описывает kernel-интерфейсы, диапазоны и
+  предупреждение о детектируемости.
 
 - `ExtraPorts` в `[Interface]`, `uwg set <if> extra-ports N` и
   `uwg show <if> extra-ports`: число
@@ -47,6 +54,15 @@
   `uwg -V` больше не принимается.
 - `uwg show <interface> <неизвестный параметр>` печатает usage после сообщения
   `Invalid parameter`, как legacy `wg show`.
+
+### Исправлено
+
+- Man page больше не утверждает, что `BBR`/`FEC` работают только с
+  userspace-демоном: оба режима применяются к kernel-интерфейсам через
+  netlink.
+- Неподдерживаемый FEC-профиль для ядра (`K>8` или `M>2`) больше не
+  выглядит успешно применённым: netlink возвращает `EINVAL`, и `uwg set`
+  завершается ошибкой.
 
 ## [0.2.0] — 2026-11-16
 

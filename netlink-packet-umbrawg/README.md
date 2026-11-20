@@ -111,12 +111,15 @@ let msg = UmbrawgDeviceConfig::by_name("uwg0")
     .header_protection_key([5u8; 32])
     .content_padding_addition(51, 197)
     .random_trailers(true)
+    .bbr(netlink_packet_umbrawg::BbrMode::On)
+    .fec(netlink_packet_umbrawg::FecMode::Fixed { k: 8, m: 2 })
     .peer(peer)
     .build()?;
 ```
 
 Configurations can be parsed back from messages with
-`UmbrawgDeviceConfig::from_message` / `UmbrawgPeerConfig::from_peer`.
+`UmbrawgDeviceConfig::from_message` / `UmbrawgPeerConfig::from_peer`,
+including the BBR and FEC modes.
 
 ### Full examples
 
@@ -143,6 +146,8 @@ In addition to standard WireGuard attributes (`PrivateKey`, `PublicKey`, `Peers`
 | `I1` … `I5` | Intermediate header descriptors (`String`)|
 | `HeaderProtectionKey` | UmbraWG 3.0 header protection key (32 bytes) |
 | `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts` | UmbraWG 3.0 tuning knobs (`u32`) |
+| `Bbr` | BBR congestion control mode (`u8`): `0` off, `1` monitor, `2` on. Builders use `BbrMode` |
+| `Fec` | Forward error correction (`u32`): `0` off, `1` adaptive, otherwise `(K << 8)` \| `M`. Builders use `FecMode` |
 
 Peer attributes: `PersistentKeepalive(u16)` is the pre-3.0 wire format, while
 UmbraWG 3.0 sends a `u32` (packed `u16` range), parsed into

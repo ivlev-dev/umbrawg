@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
 };
 
-use netlink_packet_core::{Emitable, ParseableParametrized};
+use netlink_packet_core::{DefaultNla, Emitable, ParseableParametrized};
 use netlink_packet_generic::GenlHeader;
 use netlink_packet_umbrawg::{
     constants::{
@@ -14,11 +14,11 @@ use netlink_packet_umbrawg::{
         UWGPEER_F_REPLACE_ALLOWEDIPS, UWGPEER_F_UPDATE_ONLY,
     },
     range::{u16_range_pack, u32_range_pack},
-    UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
-    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgConfigError,
-    UmbrawgDeviceConfig, UmbrawgMagicHeader, UmbrawgMessage, UmbrawgPeer,
-    UmbrawgPeerAttribute, UmbrawgPeerConfig, UmbrawgTimeSpec,
-    HEADER_PROTECTION_NONCE_LEN, INTERMEDIATE_SPEC_MAX_LEN,
+    BbrMode, FecMode, UmbrawgAddressFamily, UmbrawgAllowedIp,
+    UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd,
+    UmbrawgConfigError, UmbrawgDeviceConfig, UmbrawgMagicHeader,
+    UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgPeerConfig,
+    UmbrawgTimeSpec, HEADER_PROTECTION_NONCE_LEN, INTERMEDIATE_SPEC_MAX_LEN,
 };
 
 fn roundtrip_msg(msg: UmbrawgMessage) -> UmbrawgMessage {
@@ -913,6 +913,130 @@ fn device_from_message_keeps_index_without_name() {
     assert_eq!(
         config.build().unwrap().attributes,
         vec![UmbrawgAttribute::IfIndex(3)]
+    );
+}
+
+#[test]
+fn device_bbr_modes_roundtrip() {
+    for (mode, wire) in
+        [(BbrMode::Off, 0u8), (BbrMode::Monitor, 1), (BbrMode::On, 2)]
+    {
+        let config = UmbrawgDeviceConfig::by_name("uwg0").bbr(mode);
+        let msg = config.clone().build().unwrap();
+
+        assert_eq!(
+            msg.attributes,
+            vec![
+                UmbrawgAttribute::IfName("uwg0".into()),
+                UmbrawgAttribute::Bbr(wire),
+            ]
+        );
+        assert_eq!(roundtrip_msg(msg.clone()), msg);
+
+        let restored = UmbrawgDeviceConfig::from_message(&msg).unwrap();
+        assert_eq!(restored, config);
+        assert_eq!(restored.build().unwrap(), msg);
+    }
+}
+
+#[test]
+fn device_fec_modes_roundtrip() {
+    for (mode, wire) in [
+        (FecMode::Off, 0u32),
+        (FecMode::Adaptive, 1),
+        (FecMode::Fixed { k: 2, m: 1 }, 0x0201),
+        (FecMode::Fixed { k: 8, m: 2 }, 0x0802),
+    ] {
+        let config = UmbrawgDeviceConfig::by_name("uwg0").fec(mode);
+        let msg = config.clone().build().unwrap();
+
+        assert_eq!(
+            msg.attributes,
+            vec![
+                UmbrawgAttribute::IfName("uwg0".into()),
+                UmbrawgAttribute::Fec(wire),
+            ]
+        );
+        assert_eq!(roundtrip_msg(msg.clone()), msg);
+
+        let restored = UmbrawgDeviceConfig::from_message(&msg).unwrap();
+        assert_eq!(restored, config);
+        assert_eq!(restored.build().unwrap(), msg);
+    }
+}
+
+#[test]
+fn device_rejects_invalid_fec_shards() {
+    for (k, m) in [(0u8, 1u8), (1, 0), (255, 1), (200, 100)] {
+        let error = UmbrawgDeviceConfig::by_name("uwg0")
+            .fec(FecMode::Fixed { k, m })
+            .build()
+            .unwrap_err();
+        assert_eq!(error, UmbrawgConfigError::InvalidFecShards { k, m });
+    }
+
+    assert_eq!(FecMode::fixed(0, 1), None);
+    assert_eq!(FecMode::fixed(1, 0), None);
+    assert_eq!(FecMode::fixed(255, 1), None);
+    assert_eq!(
+        FecMode::fixed(10, 3).and_then(FecMode::to_u32),
+        Some(0x0a03)
+    );
+}
+
+#[test]
+fn device_from_message_ignores_unknown_attributes() {
+    let msg = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::Bbr(2),
+            UmbrawgAttribute::Fec(1),
+            UmbrawgAttribute::Other(DefaultNla::new(99, vec![1, 2, 3, 4])),
+        ],
+    };
+
+    let config = UmbrawgDeviceConfig::from_message(&msg).unwrap();
+    assert_eq!(
+        config,
+        UmbrawgDeviceConfig::by_name("uwg0")
+            .bbr(BbrMode::On)
+            .fec(FecMode::Adaptive)
+    );
+    assert_eq!(
+        config.build().unwrap().attributes,
+        vec![
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::Bbr(2),
+            UmbrawgAttribute::Fec(1),
+        ]
+    );
+}
+
+#[test]
+fn device_from_message_rejects_invalid_bbr_and_fec() {
+    let bbr = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::Bbr(3),
+        ],
+    };
+    assert_eq!(
+        UmbrawgDeviceConfig::from_message(&bbr),
+        Err(UmbrawgConfigError::InvalidBbrMode { value: 3 })
+    );
+
+    let fec = UmbrawgMessage {
+        cmd: UmbrawgCmd::GetDevice,
+        attributes: vec![
+            UmbrawgAttribute::IfName("uwg0".into()),
+            UmbrawgAttribute::Fec(2),
+        ],
+    };
+    assert_eq!(
+        UmbrawgDeviceConfig::from_message(&fec),
+        Err(UmbrawgConfigError::InvalidFecValue { value: 2 })
     );
 }
 
