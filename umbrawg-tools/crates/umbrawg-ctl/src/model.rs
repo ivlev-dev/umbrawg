@@ -1,5 +1,6 @@
 use std::net::SocketAddr;
 
+use netlink_packet_umbrawg::{BbrStats, FecStats};
 use umbrawg_config::{
     AllowedIp, Cipher, Config, DeviceConfig, Key, ObfuscationConfig, PeerConfig, U16Range,
 };
@@ -69,6 +70,8 @@ pub struct Device {
     pub fwmark: u32,
     pub bbr: Option<String>,
     pub fec: Option<String>,
+    pub bbr_stats: Option<BbrStats>,
+    pub fec_stats: Option<FecStats>,
     pub obfuscation: ObfuscationConfig,
     pub peers: Vec<Peer>,
 }
@@ -85,6 +88,8 @@ impl Device {
             fwmark: 0,
             bbr: None,
             fec: None,
+            bbr_stats: None,
+            fec_stats: None,
             obfuscation: ObfuscationConfig::default(),
             peers: Vec::new(),
         }

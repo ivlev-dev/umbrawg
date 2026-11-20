@@ -17,6 +17,9 @@
 //! - [`UmbrawgAttribute`] covers all `UWGDEVICE_A_*` attributes, including the
 //!   UmbraWG 3.0 header protection key, the UmbraWG 3.1
 //!   `RandomTrailers`/`DisableCookies` switches and the BBR/FEC modes.
+//! - [`FecStats`] and [`BbrStats`] carry the read-only device-wide FEC
+//!   counters and BBR state of `UWGDEVICE_A_FEC_STATS` and
+//!   `UWGDEVICE_A_BBR_STATS`.
 //! - [`UmbrawgPeer`] and [`UmbrawgPeerAttribute`] describe the nested peer
 //!   list, [`UmbrawgAllowedIp`] the nested allowed IP entries.
 //! - [`UmbrawgDeviceConfig`] and [`UmbrawgPeerConfig`] are validated builders
@@ -130,6 +133,7 @@ mod message;
 mod peer;
 mod peer_config;
 mod socket_addr;
+mod stats;
 
 #[cfg(test)]
 mod test;
@@ -151,4 +155,5 @@ pub use self::{
     message::{UmbrawgCmd, UmbrawgMessage},
     peer::{UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgTimeSpec},
     peer_config::UmbrawgPeerConfig,
+    stats::{BbrStats, FecStats},
 };

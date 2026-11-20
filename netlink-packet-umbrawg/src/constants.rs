@@ -130,3 +130,68 @@ pub const UWGALLOWEDIP_A_FLAGS: u16 = 4;
 
 /// Removes the allowed IP instead of adding it.
 pub const UWGALLOWEDIP_F_REMOVE_ME: u32 = 1 << 0;
+
+/// `UWGDEVICE_A_FEC_STATS`: nested device-wide FEC counters.
+///
+/// Read-only attribute of `UWG_CMD_GET_DEVICE` replies; see
+/// [`FecStats`](crate::FecStats).
+pub const UWGDEVICE_A_FEC_STATS: u16 = 38;
+
+/// `UWGDEVICE_A_BBR_STATS`: nested device-wide BBR state.
+///
+/// Read-only attribute of `UWG_CMD_GET_DEVICE` replies; see
+/// [`BbrStats`](crate::BbrStats).
+pub const UWGDEVICE_A_BBR_STATS: u16 = 39;
+
+/// `UWGDEVICE_FEC_STATS_A_BLOCKS_ENCODED`: `u64` count of encoded blocks.
+pub const UWGDEVICE_FEC_STATS_A_BLOCKS_ENCODED: u16 = 1;
+
+/// `UWGDEVICE_FEC_STATS_A_SHARDS_SENT`: `u64` count of transmitted shards.
+pub const UWGDEVICE_FEC_STATS_A_SHARDS_SENT: u16 = 2;
+
+/// `UWGDEVICE_FEC_STATS_A_BLOCKS_DECODED`: `u64` count of decoded blocks.
+pub const UWGDEVICE_FEC_STATS_A_BLOCKS_DECODED: u16 = 3;
+
+/// `UWGDEVICE_FEC_STATS_A_PACKETS_RECOVERED`: `u64` count of data shards
+/// restored from parity.
+pub const UWGDEVICE_FEC_STATS_A_PACKETS_RECOVERED: u16 = 4;
+
+/// `UWGDEVICE_FEC_STATS_A_DECODE_FAIL`: `u64` count of decoding failures.
+pub const UWGDEVICE_FEC_STATS_A_DECODE_FAIL: u16 = 5;
+
+/// `UWGDEVICE_FEC_STATS_A_DROPPED_BOUNDS`: `u64` count of shards dropped
+/// because their geometry was out of bounds.
+pub const UWGDEVICE_FEC_STATS_A_DROPPED_BOUNDS: u16 = 6;
+
+/// `UWGDEVICE_FEC_STATS_A_DROPPED_DISABLED`: `u64` count of shards dropped
+/// because FEC was disabled.
+pub const UWGDEVICE_FEC_STATS_A_DROPPED_DISABLED: u16 = 7;
+
+/// `UWGDEVICE_BBR_STATS_A_MODE`: `u8` BBR mode (`0` off, `1` monitor,
+/// `2` on).
+pub const UWGDEVICE_BBR_STATS_A_MODE: u16 = 1;
+
+/// `UWGDEVICE_BBR_STATS_A_CWND`: `u64` congestion window in bytes.
+pub const UWGDEVICE_BBR_STATS_A_CWND: u16 = 2;
+
+/// `UWGDEVICE_BBR_STATS_A_INFLIGHT`: `u64` bytes in flight.
+pub const UWGDEVICE_BBR_STATS_A_INFLIGHT: u16 = 3;
+
+/// `UWGDEVICE_BBR_STATS_A_PACING_RATE`: `u64` pacing rate in bytes per
+/// second.
+pub const UWGDEVICE_BBR_STATS_A_PACING_RATE: u16 = 4;
+
+/// `UWGDEVICE_BBR_STATS_A_BTL_BW`: `u64` bottleneck bandwidth estimate in
+/// bytes per second.
+pub const UWGDEVICE_BBR_STATS_A_BTL_BW: u16 = 5;
+
+/// `UWGDEVICE_BBR_STATS_A_MIN_RTT_NS`: `u64` minimal round-trip time in
+/// nanoseconds.
+pub const UWGDEVICE_BBR_STATS_A_MIN_RTT_NS: u16 = 6;
+
+/// `UWGDEVICE_BBR_STATS_A_ROUND_LOST`: `u32` packets lost in the current
+/// round.
+pub const UWGDEVICE_BBR_STATS_A_ROUND_LOST: u16 = 7;
+
+/// `UWGDEVICE_BBR_STATS_A_PEERS`: `u32` number of peers tracked by BBR.
+pub const UWGDEVICE_BBR_STATS_A_PEERS: u16 = 8;

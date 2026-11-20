@@ -417,6 +417,8 @@ impl DeviceBuilder {
                 UmbrawgAttribute::ExtraPorts(value) => self.device.extra_ports = Some(*value),
                 UmbrawgAttribute::Bbr(value) => self.device.bbr = Some(bbr_text(*value)?),
                 UmbrawgAttribute::Fec(value) => self.device.fec = Some(fec_text(*value)?),
+                UmbrawgAttribute::BbrStats(value) => self.device.bbr_stats = Some(*value),
+                UmbrawgAttribute::FecStats(value) => self.device.fec_stats = Some(*value),
                 UmbrawgAttribute::Fwmark(value) => self.device.fwmark = *value,
                 UmbrawgAttribute::JC(value) => self.device.obfuscation.jc = Some(*value),
                 UmbrawgAttribute::Jmin(value) => self.device.obfuscation.jmin = Some(*value),
@@ -1236,5 +1238,49 @@ mod tests {
         assert!(builder.apply(&[UmbrawgAttribute::Bbr(3)]).is_err());
         let mut builder = DeviceBuilder::new("test0");
         assert!(builder.apply(&[UmbrawgAttribute::Fec(2)]).is_err());
+    }
+
+    #[test]
+    fn reads_fec_and_bbr_stats() {
+        let fec = crate::FecStats {
+            blocks_encoded: 1,
+            shards_sent: 2,
+            blocks_decoded: 3,
+            packets_recovered: 4,
+            decode_fail: 5,
+            dropped_bounds: 6,
+            dropped_disabled: 7,
+        };
+        let bbr = crate::BbrStats {
+            mode: 2,
+            cwnd: 131_072,
+            inflight: 4096,
+            pacing_rate: 1_000_000,
+            btl_bw: 2_000_000,
+            min_rtt_ns: 12_345,
+            round_lost: 8,
+            peers: 1,
+        };
+        let mut builder = DeviceBuilder::new("test0");
+        builder
+            .apply(&[
+                UmbrawgAttribute::FecStats(fec),
+                UmbrawgAttribute::BbrStats(bbr),
+            ])
+            .expect("apply");
+        let device = builder.finish();
+        assert_eq!(device.fec_stats, Some(fec));
+        assert_eq!(device.bbr_stats, Some(bbr));
+    }
+
+    #[test]
+    fn missing_stats_stay_none() {
+        let mut builder = DeviceBuilder::new("test0");
+        builder
+            .apply(&[UmbrawgAttribute::IfName("test0".to_owned())])
+            .expect("apply");
+        let device = builder.finish();
+        assert_eq!(device.fec_stats, None);
+        assert_eq!(device.bbr_stats, None);
     }
 }

@@ -11,6 +11,7 @@ pub mod rtnl;
 
 pub use error::Error;
 pub use model::{ConfigApplication, Device, Peer, SetDevice, TimeSpec};
+pub use netlink_packet_umbrawg::{BbrStats, FecStats};
 pub use uapi::{
     build_set_request, parse_get_response, parse_set_response, socket_dir, socket_path,
     DEFAULT_SOCKET_DIR,

@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use umbrawg_config::{format_endpoint, Key, U16Range, U32Range};
-use umbrawg_ctl::{Device, Peer, TimeSpec};
+use umbrawg_ctl::{BbrStats, Device, FecStats, Peer, TimeSpec};
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -210,6 +210,24 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
             style.bold("disable cookies"),
             bool_text(value)
         );
+    }
+    match &device.bbr_stats {
+        Some(stats) => {
+            let _ = writeln!(output, "  {}:", style.bold("bbr stats"));
+            output.push_str(&bbr_stats_text(stats, "    "));
+        }
+        None => {
+            let _ = writeln!(output, "  {}: (none)", style.bold("bbr stats"));
+        }
+    }
+    match &device.fec_stats {
+        Some(stats) => {
+            let _ = writeln!(output, "  {}:", style.bold("fec stats"));
+            output.push_str(&fec_stats_text(stats, "    "));
+        }
+        None => {
+            let _ = writeln!(output, "  {}: (none)", style.bold("fec stats"));
+        }
     }
 
     let peers = sorted_peers(device);
@@ -423,6 +441,18 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
         "fec" => {
             let _ = writeln!(output, "{prefix}{}", option_text(&device.fec, "(none)"));
         }
+        "bbr-stats" => match &device.bbr_stats {
+            Some(stats) => output.push_str(&bbr_stats_text(stats, &prefix)),
+            None => {
+                let _ = writeln!(output, "{prefix}(none)");
+            }
+        },
+        "fec-stats" => match &device.fec_stats {
+            Some(stats) => output.push_str(&fec_stats_text(stats, &prefix)),
+            None => {
+                let _ = writeln!(output, "{prefix}(none)");
+            }
+        },
         "jc" => {
             let _ = writeln!(output, "{prefix}{}", u16_text(device.obfuscation.jc));
         }
@@ -705,6 +735,48 @@ fn u32_range_text(value: Option<U32Range>) -> String {
     value.unwrap_or_default().to_string()
 }
 
+fn bbr_mode_text(mode: u8) -> &'static str {
+    match mode {
+        0 => "off",
+        1 => "monitor",
+        2 => "on",
+        _ => "unknown",
+    }
+}
+
+fn bbr_stats_text(stats: &BbrStats, prefix: &str) -> String {
+    let mut output = String::new();
+    for (name, value) in [
+        ("mode", bbr_mode_text(stats.mode).to_owned()),
+        ("cwnd", stats.cwnd.to_string()),
+        ("inflight", stats.inflight.to_string()),
+        ("pacing_rate", stats.pacing_rate.to_string()),
+        ("btl_bw", stats.btl_bw.to_string()),
+        ("min_rtt_ns", stats.min_rtt_ns.to_string()),
+        ("round_lost", stats.round_lost.to_string()),
+        ("peers", stats.peers.to_string()),
+    ] {
+        let _ = writeln!(output, "{prefix}{name}={value}");
+    }
+    output
+}
+
+fn fec_stats_text(stats: &FecStats, prefix: &str) -> String {
+    let mut output = String::new();
+    for (name, value) in [
+        ("blocks_encoded", stats.blocks_encoded),
+        ("shards_sent", stats.shards_sent),
+        ("blocks_decoded", stats.blocks_decoded),
+        ("packets_recovered", stats.packets_recovered),
+        ("decode_fail", stats.decode_fail),
+        ("dropped_bounds", stats.dropped_bounds),
+        ("dropped_disabled", stats.dropped_disabled),
+    ] {
+        let _ = writeln!(output, "{prefix}{name}={value}");
+    }
+    output
+}
+
 fn option_text(value: &Option<String>, missing: &str) -> String {
     value.clone().unwrap_or_else(|| missing.to_owned())
 }
@@ -813,6 +885,25 @@ mod tests {
         device.fwmark = 0x1234;
         device.bbr = Some("monitor".to_owned());
         device.fec = Some("10:3".to_owned());
+        device.bbr_stats = Some(BbrStats {
+            mode: 2,
+            cwnd: 131_072,
+            inflight: 4096,
+            pacing_rate: 1_000_000,
+            btl_bw: 2_000_000,
+            min_rtt_ns: 12_345,
+            round_lost: 8,
+            peers: 1,
+        });
+        device.fec_stats = Some(FecStats {
+            blocks_encoded: 10,
+            shards_sent: 12,
+            blocks_decoded: 9,
+            packets_recovered: 1,
+            decode_fail: 2,
+            dropped_bounds: 3,
+            dropped_disabled: 4,
+        });
         device.obfuscation.jc = Some(4);
         device.obfuscation.jmin = Some(40);
         device.obfuscation.jmax = Some(70);
@@ -851,6 +942,46 @@ mod tests {
     }
 
     #[test]
+    fn shows_bbr_and_fec_stats() {
+        let device = sample_device();
+        assert_eq!(
+            ugly(&device, "bbr-stats", false).expect("valid"),
+            "mode=on\ncwnd=131072\ninflight=4096\npacing_rate=1000000\nbtl_bw=2000000\nmin_rtt_ns=12345\nround_lost=8\npeers=1\n"
+        );
+        assert_eq!(
+            ugly(&device, "fec-stats", false).expect("valid"),
+            "blocks_encoded=10\nshards_sent=12\nblocks_decoded=9\npackets_recovered=1\ndecode_fail=2\ndropped_bounds=3\ndropped_disabled=4\n"
+        );
+        assert_eq!(
+            ugly(&device, "fec-stats", true).expect("valid"),
+            "uwg0\tblocks_encoded=10\nuwg0\tshards_sent=12\nuwg0\tblocks_decoded=9\nuwg0\tpackets_recovered=1\nuwg0\tdecode_fail=2\nuwg0\tdropped_bounds=3\nuwg0\tdropped_disabled=4\n"
+        );
+
+        let mut device = sample_device();
+        device.bbr_stats = None;
+        device.fec_stats = None;
+        assert_eq!(
+            ugly(&device, "bbr-stats", false).expect("valid"),
+            "(none)\n"
+        );
+        assert_eq!(
+            ugly(&device, "fec-stats", false).expect("valid"),
+            "(none)\n"
+        );
+        let output = pretty_at(&device, false, 1_700_000_060);
+        assert!(output.contains("  bbr stats: (none)\n"), "{output}");
+        assert!(output.contains("  fec stats: (none)\n"), "{output}");
+    }
+
+    #[test]
+    fn bbr_stats_mode_names() {
+        assert_eq!(bbr_mode_text(0), "off");
+        assert_eq!(bbr_mode_text(1), "monitor");
+        assert_eq!(bbr_mode_text(2), "on");
+        assert_eq!(bbr_mode_text(3), "unknown");
+    }
+
+    #[test]
     fn pretty_output_contains_fields() {
         let output = pretty_at(&sample_device(), false, 1_700_000_060);
         assert!(output.starts_with("interface: uwg0\n"));
@@ -866,6 +997,8 @@ mod tests {
         assert!(output.contains("  latest handshake: 1 minute ago\n"));
         assert!(output.contains("  transfer: 2.00 KiB received, 10 B sent\n"));
         assert!(output.contains("  persistent keepalive: 25\n"));
+        assert!(output.contains("  bbr stats:\n    mode=on\n    cwnd=131072\n"));
+        assert!(output.contains("  fec stats:\n    blocks_encoded=10\n"));
     }
 
     #[test]

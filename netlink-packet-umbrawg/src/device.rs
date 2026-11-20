@@ -688,11 +688,11 @@ impl UmbrawgDeviceConfig {
     /// Parses an existing message back into a configuration.
     ///
     /// Read-only attributes of `UWG_CMD_GET_DEVICE` replies are ignored:
-    /// public keys, byte counters, handshake timestamps and unknown
-    /// attributes are dropped. The BBR and FEC modes are restored from
-    /// `UWGDEVICE_A_BBR` and `UWGDEVICE_A_FEC`. When a reply carries both an
-    /// interface name and an interface index, the index is dropped because
-    /// `UWG_CMD_SET_DEVICE` accepts exactly one of them.
+    /// public keys, byte counters, handshake timestamps, the FEC/BBR
+    /// statistics and unknown attributes are dropped. The BBR and FEC modes
+    /// are restored from `UWGDEVICE_A_BBR` and `UWGDEVICE_A_FEC`. When a
+    /// reply carries both an interface name and an interface index, the index
+    /// is dropped because `UWG_CMD_SET_DEVICE` accepts exactly one of them.
     ///
     /// # Errors
     ///
@@ -843,6 +843,8 @@ impl UmbrawgDeviceConfig {
                 }
                 UmbrawgAttribute::PublicKey(_)
                 | UmbrawgAttribute::Peer(_)
+                | UmbrawgAttribute::FecStats(_)
+                | UmbrawgAttribute::BbrStats(_)
                 | UmbrawgAttribute::Other(_) => {}
             }
         }

@@ -10,8 +10,10 @@ use netlink_packet_core::{
 
 use super::peer::UmbrawgPeers;
 use crate::{
-    constants::UWG_KEY_LEN, device::EXTRA_PORTS_MAX, range::u32_range_unpack,
-    UmbrawgPeer,
+    constants::{UWGDEVICE_A_BBR_STATS, UWGDEVICE_A_FEC_STATS, UWG_KEY_LEN},
+    device::EXTRA_PORTS_MAX,
+    range::u32_range_unpack,
+    BbrStats, FecStats, UmbrawgPeer,
 };
 
 const UWGDEVICE_A_IFINDEX: u16 = 1;
@@ -350,6 +352,16 @@ pub enum UmbrawgAttribute {
     /// and `K + M <= 255`. Use [`fec_pack`] and [`fec_unpack`] to convert
     /// between shard counts and the wire value.
     Fec(u32),
+    /// `UWGDEVICE_A_FEC_STATS`: nested device-wide FEC counters.
+    ///
+    /// Read-only: the kernel fills it in `UWG_CMD_GET_DEVICE` replies and
+    /// ignores it in `UWG_CMD_SET_DEVICE` requests.
+    FecStats(FecStats),
+    /// `UWGDEVICE_A_BBR_STATS`: nested device-wide BBR state.
+    ///
+    /// Read-only: the kernel fills it in `UWG_CMD_GET_DEVICE` replies and
+    /// ignores it in `UWG_CMD_SET_DEVICE` requests.
+    BbrStats(BbrStats),
     /// An attribute this crate does not know; kept verbatim.
     Other(DefaultNla),
 }
@@ -398,6 +410,8 @@ impl Nla for UmbrawgAttribute {
             | Self::ExtraPorts(_)
             | Self::Bbr(_) => 1,
             Self::Fec(_) => 4,
+            Self::FecStats(v) => v.value_len(),
+            Self::BbrStats(v) => v.value_len(),
             // Umbra Specific Fields
             Self::Peer(v) => v.attributes_len(),
             Self::JC(_)
@@ -461,6 +475,8 @@ impl Nla for UmbrawgAttribute {
             Self::ExtraPorts(_) => UWGDEVICE_A_EXTRA_PORTS,
             Self::Bbr(_) => UWGDEVICE_A_BBR,
             Self::Fec(_) => UWGDEVICE_A_FEC,
+            Self::FecStats(_) => UWGDEVICE_A_FEC_STATS | NLA_F_NESTED,
+            Self::BbrStats(_) => UWGDEVICE_A_BBR_STATS | NLA_F_NESTED,
             Self::Other(attr) => attr.kind(),
         }
     }
@@ -517,6 +533,8 @@ impl Nla for UmbrawgAttribute {
             Self::ExtraPorts(v) => buffer[0] = *v,
             Self::Bbr(v) => buffer[0] = *v,
             Self::Fec(v) => emit_u32(buffer, *v).unwrap(),
+            Self::FecStats(v) => v.emit_value(buffer),
+            Self::BbrStats(v) => v.emit_value(buffer),
             Self::Other(attr) => attr.emit_value(buffer),
         }
     }
@@ -692,6 +710,14 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 }
                 Self::Fec(value)
             }
+            UWGDEVICE_A_FEC_STATS => Self::FecStats(
+                FecStats::parse(buf)
+                    .context("invalid UWGDEVICE_A_FEC_STATS value")?,
+            ),
+            UWGDEVICE_A_BBR_STATS => Self::BbrStats(
+                BbrStats::parse(buf)
+                    .context("invalid UWGDEVICE_A_BBR_STATS value")?,
+            ),
             kind => Self::Other(
                 DefaultNla::parse(buf)
                     .context(format!("unknown NLA type {kind}"))?,

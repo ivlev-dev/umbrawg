@@ -89,7 +89,7 @@ pub fn command() -> clap::Command {
 
 pub fn show_usage() -> String {
     format!(
-        "Usage: {PROGRAM} show {{ <interface> | all | interfaces }} [public-key | private-key | listen-port | extra-ports | fwmark | bbr | fec | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | advanced-security | dump | jc | jmin | jmax | s1 | s2 | s3 | s4 | h1 | h2 | h3 | h4 | i1 | i2 | i3 | i4 | i5 | header-protection-key | content-padding-addition | rekey-after-time | rekey-timeout | reject-after-time | keepalive-timeout | max-handshake-attempts | max_handshake_attempts | random-trailers | disable-cookies]"
+        "Usage: {PROGRAM} show {{ <interface> | all | interfaces }} [public-key | private-key | listen-port | extra-ports | fwmark | bbr | fec | bbr-stats | fec-stats | peers | preshared-keys | endpoints | allowed-ips | latest-handshakes | transfer | persistent-keepalive | advanced-security | dump | jc | jmin | jmax | s1 | s2 | s3 | s4 | h1 | h2 | h3 | h4 | i1 | i2 | i3 | i4 | i5 | header-protection-key | content-padding-addition | rekey-after-time | rekey-timeout | reject-after-time | keepalive-timeout | max-handshake-attempts | max_handshake_attempts | random-trailers | disable-cookies]"
     )
 }
 
@@ -119,6 +119,11 @@ mod tests {
         assert!(show_usage().contains("| bbr | fec |"));
         assert!(set_usage().contains("[bbr <off|monitor|on>]"));
         assert!(set_usage().contains("[fec <off|adaptive|K:M>]"));
+    }
+
+    #[test]
+    fn usage_lists_bbr_and_fec_stats() {
+        assert!(show_usage().contains("| bbr-stats | fec-stats |"));
     }
 
     #[test]

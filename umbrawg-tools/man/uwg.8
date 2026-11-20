@@ -40,7 +40,7 @@ prints one tab-separated value per line, intended for scripts. With
 .PP
 \fIPARAMETER\fP is one of:
 \fIpublic-key\fP, \fIprivate-key\fP, \fIlisten-port\fP, \fIextra-ports\fP, \fIfwmark\fP,
-\fIbbr\fP, \fIfec\fP,
+\fIbbr\fP, \fIfec\fP, \fIbbr-stats\fP, \fIfec-stats\fP,
 \fIpeers\fP, \fIpreshared-keys\fP, \fIendpoints\fP, \fIallowed-ips\fP,
 \fIlatest-handshakes\fP, \fIpersistent-keepalive\fP, \fItransfer\fP,
 \fIdump\fP, \fIjc\fP, \fIjmin\fP, \fIjmax\fP, \fIs1\fP, \fIs2\fP, \fIs3\fP,
@@ -52,6 +52,7 @@ prints one tab-separated value per line, intended for scripts. With
 \fIadvanced-security\fP.
 \fBmax_handshake_attempts\fP is accepted as an alias of
 \fImax-handshake-attempts\fP for compatibility with legacy \fBawg\fP(8).
+\fBbbr-stats\fP and \fBfec-stats\fP print one \fIkey=value\fP pair per line.
 .TP
 \fBshowconf\fP \fI<interface>\fP
 Shows the current configuration in the format described by
