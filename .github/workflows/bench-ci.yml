@@ -98,7 +98,9 @@ jobs:
           test -x umbrawg-tools/target/release/uwg
 
       - name: Detect-тесты
-        run: python3 bench/tests/test-detect.py
+        run: |
+          python3 bench/tests/test-detect.py
+          python3 bench/tests/test-golden-pcap.py
 
       - name: PLAN_ONLY для interop-кейсов
         env:

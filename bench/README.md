@@ -105,11 +105,12 @@ sudo bash bench/ext-matrix.sh                # 32 прогона
 sudo DUR=2 FEC_LIST="off 2:1 adaptive" bash bench/ext-matrix.sh
 sudo LOSS_LIST="0 2 5" NETEM_RATE=100mbit bash bench/ext-matrix.sh
 sudo DIR_LIST="k0 k1" IMPL_LIST=kernel bash bench/ext-matrix.sh
+sudo IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive" BBR_LIST="off on" LOSS_LIST="0 2" bash bench/ext-matrix.sh
 ```
 
 | Ось | Значения по умолчанию | Что проверяет |
 |---|---|---|
-| `IMPL_LIST` | `rust kernel` | mixed kernel↔Rust и kernel↔kernel |
+| `IMPL_LIST` | `rust kernel` | mixed kernel↔Rust и kernel↔kernel; `rust2` — Rust↔Rust без модуля (не требует `umbrawg.ko`) |
 | `FEC_LIST` | `off 2:1 8:2 adaptive` | цена fixed-режимов и поведение adaptive |
 | `BBR_LIST` | `off on` | вклад BBR-пейсинга |
 | `LOSS_LIST` | `0 2` | чистый канал и 2% потерь |
@@ -530,6 +531,30 @@ detect-тесты — регрессии анализатора. Логи про
 модуля и при необходимости гоняются отдельно:
 `sudo CASES="rust2-fec21 rust2-bbr-fec" bash bench/ext-tests.sh`.
 
+## CI (bench-matrix.yml)
+
+`.github/workflows/bench-matrix.yml` запускается по ночному cron (04:00 UTC) и
+вручную (`workflow_dispatch`), **не** на каждый push/PR. Джоб `bench-matrix`
+на `ubuntu-latest`:
+
+1. проверяет `bash -n bench/wire-ext.sh bench/ext-matrix.sh`;
+2. ставит Rust и кэширует сборку, собирает `umbrawg` (`cargo build --release
+   --locked -p umbrawg`, manifest `umbrawg-rs/Cargo.toml`) и `uwg`
+   (`umbrawg-tools`);
+3. ставит `iperf3`, `iproute2`, `tcpdump`, `python3`;
+4. гоняет `PLAN_ONLY=1` для матрицы `IMPL_LIST=rust2`, `FEC_LIST="off 2:1 8:2
+   adaptive"`, `BBR_LIST="off on"`, `LOSS_LIST="0 2"`;
+5. выполняет полный прогон
+   `sudo -E env DUR=2 IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive"
+   BBR_LIST="off on" LOSS_LIST="0 2" bash bench/ext-matrix.sh`.
+
+Модуль `umbrawg.ko` **не собирается и не загружается**: на раннере нет
+подходящего ядра, а режим `rust2` (Rust↔Rust без модуля) его не требует.
+Поэтому workflow покрывает только `rust2`; interop с kernel-модулем остаётся
+на стенде и в `bench-ci.yml`. Логи и CSV (`bench/tmp/ext-matrix-*.csv` и
+`bench/tmp/ext-matrix-*/`) уходят в артефакт `bench-matrix-logs`
+(`if: always()`, retention 30 дней).
+
 ## Проверки
 
 ```bash
@@ -540,4 +565,5 @@ bash tests/test-bench-lib.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 bench/tests/test-detect.py
 python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/bench-ci.yml"))'
+python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/bench-matrix.yml"))'
 ```
