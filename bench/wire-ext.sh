@@ -393,10 +393,15 @@ else
         sleep 0.2
     fi
 
-    MSS=$((TUNMTU - 40))
+    # FEC/underlay policy can lower the interface MTU after setconf, so size
+    # the iperf3 blocks from the live MTU instead of the requested TUNMTU.
+    DEV_MTU=$(ip netns exec "$KNS" ip -o link show "$KIF" 2>/dev/null |
+        sed -n 's/.* mtu \([0-9][0-9]*\).*/\1/p' | head -1)
+    [ -n "$DEV_MTU" ] || DEV_MTU=$TUNMTU
+    MSS=$((DEV_MTU - 40))
     [ "$MSS" -gt 1420 ] && MSS=1420
     [ "$MSS" -lt 64 ] && MSS=64
-    UDPLEN=$((TUNMTU - 60))
+    UDPLEN=$((DEV_MTU - 40))
     [ "$UDPLEN" -gt 1340 ] && UDPLEN=1340
     [ "$UDPLEN" -lt 64 ] && UDPLEN=64
 
