@@ -192,6 +192,12 @@ out:
 #endif
 }
 
+/*
+ * Hands one datagram to the underlay. The skb is consumed on every path:
+ * on success udp_tunnel_xmit_skb() takes ownership, on failure it is freed
+ * here. Callers track the datagram in BBR and must release its ring slot
+ * (uwg_packet_bbr_on_drop) when this returns non-zero.
+ */
 int uwg_socket_send_skb_to_peer(struct uwg_peer *peer, struct sk_buff *skb, u8 ds)
 {
 	size_t skb_len = skb->len;
@@ -209,6 +215,13 @@ int uwg_socket_send_skb_to_peer(struct uwg_peer *peer, struct sk_buff *skb, u8 d
 	if (likely(!ret))
 		atomic64_add(skb_len, &peer->tx_bytes);
 	read_unlock_bh(&peer->endpoint_lock);
+
+	if (unlikely(ret)) {
+		DEV_STATS_INC(peer->device->dev, tx_errors);
+		net_dbg_ratelimited("%s: Could not send a packet to peer %llu: %d\n",
+				    peer->device->dev->name,
+				    peer->internal_id, ret);
+	}
 
 	return ret;
 }

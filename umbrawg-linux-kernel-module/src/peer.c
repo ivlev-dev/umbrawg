@@ -57,13 +57,13 @@ void uwg_peer_bbr_keypair_changed(struct uwg_peer *peer, u64 keypair_id)
 	rcu_read_unlock();
 }
 
-static struct uwg_bbr *uwg_peer_bbr_alloc(void)
+static struct uwg_bbr *uwg_peer_bbr_alloc(u32 mss)
 {
 	struct uwg_bbr *bbr = kvmalloc(sizeof(*bbr), GFP_KERNEL);
 
 	if (unlikely(!bbr))
 		return NULL;
-	uwg_bbr_init(bbr, 0, UWG_BBR_DEFAULT_RTT_US);
+	uwg_bbr_init(bbr, mss, UWG_BBR_DEFAULT_RTT_US);
 	return bbr;
 }
 
@@ -89,7 +89,7 @@ int uwg_peer_bbr_sync(struct uwg_peer *peer)
 	if (rcu_access_pointer(peer->bbr))
 		return 0;
 
-	bbr = uwg_peer_bbr_alloc();
+	bbr = uwg_peer_bbr_alloc(READ_ONCE(peer->device->dev->mtu));
 	if (unlikely(!bbr))
 		return -ENOMEM;
 	rcu_assign_pointer(peer->bbr, bbr);
@@ -299,9 +299,10 @@ static void rcu_release(struct rcu_head *rcu)
 	WARN_ON(uwg_prev_queue_peek(&peer->tx_queue) || uwg_prev_queue_peek(&peer->rx_queue));
 
 	/* The peer is normally released before the last reference is put;
-	 * this covers a peer created but never fully removed.
+	 * this covers a peer created but never fully removed. The controller
+	 * comes from kvmalloc(), so it must be returned with kvfree().
 	 */
-	kfree(rcu_dereference_protected(peer->bbr, 1));
+	kvfree(rcu_dereference_protected(peer->bbr, 1));
 	uwg_peer_fec_rcu_free(peer);
 
 	/* The final zeroing takes care of clearing any remaining handshake key

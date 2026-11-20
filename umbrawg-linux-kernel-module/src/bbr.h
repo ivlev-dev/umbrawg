@@ -183,6 +183,12 @@ struct uwg_bbr_snapshot {
 };
 
 void uwg_bbr_init(struct uwg_bbr *b, u32 mss, u32 initial_rtt_us);
+/* Re-derives the loss unit, min_cwnd and pacer burst after the interface MTU
+ * changed (FEC lowers it to a single-shard budget). Keeps the measured
+ * bandwidth, RTT and the current window, only raising cwnd to the new floor.
+ * Caller must hold the peer's bbr_lock.
+ */
+void uwg_bbr_set_mss(struct uwg_bbr *b, u32 mss);
 /* Caller must hold the peer's bbr_lock. */
 void uwg_bbr_new_epoch(struct uwg_bbr *b, u64 keypair_id, u64 now_ns);
 void uwg_bbr_snapshot_get(const struct uwg_bbr *b,

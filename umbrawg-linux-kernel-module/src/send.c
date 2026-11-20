@@ -24,6 +24,7 @@
 #include <linux/inetdevice.h>
 #include <linux/socket.h>
 #include <linux/random.h>
+#include <linux/siphash.h>
 #include <linux/preempt.h>
 #include <net/ip_tunnels.h>
 #include <net/udp.h>
@@ -245,6 +246,36 @@ static void keep_key_fresh(struct uwg_peer *peer)
 		uwg_packet_send_queued_handshake_initiation(peer, false);
 }
 
+/*
+ * Random tail of a FEC shard, shared by every shard of one block.
+ *
+ * The encoder pads all shards of a block to the same shard_len, but a plain
+ * per-datagram random tail would give them different encrypted lengths again
+ * and prevent the sender from aggregating them into one UDP GSO skb. The
+ * tail is therefore a PRF of the block id under the sending key: it stays
+ * unpredictable to an observer (and differs between blocks and keypairs),
+ * while all shards of the block derive the same value.
+ */
+static unsigned int uwg_fec_shard_tail(const struct sk_buff *skb,
+				       const struct noise_keypair *keypair)
+{
+	siphash_key_t key;
+	const u8 *ext = skb->data;
+	u32 block_id;
+
+	/* The shard header is written by the FEC encoder right before the
+	 * ext header. A malformed/empty frame never reaches here, but a
+	 * fallback keeps the padding well formed if it ever does.
+	 */
+	if (unlikely(skb->len < UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN))
+		return get_random_u32_below(MESSAGE_PADDING_MULTIPLE);
+
+	block_id = get_unaligned_le32(ext + UWG_EXT_HEADER_LEN);
+	memcpy(&key, keypair->sending.key, sizeof(key));
+	return (unsigned int)(siphash_1u32(block_id, &key) %
+			      MESSAGE_PADDING_MULTIPLE);
+}
+
 static unsigned int calculate_skb_padding(struct sk_buff *skb)
 {
 	unsigned int padded_size, last_unit = skb->len;
@@ -309,8 +340,15 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 	/* PACKET_CB(skb)->padding is an override used by control frames: its
 	 * value is the exclusive bound of the random tail they may carry.
 	 * Every other TX path clears it in uwg_packet_send_staged_packets().
+	 *
+	 * FEC shards are padded by the block id, not by the per-datagram
+	 * policies: only equal encrypted lengths can be GSO-aggregated, and
+	 * a shard has no TUN MTU budget to hide a size window in anyway.
 	 */
-	if (PACKET_CB(skb)->padding) {
+	if (unlikely(PACKET_CB(skb)->is_fec)) {
+		padding_len = ALIGN(skb->len, MESSAGE_PADDING_MULTIPLE) -
+			      skb->len + uwg_fec_shard_tail(skb, keypair);
+	} else if (PACKET_CB(skb)->padding) {
 		padding_len = get_random_u32_below(PACKET_CB(skb)->padding);
 	} else if (!u16_range_is_zero(content_padding_addition)) {
 		padding_len = uwg_peer_skb_randomize_padding_addition(peer, peer->device, packet_len);
@@ -457,6 +495,11 @@ static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
 
 	now_ns = ktime_get_ns();
 	spin_lock_bh(&peer->bbr_lock);
+	/* FEC lowers the interface MTU to what fits one shard, so the
+	 * controller's unit of loss must follow it instead of a fixed 1400:
+	 * min_cwnd and the pacer burst are derived from it.
+	 */
+	uwg_bbr_set_mss(bbr, READ_ONCE(peer->device->dev->mtu));
 	skb_queue_walk(packets, skb) {
 		if (PACKET_CB(skb)->is_keepalive) {
 			/* Keepalives are not tracked in the ring, but their
@@ -530,6 +573,52 @@ static void uwg_packet_bbr_on_drop(struct uwg_peer *peer, struct sk_buff *list)
 	rcu_read_unlock();
 }
 
+/*
+ * Same release for the datagrams the underlay refused to take. The single
+ * path has only the nonce left (the socket layer freed the skb); the GSO
+ * path still owns its segments and passes them in.
+ */
+static void uwg_packet_bbr_on_drop_one(struct uwg_peer *peer, u64 nonce)
+{
+	struct uwg_bbr *bbr;
+
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+		return;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (bbr) {
+		spin_lock_bh(&peer->bbr_lock);
+		uwg_bbr_on_drop(bbr, nonce);
+		spin_unlock_bh(&peer->bbr_lock);
+	}
+	rcu_read_unlock();
+}
+
+static void uwg_packet_bbr_on_drop_skbs(struct uwg_peer *peer,
+					struct sk_buff *const *skbs,
+					unsigned int count)
+{
+	struct uwg_bbr *bbr;
+	unsigned int i;
+
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+		return;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (bbr) {
+		spin_lock_bh(&peer->bbr_lock);
+		for (i = 0; i < count; ++i) {
+			if (PACKET_CB(skbs[i])->is_keepalive)
+				continue;
+			uwg_bbr_on_drop(bbr, PACKET_CB(skbs[i])->nonce);
+		}
+		spin_unlock_bh(&peer->bbr_lock);
+	}
+	rcu_read_unlock();
+}
+
 static u64 uwg_packet_pace_delay_ns(struct uwg_peer *peer, unsigned int len)
 {
 	struct uwg_bbr *bbr;
@@ -584,6 +673,7 @@ static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
 {
 	bool is_keepalive = PACKET_CB(skb)->is_keepalive;
 	u32 pace_len = PACKET_CB(skb)->pace_len;
+	u64 nonce = PACKET_CB(skb)->nonce;
 	u8 ds = PACKET_CB(skb)->ds;
 
 	/* FEC blocks are paced as a whole: only the first shard carries the
@@ -598,8 +688,17 @@ static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
 
 	uwg_packet_bbr_on_sent(peer, &skb, 1);
 
-	if (likely(!uwg_socket_send_skb_to_peer(peer, skb, ds) && !is_keepalive))
-		*data_sent = true;
+	/* The socket layer owns the skb on every path. A refused datagram
+	 * (no route, dead endpoint) has already consumed a ring slot, so it
+	 * must leave inflight here instead of waiting for the watermark.
+	 */
+	if (likely(!uwg_socket_send_skb_to_peer(peer, skb, ds))) {
+		if (!is_keepalive)
+			*data_sent = true;
+		return;
+	}
+	if (!is_keepalive)
+		uwg_packet_bbr_on_drop_one(peer, nonce);
 }
 
 static struct sk_buff *uwg_packet_gso_alloc(struct sk_buff **pkts,
@@ -649,17 +748,23 @@ static bool uwg_packet_send_gso(struct uwg_peer *peer, struct sk_buff **pkts,
 		return false;
 
 	/* Each segment consumed a nonce and a ring slot; the aggregate skb is
-	 * sent as one device packet but must update all of them.
+	 * sent as one device packet but must update all of them. The segments
+	 * stay alive until the transmit result is known: a refused aggregate
+	 * has to return every slot to the window.
 	 */
 	uwg_packet_bbr_on_sent(peer, pkts, count);
-
-	for (i = 0; i < count; ++i) {
+	for (i = 0; i < count; ++i)
 		keepalive |= PACKET_CB(pkts[i])->is_keepalive;
-		kfree_skb(pkts[i]);
+
+	if (likely(!uwg_socket_send_skb_to_peer(peer, agg, ds))) {
+		if (!keepalive)
+			*data_sent = true;
+	} else {
+		uwg_packet_bbr_on_drop_skbs(peer, pkts, count);
 	}
 
-	if (likely(!uwg_socket_send_skb_to_peer(peer, agg, ds) && !keepalive))
-		*data_sent = true;
+	for (i = 0; i < count; ++i)
+		kfree_skb(pkts[i]);
 	return true;
 }
 
@@ -726,7 +831,9 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 		for (j = i + 1; j < nskbs; ++j) {
 			if (skbs[j]->len != len ||
 			    PACKET_CB(skbs[j])->ds != ds ||
-			    PACKET_CB(skbs[j])->is_fec != is_fec)
+			    PACKET_CB(skbs[j])->is_fec != is_fec ||
+			    PACKET_CB(skbs[j])->is_keepalive !=
+				    PACKET_CB(skbs[i])->is_keepalive)
 				break;
 			if (j - i >= UWG_GSO_SEGS_MAX)
 				break;

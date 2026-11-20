@@ -929,6 +929,28 @@ void uwg_bbr_init(struct uwg_bbr *b, u32 mss, u32 initial_rtt_us)
 	b->pacer.allowance = (s64)b->pacer.burst;
 }
 
+void uwg_bbr_set_mss(struct uwg_bbr *b, u32 mss)
+{
+	u64 mss64 = mss ? mss : UWG_BBR_DEFAULT_MSS;
+
+	if (mss64 > UWG_BBR_MAX_DATAGRAM)
+		mss64 = UWG_BBR_MAX_DATAGRAM;
+	if (b->mss == mss64)
+		return;
+
+	/* The bandwidth and RTT estimates describe the path and do not change
+	 * with the datagram size; only the units derived from it do.
+	 */
+	b->mss = mss64;
+	b->min_cwnd = mss64 * UWG_BBR_MIN_CWND_PACKETS;
+	if (b->cwnd < b->min_cwnd)
+		b->cwnd = b->min_cwnd;
+	b->pacer.mss = mss64;
+	b->pacer.burst = uwg_pacer_burst(b->pacer.rate, mss64);
+	if (b->pacer.allowance > (s64)b->pacer.burst)
+		b->pacer.allowance = (s64)b->pacer.burst;
+}
+
 void uwg_bbr_new_epoch(struct uwg_bbr *b, u64 keypair_id, u64 now_ns)
 {
 	u64 delivered = b->delivered;
@@ -1817,6 +1839,38 @@ static int uwg_bbr_selftest_edges(void)
 	if (delay != 15000000ULL) {
 		pr_err("BBR self-test: pure pacing delay %llu, expected 15000000\n",
 		       delay);
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/*
+	 * A FEC MTU change lowers the datagram unit. mss, min_cwnd and the
+	 * pacer burst must follow it; the path estimates stay untouched.
+	 */
+	uwg_bbr_init(b, 1400, 20000);
+	b->cwnd = 1;
+	b->btl_bw = 12345;
+	uwg_bbr_set_mss(b, 1368);
+	if (b->mss != 1368 || b->pacer.mss != 1368 ||
+	    b->min_cwnd != 1368ULL * UWG_BBR_MIN_CWND_PACKETS ||
+	    b->cwnd != b->min_cwnd || b->btl_bw != 12345 ||
+	    b->pacer.burst < 2ULL * 1368) {
+		pr_err("BBR self-test: MTU shrink not applied (mss=%llu cwnd=%llu)\n",
+		       b->mss, b->cwnd);
+		kfree(b);
+		return -EINVAL;
+	}
+	uwg_bbr_set_mss(b, 9000);
+	if (b->mss != 9000 ||
+	    b->min_cwnd != 9000ULL * UWG_BBR_MIN_CWND_PACKETS ||
+	    b->cwnd != b->min_cwnd) {
+		pr_err("BBR self-test: MTU growth did not raise the floor\n");
+		kfree(b);
+		return -EINVAL;
+	}
+	uwg_bbr_set_mss(b, 1000000);
+	if (b->mss != UWG_BBR_MAX_DATAGRAM) {
+		pr_err("BBR self-test: MTU clamp broken (mss=%llu)\n", b->mss);
 		kfree(b);
 		return -EINVAL;
 	}
