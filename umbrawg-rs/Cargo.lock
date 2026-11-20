@@ -1050,6 +1050,7 @@ dependencies = [
  "thiserror",
  "umbrawg-crypto",
  "umbrawg-device",
+ "umbrawg-fec",
  "umbrawg-noise",
  "umbrawg-proto",
  "umbrawg-transport",

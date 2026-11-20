@@ -29,3 +29,4 @@ log.workspace = true
 env_logger.workspace = true
 libc = "0.2"
 rand_core.workspace = true
+umbrawg-fec.workspace = true

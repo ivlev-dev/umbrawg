@@ -218,6 +218,16 @@ pub struct FecStats {
     pub dropped_disabled: u64,
 }
 
+/// Smallest allowed FEC shard limit, including the 2-byte length prefix.
+pub const MIN_MAX_SHARD_LEN: u16 = 64;
+
+/// Default FEC shard limit, including the 2-byte length prefix.
+///
+/// The default is intentionally larger than an Ethernet underlay can carry so
+/// that jumbo underlays keep working unchanged. The daemon narrows it from the
+/// configured underlay MTU when FEC is enabled.
+pub const DEFAULT_MAX_SHARD_LEN: u16 = 1900;
+
 /// Device-wide extension configuration.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ExtConfig {
@@ -241,7 +251,7 @@ impl Default for ExtConfig {
             bbr: BbrMode::Off,
             fec: FecMode::Off,
             ack_interval: ACK_INTERVAL_MIN,
-            max_shard_len: 1900,
+            max_shard_len: DEFAULT_MAX_SHARD_LEN,
         }
     }
 }

@@ -1465,6 +1465,73 @@ fn full_mtu_random_trailers_keep_a_small_reserve() {
 }
 
 #[test]
+fn fec_shards_fit_an_ethernet_underlay() {
+    // 1500-byte underlay with IPv6+UDP headers leaves a 1452-byte datagram
+    // budget. A one-shard frame adds 2 (length) + 20 (extension+FEC headers)
+    // + up to 31 (shard padding) + 15 (control padding) + 32 (transport
+    // header and AEAD tag), so the derived shard limit is 1385 and the TUN MTU
+    // is 1352. See `umbrawg::mtu` for the production formulas.
+    const UNDERLAY_BUDGET: usize = 1500 - 48;
+    const MAX_SHARD_LEN: u16 = 1385;
+    const TUN_MTU: usize = 1352;
+
+    let mut pair = pair(ObfParams::default());
+    let ext = ExtConfig {
+        fec: FecMode::Fixed { k: 2, m: 1 },
+        ack_interval: 2,
+        max_shard_len: MAX_SHARD_LEN,
+        ..ExtConfig::default()
+    };
+    pair.a.set_ext_config(ext);
+    pair.b.set_ext_config(ext);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    let flags = CapsFlags::ACK | CapsFlags::FEC;
+    send_caps_frame(&mut pair, true, flags, 2, 1, now);
+    deliver_all(&mut pair, true, now);
+    send_caps_frame(&mut pair, false, flags, 2, 1, now);
+    deliver_all(&mut pair, false, now);
+
+    let payload = vec![0x5a; TUN_MTU - 20];
+    let first = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &payload);
+    let second = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &payload);
+    assert_eq!(first.len(), TUN_MTU);
+
+    let mut output = vec![0u8; 65_535];
+    let layout = {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        let sent = pair
+            .a
+            .send_batch(&pair.peer_b, &[&first, &second], &mut output, &mut ctx)
+            .unwrap();
+        assert_eq!(sent.sent, 2);
+        sent.layout
+    };
+    let ranges: Vec<std::ops::Range<usize>> = layout
+        .groups()
+        .iter()
+        .flat_map(|group| group.ranges())
+        .collect();
+    assert_eq!(ranges.len(), 3, "k=2, m=1 must produce three shards");
+    for range in &ranges {
+        assert!(
+            range.len() <= UNDERLAY_BUDGET,
+            "FEC shard datagram {} exceeds the {UNDERLAY_BUDGET}-byte budget",
+            range.len()
+        );
+        pair.io_a.send_datagram(
+            pair.addr_a,
+            Some(&pair.peer_b),
+            &output[range.clone()],
+            None,
+        );
+    }
+
+    deliver_all(&mut pair, true, now);
+    assert_eq!(pair.io_b.delivered.len(), 2);
+}
+
+#[test]
 fn extension_frames_disarm_the_new_handshake_timer() {
     let mut pair = pair(ObfParams::default());
     let ext = ExtConfig {

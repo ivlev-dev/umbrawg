@@ -17,7 +17,8 @@ pub const EXTENSION_VERSION: u8 = 1;
 
 const CAPS_LEN: usize = 12;
 const ACK_HEADER_LEN: usize = 16;
-const FEC_HEADER_LEN: usize = 12;
+/// Length of the fixed FEC shard body header that follows the extension prefix.
+pub const FEC_HEADER_LEN: usize = 12;
 
 /// Kind of an extension frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

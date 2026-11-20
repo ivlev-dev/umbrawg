@@ -13,7 +13,8 @@ use std::time::{Duration, Instant};
 use umbrawg_crypto::random::BufferedRng;
 use umbrawg_device::{
     device::BbrBatch, BbrMode, DatagramSink, Device, DeviceConfig, DeviceError, ExtConfig, FecMode,
-    IncomingMeta, IoContext, PacketIo, Peer, DEFAULT_UNDER_LOAD_PPS,
+    IncomingMeta, IoContext, PacketIo, Peer, DEFAULT_MAX_SHARD_LEN, DEFAULT_UNDER_LOAD_PPS,
+    MIN_MAX_SHARD_LEN,
 };
 use umbrawg_transport::{
     AddressFamily, Endpoint, GsoLimits, GsoSize, OpenOptions, RecvQueue, Socket, SocketSet,
@@ -30,7 +31,7 @@ mod rx;
 mod tx;
 
 use control::ConfigControl;
-use mtu::{MtuGuard, Underlay};
+use mtu::{fec_max_shard_len, fec_tun_mtu, MtuGuard, Underlay};
 use rx::RxBatch;
 use tx::TxBatch;
 
@@ -831,7 +832,7 @@ fn worker_loop(
         .iter_mut()
         .map(|buffer| buffer.as_mut_slice())
         .collect();
-    let slot = tun.mtu() as usize + TUN_PACKET_MARGIN;
+    let slot = usize::from(device.mtu()).max(tun.mtu() as usize) + TUN_PACKET_MARGIN;
     let mut tx_plain = vec![0u8; TUN_BATCH * slot];
     let mut tun_bufs: Vec<Vec<u8>> = (0..TUN_BATCH).map(|_| vec![0u8; slot]).collect();
     let mut tun_slices: Vec<&mut [u8]> = tun_bufs
@@ -1099,7 +1100,21 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         .map(|value| value.get())
         .unwrap_or(1);
 
-    let ext = ext_config_from_env().map_err(io::Error::other)?;
+    let mut ext = ext_config_from_env().map_err(io::Error::other)?;
+    let shard_cap = ext.max_shard_len;
+    let fec_enabled = ext.fec != FecMode::Off;
+    if fec_enabled {
+        let derived = u16::try_from(fec_max_shard_len(underlay)).unwrap_or(u16::MAX);
+        let limit = shard_cap.min(derived);
+        if limit != ext.max_shard_len {
+            log::info!(
+                "FEC shard limit lowered from {} to {limit} bytes to fit the {}-byte underlay MTU",
+                ext.max_shard_len,
+                underlay.mtu()
+            );
+            ext.max_shard_len = limit;
+        }
+    }
     log::info!(
         "extension: bbr={} fec={} shard={} ack_interval={}",
         ext.bbr.as_str(),
@@ -1113,8 +1128,16 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
     })?);
     apply_under_load_config(&device);
     log::info!("{underlay}");
+    let tun_mtu = fec_tun_mtu(underlay, device.mtu(), device.obfuscation().s4, fec_enabled);
+    if tun_mtu != device.mtu() {
+        log::info!(
+            "TUN MTU {} -> {tun_mtu} bytes for FEC over the {}-byte underlay",
+            device.mtu(),
+            underlay.mtu()
+        );
+    }
     let guard = Arc::new(MtuGuard::new(underlay));
-    guard.check(device.mtu(), device.obfuscation().s4);
+    guard.check(tun_mtu, device.obfuscation().s4);
     device.up();
 
     if let Some(parallel) =
@@ -1127,7 +1150,15 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
             parallel.queue_depth,
             parallel::queue_bytes(parallel.queue_depth).div_ceil(1024 * 1024)
         );
-        return run_parallel(device, ifname, parallel, socket_buffer, underlay, guard);
+        return run_parallel(
+            device,
+            ifname,
+            parallel,
+            socket_buffer,
+            underlay,
+            guard,
+            shard_cap,
+        );
     }
 
     let requested = env::var("UMBRAWG_THREADS").ok();
@@ -1138,7 +1169,7 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         .with_offload(true)
         .with_vnet_hdr_size(VirtioNetHdr::LEN)
         .with_nonblocking(true)
-        .with_mtu(u32::from(device.mtu()));
+        .with_mtu(u32::from(tun_mtu));
     let tun_set = match TunSet::open(&config, workers) {
         Ok(set) => set,
         Err(TunError::Unsupported(feature)) => {
@@ -1152,6 +1183,8 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
     let server = listener.spawn(Arc::new(ConfigControl::new(
         Arc::clone(&device),
         Arc::clone(&guard),
+        ifname,
+        shard_cap,
     )))?;
 
     let mut handles = Vec::with_capacity(workers);
@@ -1202,7 +1235,7 @@ fn ext_config_from_env() -> Result<ExtConfig, String> {
             .trim()
             .parse::<u16>()
             .ok()
-            .filter(|len| (64..=1900).contains(len))
+            .filter(|len| (MIN_MAX_SHARD_LEN..=DEFAULT_MAX_SHARD_LEN).contains(len))
             .ok_or_else(|| format!("UMBRAWG_FEC_SHARD: некорректно {value:?}"))?;
     }
     if let Ok(value) = env::var("UMBRAWG_ACK_INTERVAL") {
@@ -1231,14 +1264,21 @@ fn run_parallel(
     socket_buffer: usize,
     underlay: Underlay,
     guard: Arc<MtuGuard>,
+    shard_cap: u16,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let workers = parallel.workers;
+    let tun_mtu = fec_tun_mtu(
+        underlay,
+        device.mtu(),
+        device.obfuscation().s4,
+        device.ext_config().fec != FecMode::Off,
+    );
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
         .with_offload(true)
         .with_vnet_hdr_size(VirtioNetHdr::LEN)
         .with_nonblocking(true)
-        .with_mtu(u32::from(device.mtu()));
+        .with_mtu(u32::from(tun_mtu));
     let tun_set = match TunSet::open(&config, workers) {
         Ok(set) => set,
         Err(TunError::Unsupported(feature)) => {
@@ -1252,6 +1292,8 @@ fn run_parallel(
     let server = listener.spawn(Arc::new(ConfigControl::new(
         Arc::clone(&device),
         Arc::clone(&guard),
+        ifname,
+        shard_cap,
     )))?;
     let shared = Arc::new(parallel::SharedRx::new(
         workers,
