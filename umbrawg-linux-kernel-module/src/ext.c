@@ -77,7 +77,13 @@ int uwg_ext_parse_ack(const u8 *payload, size_t len, struct uwg_ext_ack *ack)
 		return -EINVAL;
 
 	bitmap_len = payload[13];
-	if (bitmap_len < 1 || bitmap_len > UWG_EXT_ACK_BITMAP_MAX)
+	/* The bitmap is always a full 64 bit window. A shorter bitmap used to
+	 * be zero-extended, and every bit past its length then looked like a
+	 * hole: a peer could inflate the reported loss just by sending a
+	 * one-byte bitmap. Reject it instead of guessing which counters it
+	 * meant to acknowledge.
+	 */
+	if (bitmap_len != UWG_EXT_ACK_BITMAP_MAX)
 		return -EINVAL;
 	if (len != UWG_EXT_ACK_HEADER_LEN + bitmap_len)
 		return -EINVAL;
@@ -259,6 +265,7 @@ void uwg_ext_caps_changed(struct uwg_device *uwg)
 		peer->caps.send_attempts = 0;
 		peer->caps.reply_attempts = 0;
 		peer->caps.next_send = 0;
+		peer->caps.last_sent = 0;
 		spin_unlock_bh(&peer->caps.lock);
 		uwg_ext_maybe_send_caps(peer);
 	}
@@ -278,19 +285,25 @@ void uwg_ext_caps_keypair_changed(struct uwg_peer *peer)
 	peer->caps.send_attempts = 0;
 	peer->caps.reply_attempts = 0;
 	peer->caps.next_send = 0;
+	peer->caps.last_sent = 0;
 	spin_unlock_bh(&peer->caps.lock);
 }
 
-/* True when the decrypted packet starts with a well-formed extension header.
- * Only used to notice that a peer still sends extension traffic while the
- * extension is disabled locally.
+/* True when the decrypted packet starts with a well-formed extension header
+ * that proves the peer still runs the extension. CAPS is deliberately
+ * excluded: two devices that both switched the extension off exchange a
+ * single zero CAPS to retract their stale advertisement, and if that frame
+ * itself counted as "extension traffic" they would answer each other forever.
+ * ACK and FEC_SHARD mean the peer's data plane is still active and a revoke
+ * is worthwhile.
  */
 bool uwg_ext_peer_extension(const struct sk_buff *skb)
 {
 	u8 buf[UWG_EXT_HEADER_LEN];
 	const u8 *hdr = skb_header_pointer(skb, 0, sizeof(buf), buf);
 
-	return hdr && uwg_ext_detect(hdr, sizeof(buf));
+	return hdr && uwg_ext_detect(hdr, sizeof(buf)) &&
+	       hdr[5] != UWG_EXT_KIND_CAPS;
 }
 
 void uwg_ext_caps_extension_seen(struct uwg_peer *peer)
@@ -346,8 +359,12 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 
 	len = uwg_ext_build_caps(frame, sizeof(frame), &local);
 	if (likely(len > 0 &&
-		   !uwg_packet_send_control(peer, frame, (size_t)len)))
+		   !uwg_packet_send_control(peer, frame, (size_t)len))) {
+		spin_lock_bh(&peer->caps.lock);
+		peer->caps.last_sent = now;
+		spin_unlock_bh(&peer->caps.lock);
 		return;
+	}
 
 	spin_lock_bh(&peer->caps.lock);
 	if (peer->caps.send_attempts)
@@ -554,12 +571,15 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 				size_t len)
 {
 	struct uwg_ext_caps caps;
+	ktime_t now;
 	bool changed;
+	bool too_soon;
 	bool send = false;
 
 	if (uwg_ext_parse_caps(payload, len, &caps))
 		return;
 	uwg_ext_sanitize_caps(peer, &caps);
+	now = ktime_get();
 	spin_lock_bh(&peer->caps.lock);
 	uwg_ext_local_caps(peer->device, &peer->caps.local);
 	changed = !peer->caps.last_peer_valid ||
@@ -574,24 +594,43 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	 * new keypair and was lost. Hearing a new profile from the peer is a
 	 * good moment to (re)send ours.
 	 * send_attempts == 0 means we have not managed to send CAPS at all.
+	 *
+	 * Our advertisement only depends on the local profile, so a peer that
+	 * keeps changing its CAPS does not need an answer per change: one
+	 * frame sent less than UWG_EXT_CAPS_CHANGED_MIN_MS ago carries the
+	 * same information. Skipping the duplicate keeps a hostile or flapping
+	 * peer from turning this into a control-frame amplifier; the bounded
+	 * answer to an identical repeat (the peer retries every 250 ms)
+	 * still converges the exchange if the earlier frame was lost.
 	 */
-	if (changed || !peer->caps.send_attempts) {
-		peer->caps.resend = true;
-		peer->caps.next_send = 0;
-		send = true;
-	} else if (peer->caps.reply_attempts < UWG_EXT_CAPS_MAX_REPLIES) {
-		/* An identical repeat is not necessarily our own frame echoed
-		 * back: a re-created peer has no memory of the CAPS we sent
-		 * it, and if our earlier frame was lost it would keep dropping
-		 * every shard as dropped_disabled forever. Answer a bounded
-		 * number of repeats per received profile so the exchange always
-		 * converges, while two kernels still cannot answer each other
-		 * indefinitely.
-		 */
-		++peer->caps.reply_attempts;
-		peer->caps.resend = true;
-		peer->caps.next_send = 0;
-		send = true;
+	too_soon = peer->caps.last_sent &&
+		   ktime_before(now, ktime_add_ms(peer->caps.last_sent,
+						  UWG_EXT_CAPS_CHANGED_MIN_MS));
+	if (!too_soon) {
+		if (changed) {
+			peer->caps.resend = true;
+			peer->caps.next_send = 0;
+			send = true;
+		} else if (!peer->caps.send_attempts) {
+			peer->caps.resend = true;
+			peer->caps.next_send = 0;
+			send = true;
+		} else if (peer->caps.reply_attempts <
+			   UWG_EXT_CAPS_MAX_REPLIES) {
+			/* An identical repeat is not necessarily our own frame
+			 * echoed back: a re-created peer has no memory of the
+			 * CAPS we sent it, and if our earlier frame was lost it
+			 * would keep dropping every shard as dropped_disabled
+			 * forever. Answer a bounded number of repeats per
+			 * received profile so the exchange always converges,
+			 * while two kernels still cannot answer each other
+			 * indefinitely.
+			 */
+			++peer->caps.reply_attempts;
+			peer->caps.resend = true;
+			peer->caps.next_send = 0;
+			send = true;
+		}
 	}
 	if (send && peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
 		peer->caps.send_attempts = UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
@@ -672,7 +711,15 @@ static enum uwg_ext_rx_result uwg_ext_handle_fec_shard(struct uwg_peer *peer,
 	ret = uwg_fec_rx_shard(peer, &shard, skb,
 			       UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN,
 			       keypair_id, true);
-	return ret ? UWG_EXT_RX_INVALID : UWG_EXT_RX_CONSUMED;
+	if (ret)
+		return UWG_EXT_RX_INVALID;
+	/* A shard is a real transport packet, so it keeps the data path alive
+	 * just like a plain packet: without this an FEC-only flow (all inner
+	 * traffic already turned into shards) would never arm the keepalive
+	 * timer and the tunnel could be torn down while it is busy.
+	 */
+	uwg_timers_data_received(peer);
+	return UWG_EXT_RX_CONSUMED;
 }
 
 enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,

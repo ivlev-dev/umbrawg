@@ -56,6 +56,13 @@ struct uwg_peer;
 #define UWG_EXT_CAPS_MAX_REPLIES 2
 #define UWG_EXT_CAPS_RETRY_MS 2000
 #define UWG_EXT_CAPS_FAST_RETRY_MS 250
+/* Minimum spacing between two CAPS answers triggered by a peer profile
+ * change. Our own advertisement does not depend on the peer's profile, so a
+ * peer that flips its CAPS must not be able to make us emit a frame per
+ * change. The bounded answer to an identical repeat (250 ms retries) still
+ * converges the exchange when the earlier frame was lost.
+ */
+#define UWG_EXT_CAPS_CHANGED_MIN_MS 200
 
 #define UWG_EXT_CAP_BBR BIT(0)
 #define UWG_EXT_CAP_ACK BIT(1)
@@ -127,6 +134,10 @@ struct uwg_peer_caps {
 	u8 send_attempts;
 	u8 reply_attempts;
 	ktime_t next_send;
+	/* When our last CAPS frame actually left (successful send). Used to
+	 * rate-limit answers to a peer that keeps changing its profile.
+	 */
+	ktime_t last_sent;
 	spinlock_t lock;
 };
 

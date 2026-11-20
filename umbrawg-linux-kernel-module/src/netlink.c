@@ -1033,6 +1033,11 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			net_dbg_ratelimited(
 				"%s: Could not allocate BBR state for every peer\n",
 				uwg->dev->name);
+		/* BBR changes the ACK capability advertised in CAPS, exactly
+		 * like a FEC change does. Re-arm the exchange so the peer sees
+		 * the new profile instead of waiting for the next keypair.
+		 */
+		uwg_ext_caps_changed(uwg);
 	}
 
 	if (info->attrs[UWGDEVICE_A_FEC]) {

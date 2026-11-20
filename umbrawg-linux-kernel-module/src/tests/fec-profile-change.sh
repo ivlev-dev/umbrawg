@@ -43,10 +43,12 @@ UL0=172.30.86.1
 UL1=172.30.86.2
 PA=$((20000 + ($$ % 20000)))
 PB=$((PA + 1))
+IPERF_PORT=$((PA + 2))
 
 MODULE_LOADED=0
 FAILED=0
 ACTIVE_NS=
+SRV_PID=""
 
 mkdir -p "$WORK"
 LOG=$WORK/test.log
@@ -57,6 +59,9 @@ note() { printf '%s\n' "$*" >>"$LOG"; }
 fail() { say "FAIL: $*"; FAILED=1; }
 
 cleanup() {
+	if [ -n "$SRV_PID" ]; then
+		kill "$SRV_PID" 2>/dev/null
+	fi
 	for ns in $ACTIVE_NS "$NS0" "$NS1"; do
 		ip netns del "$ns" 2>/dev/null
 	done
@@ -168,6 +173,54 @@ ping_loss() { # ns target
 	out=$(ip netns exec "$1" ping -c "$PING_COUNT" -i 0.1 -W 1 "$2" 2>&1)
 	loss=$(printf '%s\n' "$out" | sed -n 's/.* \([0-9]*\)% packet loss.*/\1/p' | head -1)
 	printf '%s' "${loss:-100}"
+}
+
+veth_tx_packets() { # ns dev
+	ip netns exec "$1" cat /proc/net/dev 2>/dev/null |
+		awk -v dev="$2:" '$1 == dev { print $11 }'
+}
+
+set_keepalive() { # ns peer_pubkey seconds
+	local out
+	out=$(ip netns exec "$1" "$UWG" set uwg0 peer "$2" \
+		persistent-keepalive "$3" 2>&1) ||
+		fail "set persistent-keepalive $3 on $1: $out"
+}
+
+iperf_tcp() { # seconds tag
+	ip netns exec "$NS1" iperf3 -s -1 -p "$IPERF_PORT" -D \
+		--pidfile "$WORK/srv.pid" --logfile "$WORK/srv.log" \
+		>/dev/null 2>&1
+	sleep 0.3
+	SRV_PID=$(cat "$WORK/srv.pid" 2>/dev/null || true)
+	ip netns exec "$NS0" iperf3 -c "$T1" -p "$IPERF_PORT" -t "$1" -P 1 -J \
+		>"$WORK/$2.json" 2>"$WORK/$2.err"
+	local rc=$?
+	if [ -n "$SRV_PID" ]; then
+		kill "$SRV_PID" 2>/dev/null
+		SRV_PID=""
+	fi
+	[ "$rc" -eq 0 ] || { printf 'FAIL'; return; }
+	python3 -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    print(round(d["end"]["sum_received"]["bits_per_second"]/1e6,1))
+except Exception:
+    print("FAIL")' "$WORK/$2.json"
+}
+
+probe_encoded() { # label: packets encoded by NS1 during a small reverse burst
+	local label=$1 pre post d
+	pre=$(stat "$NS1" blocks_encoded)
+	pre=${pre:-0}
+	ip netns exec "$NS1" ping -f -c 200 -W 1 "$T0" >/dev/null 2>&1 || true
+	sleep 0.3
+	post=$(stat "$NS1" blocks_encoded)
+	post=${post:-0}
+	d=$((post - pre))
+	[ "$d" -ge 0 ] || d=0
+	note "  $label: $NS1 blocks_encoded +$d"
+	printf '%s' "$d"
 }
 
 declare -A BASE_D BASE_E BASE_C
@@ -283,6 +336,95 @@ loss=$(ping_loss "$NS0" "$T1")
 [ "$loss" = 0 ] || fail "flap: forward ping loss=${loss}%"
 loss=$(ping_loss "$NS1" "$T0")
 [ "$loss" = 0 ] || fail "flap: reverse ping loss=${loss}%"
+
+# Regression: two devices with both FEC and BBR off must stay silent. A zero
+# CAPS retracts a stale advertisement, but it is itself an extension frame;
+# treating it as proof that the peer still sends extension traffic made both
+# kernels answer each other with another zero CAPS every 2 s forever.
+# Keepalives are disabled for the measurement so the packet count reflects
+# only extension control traffic (the tunnel is idle otherwise).
+say "=== all-off silence on both sides (10 s)"
+set_fec "$NS0" off
+set_fec "$NS1" off
+set_keepalive "$NS0" "$P1" 0
+set_keepalive "$NS1" "$P0" 0
+sleep 3
+before0=$(veth_tx_packets "$NS0" "$VA")
+before1=$(veth_tx_packets "$NS1" "$VB")
+sleep 10
+after0=$(veth_tx_packets "$NS0" "$VA")
+after1=$(veth_tx_packets "$NS1" "$VB")
+if [ -z "$before0" ] || [ -z "$after0" ] ||
+   [ -z "$before1" ] || [ -z "$after1" ]; then
+	fail "all-off: could not read underlay packet counters"
+else
+	d0=$((after0 - before0))
+	d1=$((after1 - before1))
+	note "  all-off 10s underlay tx packets: $NS0=$d0 $NS1=$d1"
+	# An occasional leftover frame is fine; the former ping-pong produced a
+	# zero CAPS every 2 s (about five per side in this window).
+	[ "$d0" -le 2 ] ||
+		fail "all-off: $NS0 sent $d0 control packets in 10 s"
+	[ "$d1" -le 2 ] ||
+		fail "all-off: $NS1 sent $d1 control packets in 10 s"
+fi
+say "=== all-off -> 2:1 recovery"
+set_fec "$NS0" 2:1
+set_fec "$NS1" 2:1
+sleep 1
+check_link "all-off recovery"
+
+# Adaptive must ignore pure reordering and still arm on real loss. Reordering
+# is simulated by delaying a quarter of the underlay packets; 200 us keeps the
+# delay itself out of TCP's way so the measured drop is dominated by any FEC
+# overhead the wrong decision would add. The kernel self-test covers the same
+# decision deterministically at module load.
+if command -v iperf3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 &&
+   command -v python3 >/dev/null 2>&1; then
+	say "=== adaptive vs reorder 25% / loss 2%"
+	set_fec "$NS0" adaptive
+	sleep 0.2
+	set_fec "$NS1" adaptive
+	sleep 0.5
+	check_link "adaptive reorder baseline"
+	BASE=$(iperf_tcp 4 adbase)
+	ip netns exec "$NS0" tc qdisc add dev "$VA" root netem limit 200000 \
+		delay 200us reorder 25% 50% ||
+		fail "adaptive: could not install reorder netem"
+	REORDER=$(iperf_tcp 4 adreorder)
+	ip netns exec "$NS0" tc qdisc del dev "$VA" root 2>/dev/null
+	sleep 0.3
+	R_ENC=$(probe_encoded reorder)
+	note "  adaptive reorder TCP: base=$BASE reorder=$REORDER Mbit/s"
+	if [ "$BASE" != FAIL ] && [ "$REORDER" != FAIL ]; then
+		python3 - "$BASE" "$REORDER" <<-'PY'
+		import sys
+		base = float(sys.argv[1])
+		reorder = float(sys.argv[2])
+		drop = (base - reorder) * 100.0 / base
+		print(f"  adaptive reorder TCP drop: {drop:.1f}% (limit 12%)")
+		sys.exit(0 if drop < 12.0 else 1)
+		PY
+		[ $? -eq 0 ] || fail "adaptive: TCP degraded more than 12% under reorder"
+	else
+		fail "adaptive: iperf3 did not complete under reorder"
+	fi
+	# A false positive shows up immediately: adaptive TX would encode the
+	# small reverse burst even though the reordered link lost nothing.
+	[ "${R_ENC:-0}" -le 2 ] ||
+		fail "adaptive armed on reordering (blocks_encoded +$R_ENC)"
+
+	ip netns exec "$NS0" tc qdisc add dev "$VA" root netem limit 200000 \
+		loss 2% || fail "adaptive: could not install loss netem"
+	iperf_tcp 5 adloss >/dev/null
+	ip netns exec "$NS0" tc qdisc del dev "$VA" root 2>/dev/null
+	sleep 0.3
+	L_ENC=$(probe_encoded loss)
+	[ "${L_ENC:-0}" -ge 10 ] ||
+		fail "adaptive did not arm on 2% loss (blocks_encoded +$L_ENC)"
+else
+	note "iperf3/tc/python3 missing: adaptive reorder check skipped"
+fi
 
 # Kernel log: only lines emitted after the test started matter.
 if dmesg --since "@$start_ts" >"$WORK/dmesg" 2>/dev/null; then

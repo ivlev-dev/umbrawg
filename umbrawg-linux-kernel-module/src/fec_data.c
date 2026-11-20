@@ -6,6 +6,7 @@
 #include "fec.h"
 #include "peer.h"
 #include "queueing.h"
+#include "timers.h"
 #include "type.h"
 
 #include <linux/jiffies.h>
@@ -36,6 +37,7 @@ struct uwg_fec_tx {
 	u64 adaptive_observed;
 	u32 adaptive_loss_q16;
 	unsigned long adaptive_clean_since;
+	unsigned long adaptive_segment_start;
 	u8 count;
 	u16 lens[UWG_FEC_DATA_MAX_K];
 	u8 *shards;
@@ -201,7 +203,21 @@ static unsigned int uwg_fec_tx_limit(const struct uwg_peer *peer)
 	return (unsigned int)limit;
 }
 
-static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter)
+/* Adaptive FEC decides from the receive-side transport counter. A window is
+ * only closed after it had time to settle: on a clean link with reordering a
+ * packet arrives late but still inside the window and is counted, while a
+ * genuinely lost counter never fills its slot. Evaluating on a fixed packet
+ * count (the old 256 counter window) closed the window a few hundred
+ * microseconds after a gap opened, so 25% netem reordering on a fast link
+ * looked like massive loss and adaptive switched itself on. The segment is
+ * therefore bounded by both a time and a counter ceiling.
+ */
+#define UWG_FEC_ADAPTIVE_MIN_WINDOW 256
+#define UWG_FEC_ADAPTIVE_MAX_WINDOW (1U << 24)
+#define UWG_FEC_ADAPTIVE_SETTLE_JIFFIES HZ
+
+static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter,
+					  unsigned long now)
 {
 	tx->adaptive_largest = counter;
 	tx->adaptive_base = counter;
@@ -209,64 +225,96 @@ static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter)
 	tx->adaptive_observed = 0;
 	tx->adaptive_loss_q16 = 0;
 	tx->adaptive_clean_since = 0;
+	tx->adaptive_segment_start = now;
 }
 
-void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter)
+static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
+					    unsigned long now)
 {
-	struct uwg_fec_tx *tx;
 	u64 expected, lost, loss_q16;
 
-	rcu_read_lock();
-	tx = rcu_dereference(peer->fec_tx);
-	if (!tx || !tx->adaptive)
-		goto out;
-	spin_lock_bh(&tx->lock);
 	if (!tx->adaptive_valid) {
 		tx->adaptive_valid = true;
-		uwg_fec_adaptive_window_reset(tx, counter);
-		goto unlock;
+		uwg_fec_adaptive_window_reset(tx, counter, now);
+		return;
 	}
 	if (counter < tx->adaptive_base) {
 		/* Small backward jumps are reordering, but a huge one means
 		 * the counters restarted after a rekey.
 		 */
 		if (tx->adaptive_base - counter > 1U << 20)
-			uwg_fec_adaptive_window_reset(tx, counter);
-		goto unlock;
+			uwg_fec_adaptive_window_reset(tx, counter, now);
+		return;
 	}
 	if (counter > tx->adaptive_largest)
 		tx->adaptive_largest = counter;
 	tx->adaptive_received++;
 	expected = tx->adaptive_largest - tx->adaptive_base + 1;
-	if (expected < 256)
-		goto unlock;
-	if (unlikely(expected > 1U << 20)) {
-		/* Drop an implausible gap instead of overflowing the estimate. */
+	if (expected < UWG_FEC_ADAPTIVE_MIN_WINDOW)
+		return;
+	if (unlikely(expected > UWG_FEC_ADAPTIVE_MAX_WINDOW)) {
+		/* A counter jump this large is a restart, not loss: drop the
+		 * segment instead of turning it into a bogus estimate.
+		 */
 		tx->adaptive_base = tx->adaptive_largest + 1;
 		tx->adaptive_received = 0;
-		goto unlock;
+		tx->adaptive_segment_start = now;
+		return;
 	}
+	/* Do not close the window before it had time to settle. Reordered
+	 * packets still arrive after the gap opened; as long as the window
+	 * stays open they are counted in adaptive_received, while a real lost
+	 * counter never arrives. This is what separates reordering from loss.
+	 */
+	if (time_before(now, tx->adaptive_segment_start +
+				     UWG_FEC_ADAPTIVE_SETTLE_JIFFIES))
+		return;
 	lost = expected > tx->adaptive_received ?
 		expected - tx->adaptive_received : 0;
 	loss_q16 = (u32)div_u64(lost << 16, expected);
-	tx->adaptive_loss_q16 = (tx->adaptive_loss_q16 * 3 + loss_q16) / 4;
+	if (!tx->adaptive_loss_q16)
+		tx->adaptive_loss_q16 = loss_q16;
+	else
+		tx->adaptive_loss_q16 =
+			(tx->adaptive_loss_q16 * 3 + loss_q16) / 4;
 	tx->adaptive_observed += expected;
 	tx->adaptive_base = tx->adaptive_largest + 1;
 	tx->adaptive_received = 0;
+	tx->adaptive_segment_start = now;
 	if (!tx->adaptive_on) {
 		if (tx->adaptive_observed >= 1024 &&
-		    tx->adaptive_loss_q16 > 655)
+		    tx->adaptive_loss_q16 > 655) {
 			tx->adaptive_on = true;
+			/* Stale clean time from before the switch would make
+			 * the first clean sample turn adaptive off again
+			 * immediately.
+			 */
+			tx->adaptive_clean_since = 0;
+		}
 	} else if (tx->adaptive_loss_q16 < 131) {
 		if (!tx->adaptive_clean_since)
-			tx->adaptive_clean_since = jiffies;
-		else if (time_after(jiffies,
-				    tx->adaptive_clean_since + 5 * HZ))
+			tx->adaptive_clean_since = now;
+		else if (time_after(now, tx->adaptive_clean_since + 5 * HZ)) {
 			tx->adaptive_on = false;
+			tx->adaptive_clean_since = 0;
+			tx->adaptive_observed = 0;
+			tx->adaptive_loss_q16 = 0;
+		}
 	} else {
 		tx->adaptive_clean_since = 0;
 	}
-unlock:
+}
+
+void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter)
+{
+	struct uwg_fec_tx *tx;
+
+	rcu_read_lock();
+	tx = rcu_dereference(peer->fec_tx);
+	if (!tx || !tx->adaptive)
+		goto out;
+	spin_lock_bh(&tx->lock);
+	uwg_fec_adaptive_observe_locked(tx, counter, jiffies);
 	spin_unlock_bh(&tx->lock);
 out:
 	rcu_read_unlock();
@@ -646,6 +694,14 @@ static void uwg_fec_rx_deliver(struct uwg_peer *peer,
 {
 	struct sk_buff *skb;
 
+	if (skb_queue_empty(out))
+		return;
+	/* Recovered packets are data the inner stack sees, so they keep the
+	 * data path alive even when every underlay packet was a shard. The
+	 * plain shard path arms the timer in uwg_ext_handle_fec_shard(); this
+	 * covers packets reconstructed here after their shard was lost.
+	 */
+	uwg_timers_data_received(peer);
 	while ((skb = __skb_dequeue(out)) != NULL)
 		uwg_packet_deliver_inner(peer, skb, 0, use_napi);
 }
@@ -939,6 +995,7 @@ static void uwg_fec_mark_resend(struct uwg_peer *peer)
 	peer->caps.send_attempts = 0;
 	peer->caps.reply_attempts = 0;
 	peer->caps.next_send = 0;
+	peer->caps.last_sent = 0;
 	WRITE_ONCE(peer->caps.resend, true);
 	spin_unlock_bh(&peer->caps.lock);
 }
@@ -1227,6 +1284,87 @@ void uwg_fec_stats_fill_device(struct uwg_device *uwg,
 	}
 }
 
+/* Deterministic check of the reorder-vs-loss decision. It feeds the same
+ * counter sequence the data plane would see, but with a controlled clock: a
+ * clean link whose every fourth counter is delayed to the end of the segment
+ * must not look lossy, while a link that really drops 2% must arm. The second
+ * half also guards the adaptive clean-timer reset on (re)enable.
+ */
+static bool uwg_fec_adaptive_selftest(void)
+{
+	struct uwg_fec_tx tx;
+	unsigned long now = jiffies;
+	u64 i;
+	bool ok = true;
+
+#define A_CHECK(cond) do {						\
+		if (!(cond)) {						\
+			pr_err("FEC adaptive self-test: FAIL (%s)\n",	\
+			       #cond);					\
+			ok = false;					\
+		}							\
+	} while (0)
+
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+
+	/* Clean link, every fourth counter arrives only at the end. */
+	uwg_fec_adaptive_observe_locked(&tx, 0, now);
+	for (i = 1; i <= 4096; i++)
+		if (i % 4)
+			uwg_fec_adaptive_observe_locked(&tx, i, now);
+	for (i = 4; i <= 4096; i += 4)
+		uwg_fec_adaptive_observe_locked(&tx, i, now);
+	now += HZ;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, now);
+	A_CHECK(!tx.adaptive_on);
+	A_CHECK(!tx.adaptive_loss_q16);
+
+	/* Same window with a real 2% loss: every 50th counter never arrives. */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	uwg_fec_adaptive_observe_locked(&tx, 0, now);
+	/* Simulate a stale clean timestamp left over from the disabled
+	 * period: enabling must discard it, or the next clean sample turns
+	 * adaptive off immediately.
+	 */
+	tx.adaptive_clean_since = now - 10 * HZ;
+	for (i = 1; i <= 4096; i++)
+		if (i % 50)
+			uwg_fec_adaptive_observe_locked(&tx, i, now);
+	now += HZ;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, now);
+	A_CHECK(tx.adaptive_on);
+	A_CHECK(!tx.adaptive_clean_since);
+
+	/* One clean sample right after enabling must not switch it off. */
+	now += HZ;
+	for (i = 4098; i < 4098 + UWG_FEC_ADAPTIVE_MIN_WINDOW; i++)
+		uwg_fec_adaptive_observe_locked(&tx, i, now);
+	A_CHECK(tx.adaptive_on);
+
+	/* ... but a run of clean samples does. The EWMA starts at the lossy
+	 * estimate, so it takes several one-second segments to decay and
+	 * then five more to expire the clean timer.
+	 */
+	{
+		u64 counter = 4098 + UWG_FEC_ADAPTIVE_MIN_WINDOW;
+		unsigned int sec;
+
+		for (sec = 0; sec < 20; sec++) {
+			now += HZ;
+			for (i = 0; i < UWG_FEC_ADAPTIVE_MIN_WINDOW;
+			     i++, counter++)
+				uwg_fec_adaptive_observe_locked(&tx, counter,
+								now);
+		}
+	}
+	A_CHECK(!tx.adaptive_on);
+
+#undef A_CHECK
+	return ok;
+}
+
 int uwg_fec_mtu_selftest(void)
 {
 	static const unsigned int underlays[] = { 576, 1280, 1500, 9000 };
@@ -1296,6 +1434,7 @@ int uwg_fec_mtu_selftest(void)
 	 */
 	T_CHECK(uwg_fec_target_mtu(1500, 1420, false) == 1420);
 	T_CHECK(uwg_fec_target_mtu(576, 1420, false) == 1420);
+	T_CHECK(uwg_fec_adaptive_selftest());
 
 	if (!ok)
 		return -EINVAL;
