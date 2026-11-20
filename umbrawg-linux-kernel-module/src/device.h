@@ -61,6 +61,17 @@ struct uwg_device {
 	u8 extra_ports;
 	u8 bbr_mode;
 	u32 fec_mode;
+	/* MTU of the path between peers, as configured by the user. The FEC
+	 * MTU policy needs it to decide how large one shard datagram may be.
+	 */
+	u16 underlay_mtu;
+	/* MTU the user asked for (`ip link set mtu` or the netdev default),
+	 * and the one the FEC policy last programmed. They differ while FEC
+	 * is enabled; a dev->mtu different from fec_applied_mtu means the
+	 * operator changed it behind our back, and it is adopted as the new
+	 * base by uwg_fec_refresh_mtu().
+	 */
+	u32 fec_base_mtu, fec_applied_mtu;
 	atomic_t sock4_rr, sock6_rr;
 	struct net __rcu *creating_net;
 	struct noise_static_identity static_identity;

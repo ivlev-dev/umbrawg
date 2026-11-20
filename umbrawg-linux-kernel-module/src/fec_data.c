@@ -12,6 +12,7 @@
 #include <linux/ktime.h>
 #include <linux/netdevice.h>
 #include <linux/random.h>
+#include <linux/rtnetlink.h>
 #include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -99,17 +100,100 @@ bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive)
 	return true;
 }
 
+unsigned int uwg_fec_allowed_inner(unsigned int underlay_mtu)
+{
+	if (underlay_mtu <= UWG_FEC_SHARD_WIRE_OVERHEAD)
+		return 0;
+	return underlay_mtu - UWG_FEC_SHARD_WIRE_OVERHEAD;
+}
+
+unsigned int uwg_fec_underlay_payload(const struct uwg_device *uwg)
+{
+	unsigned int underlay = READ_ONCE(uwg->underlay_mtu);
+
+	if (underlay <= UWG_FEC_UNDERLAY_IP_UDP_OVERHEAD)
+		return 0;
+	return underlay - UWG_FEC_UNDERLAY_IP_UDP_OVERHEAD;
+}
+
+/* MTU the device should run at. With FEC on it is the largest inner packet
+ * that still fits one shard datagram, and never above the base MTU the user
+ * chose; with FEC off it is exactly that base. The 576 floor keeps ICMPv6 and
+ * IPv4 reassembly working even when the underlay is tiny; the shard limit then
+ * falls back to legacy for packets above the underlay budget.
+ */
+unsigned int uwg_fec_target_mtu(unsigned int underlay_mtu, unsigned int base_mtu,
+				bool fec_on)
+{
+	unsigned int allowed, target;
+
+	if (!fec_on)
+		return base_mtu;
+
+	allowed = uwg_fec_allowed_inner(underlay_mtu);
+	/* Above the shard cap every packet would take the legacy path. */
+	if (allowed > UWG_FEC_DATA_SHARD_CAP - 2)
+		allowed = UWG_FEC_DATA_SHARD_CAP - 2;
+	target = min(base_mtu, allowed);
+	if (target < UWG_UNDERLAY_MTU_MIN)
+		target = UWG_UNDERLAY_MTU_MIN;
+	return target;
+}
+
+void uwg_fec_refresh_mtu(struct uwg_device *uwg)
+{
+	struct net_device *dev = uwg->dev;
+	unsigned int base = READ_ONCE(uwg->fec_base_mtu);
+	unsigned int cur_mtu = READ_ONCE(dev->mtu);
+	unsigned int target;
+	bool fec_on;
+	int ret;
+
+	fec_on = uwg_fec_mode_config(READ_ONCE(uwg->fec_mode), NULL, NULL, NULL);
+
+	/* dev_set_mtu() is only allowed under rtnl: every caller (the netlink
+	 * SET_DEVICE path, which also covers peer creation) holds it.
+	 */
+	ASSERT_RTNL();
+
+	/* The MTU no longer matches the one programmed by the last refresh, so
+	 * the operator changed it by hand (`ip link set mtu`). Adopt it as the
+	 * new base instead of silently reverting their choice; the FEC policy
+	 * is then applied to it.
+	 */
+	if (cur_mtu != READ_ONCE(uwg->fec_applied_mtu))
+		base = cur_mtu;
+
+	target = uwg_fec_target_mtu(READ_ONCE(uwg->underlay_mtu), base, fec_on);
+	if (target != cur_mtu) {
+		ret = dev_set_mtu(dev, (int)target);
+		if (ret) {
+			/* Keep the old MTU: FEC still works for packets that
+			 * fit, the rest falls back to the legacy path.
+			 */
+			net_warn_ratelimited(
+				"%s: Could not apply the FEC MTU %u: %d\n",
+				dev->name, target, ret);
+			target = cur_mtu;
+		}
+	}
+	WRITE_ONCE(uwg->fec_base_mtu, base);
+	WRITE_ONCE(uwg->fec_applied_mtu, target);
+}
+
 static unsigned int uwg_fec_tx_limit(const struct uwg_peer *peer)
 {
-	/* The shard budget has to cover the two byte packet length prefix,
-	 * the ext and FEC shard headers, the payload, and the encryption
-	 * padding, all of which are sent inside one underlay datagram sized
-	 * by the TUN MTU. Two padding blocks are reserved: the 16 byte
-	 * alignment and the random tail added by the transport sender.
+	/* uwg_fec_refresh_mtu() already lowered the device MTU so that a
+	 * full-size inner packet plus the two byte shard length prefix fits
+	 * one shard datagram. The wire overhead is therefore not subtracted
+	 * again here; the min() only matters when the policy could not apply
+	 * (manual MTU after the last refresh, or a failed dev_set_mtu).
 	 */
-	int limit = (int)READ_ONCE(peer->device->dev->mtu) + 2 -
-		    (UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN +
-		     2 * MESSAGE_PADDING_MULTIPLE);
+	struct uwg_device *uwg = peer->device;
+	int limit = (int)min_t(unsigned int,
+			       READ_ONCE(uwg->dev->mtu),
+			       uwg_fec_allowed_inner(
+				       READ_ONCE(uwg->underlay_mtu))) + 2;
 
 	if (limit > UWG_FEC_DATA_SHARD_CAP)
 		limit = UWG_FEC_DATA_SHARD_CAP;
@@ -987,4 +1071,81 @@ void uwg_fec_stats_fill_device(struct uwg_device *uwg,
 		stats->dropped_bounds += peer_stats.dropped_bounds;
 		stats->dropped_disabled += peer_stats.dropped_disabled;
 	}
+}
+
+int uwg_fec_mtu_selftest(void)
+{
+	static const unsigned int underlays[] = { 576, 1280, 1500, 9000 };
+	unsigned int i, test_num = 0;
+	bool ok = true;
+
+#define T_CHECK(cond) do {						\
+		++test_num;						\
+		if (!(cond)) {						\
+			pr_err("FEC MTU self-test %u: FAIL (%s)\n",	\
+			       test_num, #cond);			\
+			ok = false;					\
+		}							\
+	} while (0)
+
+	/* The wire overhead has to cover the exact builder in
+	 * uwg_fec_tx_emit(): two length bytes, both extension headers, the
+	 * message header and auth tag, the 16 byte alignment and the random
+	 * tail, and the outer IP/UDP headers.
+	 */
+	T_CHECK(MESSAGE_MINIMUM_LENGTH ==
+		sizeof(struct message_data) + NOISE_AUTHTAG_LEN);
+	T_CHECK(UWG_UNDERLAY_MTU_MAX == 65535);
+	T_CHECK(UWG_FEC_SHARD_WIRE_OVERHEAD ==
+		UWG_FEC_UNDERLAY_IP_UDP_OVERHEAD + MESSAGE_MINIMUM_LENGTH +
+		UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN + 2 +
+		MESSAGE_PADDING_MULTIPLE - 1 + MESSAGE_PADDING_MULTIPLE - 1);
+	T_CHECK(UWG_FEC_SHARD_WIRE_OVERHEAD == 132);
+
+	for (i = 0; i < ARRAY_SIZE(underlays); i++) {
+		unsigned int underlay = underlays[i];
+		unsigned int allowed = uwg_fec_allowed_inner(underlay);
+		unsigned int shard_len = allowed + 2;
+		unsigned int datagram;
+
+		T_CHECK(allowed == underlay - UWG_FEC_SHARD_WIRE_OVERHEAD);
+		/* Worst case shard: full-size inner packet, every padding
+		 * byte present, largest headers.
+		 */
+		datagram = UWG_FEC_UNDERLAY_IP_UDP_OVERHEAD +
+			   MESSAGE_MINIMUM_LENGTH + UWG_EXT_HEADER_LEN +
+			   UWG_EXT_FEC_HEADER_LEN + shard_len +
+			   UWG_FEC_SHARD_PADDING_MAX;
+		T_CHECK(datagram == underlay);
+	}
+
+	/* 1500 keeps the shard budget the old formula produced for the
+	 * default 1420 MTU (1420 + 2 - 52), but now the TUN MTU itself is
+	 * lowered to that value, so no packet escapes to the legacy path.
+	 */
+	T_CHECK(uwg_fec_target_mtu(1500, 1420, true) == 1368);
+	T_CHECK(uwg_fec_allowed_inner(1500) + 2 == 1370);
+	/* A 9000 byte underlay must not raise the MTU above the base one. */
+	T_CHECK(uwg_fec_target_mtu(9000, 1420, true) == 1420);
+	/* ... but a base MTU above the shard cap is clamped to the cap. */
+	T_CHECK(uwg_fec_target_mtu(9000, 9000, true) ==
+		UWG_FEC_DATA_SHARD_CAP - 2);
+	T_CHECK(uwg_fec_target_mtu(1280, 1420, true) == 1148);
+	T_CHECK(uwg_fec_target_mtu(1280, 1420, true) >= UWG_UNDERLAY_MTU_MIN);
+	/* Below the IPv4 minimum the MTU is clamped, and the excess packets
+	 * fall back to the legacy path through uwg_fec_tx_push().
+	 */
+	T_CHECK(uwg_fec_target_mtu(576, 1420, true) == UWG_UNDERLAY_MTU_MIN);
+	T_CHECK(uwg_fec_target_mtu(576, 1420, true) > uwg_fec_allowed_inner(576));
+	/* With FEC off the base MTU is returned untouched, whatever the
+	 * underlay says.
+	 */
+	T_CHECK(uwg_fec_target_mtu(1500, 1420, false) == 1420);
+	T_CHECK(uwg_fec_target_mtu(576, 1420, false) == 1420);
+
+	if (!ok)
+		return -EINVAL;
+	pr_info("FEC MTU self-test: 1..%u passed\n", test_num);
+	return 0;
+#undef T_CHECK
 }

@@ -304,6 +304,16 @@ static bool encrypt_packet(struct sk_buff *skb, struct noise_keypair *keypair)
 		padding_len = calculate_skb_padding(skb);
 	}
 
+	/* A FEC shard is bounded by the underlay MTU policy, not by the TUN
+	 * MTU: the heuristics above are sized for the latter and a window
+	 * derived trailer could inflate one shard past a whole datagram. The
+	 * block already carries its own random slack inside the shard, so cap
+	 * the outer tail at what UWG_FEC_SHARD_WIRE_OVERHEAD reserves.
+	 */
+	if (unlikely(PACKET_CB(skb)->is_fec) &&
+	    padding_len > UWG_FEC_SHARD_TRAILER_MAX)
+		padding_len = UWG_FEC_SHARD_TRAILER_MAX;
+
 	trailer_len = padding_len + noise_encrypted_len(0);
 	plaintext_len = skb->len + padding_len;
 

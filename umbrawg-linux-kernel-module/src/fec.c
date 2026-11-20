@@ -8,6 +8,7 @@
 #include <linux/string.h>
 
 #include "fec.h"
+#include "fec_data.h"
 
 #define UWG_FEC_POLY 0x11d
 #define UWG_FEC_ORDER 255
@@ -460,5 +461,5 @@ int uwg_fec_selftest(void)
 	    uwg_fec_encode(1, UWG_FEC_MAX_PARITY + 1, 8, NULL, NULL) != -EINVAL)
 		return -EINVAL;
 
-	return 0;
+	return uwg_fec_mtu_selftest();
 }

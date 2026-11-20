@@ -79,6 +79,7 @@ static const struct nla_policy device_policy[UWGDEVICE_A_MAX + 1] = {
 	[UWGDEVICE_A_EXTRA_PORTS] = { .type = NLA_U8 },
 	[UWGDEVICE_A_BBR] = { .type = NLA_U8 },
 	[UWGDEVICE_A_FEC] = { .type = NLA_U32 },
+	[UWGDEVICE_A_UNDERLAY_MTU] = { .type = NLA_U16 },
 	[UWGDEVICE_A_FEC_STATS] = { .type = NLA_NESTED },
 	[UWGDEVICE_A_BBR_STATS] = { .type = NLA_NESTED },
 };
@@ -580,6 +581,8 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 		    nla_put_u8(skb, UWGDEVICE_A_EXTRA_PORTS, uwg->extra_ports) ||
 		    nla_put_u8(skb, UWGDEVICE_A_BBR, uwg->bbr_mode) ||
 		    nla_put_u32(skb, UWGDEVICE_A_FEC, uwg->fec_mode) ||
+		    nla_put_u16(skb, UWGDEVICE_A_UNDERLAY_MTU,
+				uwg->underlay_mtu) ||
 		    nla_put_u32(skb, UWGDEVICE_A_IFINDEX, uwg->dev->ifindex) ||
 		    nla_put_string(skb, UWGDEVICE_A_IFNAME, uwg->dev->name) ||
 		    nla_put_u16(skb, UWGDEVICE_A_JC, uwg->jc) ||
@@ -1049,6 +1052,18 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 		uwg_ext_caps_changed(uwg);
 	}
 
+	if (info->attrs[UWGDEVICE_A_UNDERLAY_MTU]) {
+		val16 = nla_get_u16(info->attrs[UWGDEVICE_A_UNDERLAY_MTU]);
+		if (val16 < UWG_UNDERLAY_MTU_MIN) {
+			net_dbg_ratelimited(
+				"%s: UnderlayMtu must be at least %d\n",
+				uwg->dev->name, UWG_UNDERLAY_MTU_MIN);
+			ret = -EINVAL;
+			goto out;
+		}
+		uwg->underlay_mtu = val16;
+	}
+
 	if (info->attrs[UWGDEVICE_A_JC] ||
 	    info->attrs[UWGDEVICE_A_JMIN] ||
 	    info->attrs[UWGDEVICE_A_JMAX]) {
@@ -1402,6 +1417,15 @@ skip_set_private_key:
 				goto out;
 		}
 	}
+
+	/* Re-derive the interface MTU once, after every input of the policy
+	 * (FEC mode, underlay MTU, peer set) has been applied. Runs under rtnl,
+	 * which dev_set_mtu() requires.
+	 */
+	if (info->attrs[UWGDEVICE_A_FEC] ||
+	    info->attrs[UWGDEVICE_A_UNDERLAY_MTU] ||
+	    info->attrs[UWGDEVICE_A_PEERS])
+		uwg_fec_refresh_mtu(uwg);
 	ret = 0;
 
 out:

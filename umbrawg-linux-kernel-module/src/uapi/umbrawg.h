@@ -32,6 +32,7 @@
  *    UWGDEVICE_A_EXTRA_PORTS: NLA_U8
  *    UWGDEVICE_A_BBR: NLA_U8
  *    UWGDEVICE_A_FEC: NLA_U32
+ *    UWGDEVICE_A_UNDERLAY_MTU: NLA_U16
  *    UWGDEVICE_A_FEC_STATS: NLA_NESTED
  *        UWGDEVICE_FEC_STATS_A_BLOCKS_ENCODED: NLA_U64
  *        UWGDEVICE_FEC_STATS_A_SHARDS_SENT: NLA_U64
@@ -110,6 +111,14 @@
  *    UWGDEVICE_A_FEC: NLA_U32, 0 to disable, 1 to use adaptive mode,
  *                    otherwise (K << 8) | M for K data and M parity
  *                    shards, where K >= 1, M >= 1 and K + M <= 255
+ *    UWGDEVICE_A_UNDERLAY_MTU: NLA_U16, the MTU of the path between the
+ *                             peers, from 576 to 65535, 1500 by default.
+ *                             While FEC is enabled the interface MTU is
+ *                             lowered so that a full-size packet plus its
+ *                             shard overhead still fits one underlay
+ *                             datagram (48 bytes of IPv6/UDP headers are
+ *                             always reserved, whatever the endpoint
+ *                             family). Turning FEC off restores the MTU.
  *    UWGDEVICE_A_PEERS: NLA_NESTED
  *        0: NLA_NESTED
  *            UWGPEER_A_PUBLIC_KEY: len UWG_KEY_LEN
@@ -247,6 +256,7 @@ enum uwgdevice_attribute {
 	UWGDEVICE_A_FEC,
 	UWGDEVICE_A_FEC_STATS,	/* 38: nested uwgdevice_fec_stats_attrs */
 	UWGDEVICE_A_BBR_STATS,	/* 39: nested uwgdevice_bbr_stats_attrs */
+	UWGDEVICE_A_UNDERLAY_MTU,	/* 40: u16, MTU of the path between peers */
 	__UWGDEVICE_A_LAST
 };
 #define UWGDEVICE_A_MAX (__UWGDEVICE_A_LAST - 1)

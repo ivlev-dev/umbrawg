@@ -143,7 +143,14 @@ static inline unsigned int uwg_peer_udp_window_max(const struct uwg_device *uwg)
 	unsigned int max = READ_ONCE(uwg->dev->mtu) +
 			   READ_ONCE(uwg->transport_padding) +
 			   UWG_UDP_WINDOW_OVERHEAD;
+	unsigned int underlay = uwg_fec_underlay_payload(uwg);
 
+	/* The window is measured on the whole datagram, so it must leave room
+	 * for the underlay IP/UDP headers: a trailer that reaches the window
+	 * would otherwise push the packet past the path MTU.
+	 */
+	if (max > underlay)
+		max = underlay;
 	if (max > UWG_UDP_WINDOW_HARD_MAX)
 		max = UWG_UDP_WINDOW_HARD_MAX;
 	return max;
