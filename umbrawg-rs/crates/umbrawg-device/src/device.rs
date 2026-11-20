@@ -361,6 +361,9 @@ impl Device {
     }
 
     pub fn set_ext_config(&self, config: crate::ExtConfig) {
+        if self.ext_config() == config {
+            return;
+        }
         *self.ext_config.write() = config;
         for peer in self.peers.load().values() {
             peer.configure_extension(config);
@@ -1096,8 +1099,8 @@ impl Device {
             .seal_in_place(nonce, &mut dst[header_end..total])
             .ok_or(DeviceError::PacketTooLarge)?;
         peer.observe_udp_window(total as u32);
-        let is_data = plaintext.first().is_some_and(|byte| *byte != 0);
-        peer.extension().on_packet_sent(nonce, total, is_data, now);
+        let kind = crate::ext::FrameKind::classify(plaintext);
+        peer.extension().on_packet_sent(nonce, total, kind, now);
         Ok(total)
     }
 
@@ -1453,6 +1456,12 @@ impl Device {
         peer.extension().bbr_drain(now, max_packets)
     }
 
+    /// Returns a BBR snapshot for the peer, or `None` when BBR is disabled.
+    #[must_use]
+    pub fn bbr_stats(&self, peer: &Peer) -> Option<umbrawg_cc::BbrStats> {
+        peer.extension().bbr_stats()
+    }
+
     #[must_use]
     pub fn pacing_delay(&self, peer: &Peer, bytes: usize, now: Instant) -> Duration {
         peer.extension().pacing_delay(bytes, now)
@@ -1649,30 +1658,30 @@ impl Device {
         if !peer.running() {
             return Ok(IncomingOutcome::Dropped);
         }
-        if let Some(kind) = umbrawg_proto::control::extension_kind(plaintext) {
-            return self.handle_extension(&peer, kind, counter, plaintext, ctx);
-        }
-        peer.extension().observe_received(counter, ctx.now);
         let plaintext_len = plaintext.len();
+        // Mirrors the kernel order in `receive.c`: accounting, keypair
+        // promotion, timers and keep-key-fresh run for every authenticated
+        // packet, extension frames included, before the extension dispatcher.
+        // Treating a CAPS/ACK/FEC frame as ordinary traffic prevents spurious
+        // rekeys and feedback resets while FEC or BBR is active.
         peer.observe_udp_window((header_end + plaintext_len) as u32);
         peer.add_rx((plaintext_len + MESSAGE_MINIMUM_LENGTH) as u64);
-        let promoted = peer.promote_keypair(&keypair);
-        let promoted = if let Some(removed) = promoted {
+        if let Some(removed) = peer.promote_keypair(&keypair) {
             self.index.remove_many(&removed);
             peer.set_endpoint_from_packet(source);
             self.timers_handshake_complete(&peer);
-            true
-        } else {
-            peer.set_endpoint_from_packet(source);
-            false
-        };
-        if promoted {
             peer.extension().reset_feedback();
             self.flush_staged(&peer, ctx)?;
+        } else {
+            peer.set_endpoint_from_packet(source);
         }
         self.timers_any_authenticated_packet_traversal(&peer, ctx.rng, ctx.now);
         self.timers_any_authenticated_packet_received(&peer);
         self.keep_key_fresh_receiving(&peer, timings, ctx)?;
+        if let Some(kind) = umbrawg_proto::control::extension_kind(plaintext) {
+            return self.handle_extension(&peer, kind, counter, plaintext, ctx);
+        }
+        peer.extension().observe_received(counter, ctx.now);
         if plaintext.is_empty() || plaintext[0] == 0 {
             return Ok(IncomingOutcome::Keepalive);
         }
@@ -1969,6 +1978,9 @@ impl Device {
             if !peer.running() {
                 continue;
             }
+            // BBR needs time-driven work (PROBE_BW watchdog, PROBE_RTT,
+            // stale-record sweep) even when no ACK arrives.
+            peer.extension().on_timer(ctx.now);
             let count = peer.with_timers(|timers| timers.expire(ctx.now, &mut kinds));
             for kind in kinds[..count].iter().copied() {
                 self.handle_timer(peer, kind, ctx)?;
@@ -2378,6 +2390,49 @@ mod tests {
         assert!(
             orders.iter().any(|order| order != &vec![0, 1, 2, 3, 4, 5]),
             "some blocks must leave systematic order"
+        );
+    }
+
+    #[test]
+    fn set_ext_config_is_idempotent_for_peers() {
+        use umbrawg_proto::control::{Caps, CapsFlags};
+
+        let device = Device::new(DeviceConfig::default()).unwrap();
+        let peer = device
+            .add_peer(PeerConfig::new(PublicKey::from_bytes([9u8; 32])))
+            .unwrap();
+        let config = crate::ExtConfig {
+            bbr: crate::BbrMode::Off,
+            fec: crate::FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        };
+        device.set_ext_config(config);
+        let now = Instant::now();
+        peer.extension().handle_caps(
+            Caps {
+                flags: CapsFlags::FEC | CapsFlags::ACK,
+                ack_interval_packets: 2,
+                fec_k: 2,
+                fec_m: 1,
+            },
+            now,
+        );
+        assert!(peer.extension().fec_tx_active());
+
+        device.set_ext_config(config);
+        assert!(
+            peer.extension().fec_tx_active(),
+            "an unchanged config must not reset peer capabilities"
+        );
+
+        device.set_ext_config(crate::ExtConfig {
+            fec: crate::FecMode::Fixed { k: 3, m: 1 },
+            ..config
+        });
+        assert!(
+            !peer.extension().fec_tx_active(),
+            "a changed FEC profile invalidates the negotiated capabilities"
         );
     }
 }

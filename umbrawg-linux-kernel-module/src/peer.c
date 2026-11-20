@@ -34,7 +34,7 @@ struct uwg_bbr *uwg_peer_bbr_lookup(struct uwg_peer *peer)
 
 static struct uwg_bbr *uwg_peer_bbr_alloc(void)
 {
-	struct uwg_bbr *bbr = kzalloc(sizeof(*bbr), GFP_KERNEL);
+	struct uwg_bbr *bbr = kvmalloc(sizeof(*bbr), GFP_KERNEL);
 
 	if (unlikely(!bbr))
 		return NULL;
@@ -50,7 +50,7 @@ void uwg_peer_bbr_release(struct uwg_peer *peer)
 		return;
 	RCU_INIT_POINTER(peer->bbr, NULL);
 	synchronize_net();
-	kfree(bbr);
+	kvfree(bbr);
 }
 
 int uwg_peer_bbr_sync(struct uwg_peer *peer)

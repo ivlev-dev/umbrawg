@@ -15,6 +15,116 @@ PROTO_LIST=udp UDP_RATE_LIST="1G 0" CONNS_LIST="1 10" bash bench.sh
 python3 bench-report.py results-20261116-120000.csv --md report.md --agg agg.csv
 ```
 
+## Тесты расширения BBR/FEC
+
+`bench/wire-ext.sh` и `bench/ext-matrix.sh` проверяют расширение `BBR`/`FEC`
+на той же топологии, что и остальной стенд: два netns, veth, kernel-модуль
+`umbrawg`; вторая сторона — Rust-демон (`IMPL=rust`) или ещё один
+kernel-интерфейс (`IMPL=kernel`). `wire-ext.sh` делает один прогон (ping, TCP,
+UDP, pcap), `ext-matrix.sh` прогоняет матрицу и собирает CSV.
+
+Нужны root, собранные `umbrawg.ko`, `uwg` и (для `IMPL=rust`) демон
+`umbrawg`. Пути переопределяются через `KO`, `UWG`, `RUST`. Стенд
+эксклюзивный: скрипт выгружает `umbrawg`, создаёт netns `xwg0`/`xwg1` и по
+окончании удаляет их; параллельные замеры недостоверны.
+
+### Один прогон
+
+```bash
+sudo IMPL=kernel KFEC=2:1 DUR=4 bash bench/wire-ext.sh
+sudo IMPL=rust KFEC=adaptive RFEC=adaptive KBBR=on DUR=4 NETEM_LOSS=2 bash bench/wire-ext.sh
+sudo IMPL=kernel KFEC=8:2 NETEM_LOSS=2 NETEM_BOTH=1 TUNMTU=1420 bash bench/wire-ext.sh
+sudo IMPL=kernel KFEC=2:1 NETEM_RATE=100mbit NETEM_DELAY=10 KEEP=1 bash bench/wire-ext.sh
+```
+
+Строка результата (её же разбирает матрица):
+
+```
+RESULT tag=smoke impl=kernel dir=k0 fec=2:1 bbr=off loss=2 tcp_mbit=663.0 udp_mbit=399.9 udp_loss=0.2 ping_loss=0 frag=0 result=OK
+```
+
+`result`: `OK`, `FAIL_LINK` (не поднялся туннель), `FAIL_TCP`, `FAIL_UDP`.
+Артефакты `OUT.*` (`-tcp.json`, `-udp.json`, `.pcap`, логи iperf3) остаются
+в `/tmp`; `KEEP=1` оставляет netns, модуль и демон для разбора.
+
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `IMPL` | rust | `rust` — kernel↔Rust, `kernel` — kernel↔kernel |
+| `DIR` | k0 | на какой стороне kernel: `k0` (ns0) или `k1` (ns1) |
+| `KFEC` / `RFEC` | off | FEC kernel-стороны / Rust-стороны: `off`, `adaptive`, `K:M` |
+| `KBBR` / `RBBR` | off | BBR kernel-стороны / Rust-стороны: `off`, `monitor`, `on` |
+| `NETEM_LOSS` | 0 | потери в % на underlay |
+| `NETEM_DELAY` | 0 | задержка netem (мс или с единицей, напр. `10ms`) |
+| `NETEM_RATE` | пусто | полоса netem в единицах tc, напр. `100mbit` |
+| `NETEM_BOTH` | 1 | 1 — netem на обе стороны, 0 — только egress kernel-стороны |
+| `UMTU` / `UNDERLAY_MTU` | 9000 | MTU veth |
+| `TUNMTU` | 1420 | MTU туннельных интерфейсов |
+| `DUR` | 4 | длительность TCP и UDP по отдельности, с |
+| `UDP_RATE` | 400M | предложенная скорость UDP |
+| `FEC_SHARD`, `ACK_INTERVAL` | пусто | необязательные env Rust-демона (`UMBRAWG_FEC_SHARD`, `UMBRAWG_ACK_INTERVAL`) |
+| `TAG` | ext | метка прогона |
+| `SKIP_PING` | 0 | 1 — не измерять ping (handshake-проверка остаётся) |
+| `KEEP` | 0 | 1 — не удалять netns/модуль/демон после прогона |
+| `KO`, `UWG`, `RUST` | пути репозитория | бинарники стенда |
+| `PORT0`, `PORT1`, `IPERF_PORT` | 53920, 53921, 5291 | underlay-порты и порт iperf3 |
+
+В mixed-режиме (`IMPL=rust`) FEC/BBR задаются отдельно для каждой стороны.
+`RFEC`/`RBBR` по умолчанию повторяют `KFEC`/`KBBR`; для kernel↔kernel
+значения `RFEC`/`RBBR` игнорируются (обе стороны используют `KFEC`/`KBBR`).
+`FEC`/`BBR` работают как алиасы `KFEC`/`KBBR`.
+
+### Матрица
+
+```bash
+PLAN_ONLY=1 bash bench/ext-matrix.sh          # только план, без root и трафика
+sudo bash bench/ext-matrix.sh                # 32 прогона
+sudo DUR=2 FEC_LIST="off 2:1 adaptive" bash bench/ext-matrix.sh
+sudo LOSS_LIST="0 2 5" NETEM_RATE=100mbit bash bench/ext-matrix.sh
+sudo DIR_LIST="k0 k1" IMPL_LIST=kernel bash bench/ext-matrix.sh
+```
+
+| Ось | Значения по умолчанию | Что проверяет |
+|---|---|---|
+| `IMPL_LIST` | `rust kernel` | mixed kernel↔Rust и kernel↔kernel |
+| `FEC_LIST` | `off 2:1 8:2 adaptive` | цена fixed-режимов и поведение adaptive |
+| `BBR_LIST` | `off on` | вклад BBR-пейсинга |
+| `LOSS_LIST` | `0 2` | чистый канал и 2% потерь |
+| `DIR_LIST` | `k0` | сторона kernel; `k0 k1` для проверки симметрии |
+
+`adaptive` включается по входящим потерям >1% после прогрева 1024 пакетов,
+поэтому для него нужны потери в обе стороны: `NETEM_BOTH=1` (значение по
+умолчанию) или потери на стороне Rust-пира. При односторонних потерях
+сторона с чистым входящим потоком останется в legacy.
+
+CSV пишется в `bench/tmp/ext-matrix-<RUN_ID>.csv`:
+
+```
+tag,impl,dir,fec,bbr,loss,tcp_mbit,udp_mbit,udp_loss,ping_loss,frag,result
+```
+
+`tcp_mbit` — goodput TCP; `udp_mbit`/`udp_loss` — принятая скорость и потери
+UDP при `UDP_RATE`; `ping_loss` — потери ICMP (`SKIP` при `SKIP_PING=1`);
+`frag` — число IP-фрагментов в pcap (`-`, если tcpdump недоступен); `result`
+— `OK` или причина отказа. Логи прогонов лежат в
+`bench/tmp/ext-matrix-<RUN_ID>/`. В конце печатается сводка по
+`impl/fec/bbr/loss` (медианы) и списки фрагментированных и упавших прогонов.
+
+### Как читать результат
+
+- `loss=0`: `off` и `adaptive` должны совпадать — adaptive на чистом канале не
+  активен. Fixed `2:1`/`8:2` ниже по TCP примерно на overhead `k+m`.
+- `loss=2`: у `off` `udp_loss` около 2%; fixed и adaptive FEC должны её
+  снизить. Adaptive включается только при потерях в обе стороны.
+- BBR заметен на узком месте (`NETEM_RATE`): сравнивайте `bbr=off` и `bbr=on`
+  при одной полосе. На чистом 9k veth разница в пределах шума.
+- `frag>0` при `TUNMTU`, близком к underlay MTU, означает, что FEC-шарды или
+  обфускация вышли за MTU.
+
+**Время.** Один прогон — это два замера по `DUR` плюс настройка и рукопожатие;
+матрица по умолчанию (32 ячейки, `DUR=3`) идёт около 7–10 минут, с `DUR=4` и
+перезагрузкой модуля — дольше. Перед длинным прогоном всегда смотрите
+`PLAN_ONLY=1`.
+
 ## Ключи и секреты
 
 В репозитории нет рабочих ключей: `obf-params.conf` — шаблон, в котором

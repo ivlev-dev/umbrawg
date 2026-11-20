@@ -37,7 +37,7 @@
  * latency to ACKs, keepalives and interactive traffic.
  */
 #define UWG_TX_PACE_MIN_BYTES 512
-#define UWG_TX_PACE_MAX_NS (2ULL * NSEC_PER_MSEC)
+#define UWG_TX_PACE_MAX_NS UWG_BBR_DRAIN_DELAY_MAX_NS
 
 /* Handshake outer TOS is sampled per frame: DSCP is not negotiated and the
  * peer ignores it, but a constant value is a stable fingerprint.
@@ -441,6 +441,64 @@ static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
 	rcu_read_unlock();
 }
 
+static void uwg_packet_bbr_on_sent(struct uwg_peer *peer,
+				   struct sk_buff *const *skbs,
+				   unsigned int count)
+{
+	struct uwg_bbr *bbr;
+	u64 now_ns;
+	unsigned int i;
+
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+		return;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (unlikely(!bbr)) {
+		rcu_read_unlock();
+		return;
+	}
+
+	/* One timestamp and one lock for the whole GSO group keeps the
+	 * intra-group spacing out of the RTT samples.
+	 */
+	now_ns = ktime_get_ns();
+	spin_lock_bh(&peer->bbr_lock);
+	for (i = 0; i < count; i++) {
+		if (PACKET_CB(skbs[i])->is_keepalive)
+			continue;
+		uwg_bbr_on_sent(bbr, PACKET_CB(skbs[i])->nonce, now_ns);
+	}
+	spin_unlock_bh(&peer->bbr_lock);
+	rcu_read_unlock();
+}
+
+/*
+ * Datagrams that were registered with uwg_bbr_on_send() but never reached
+ * the wire must leave inflight; otherwise a failing queue or crypto path
+ * slowly inflates the window.
+ */
+static void uwg_packet_bbr_on_drop(struct uwg_peer *peer, struct sk_buff *list)
+{
+	struct sk_buff *skb, *next;
+	struct uwg_bbr *bbr;
+
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+		return;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (bbr) {
+		spin_lock_bh(&peer->bbr_lock);
+		skb_list_walk_safe(list, skb, next) {
+			if (!PACKET_CB(skb)->is_keepalive)
+				uwg_bbr_on_drop(bbr, PACKET_CB(skb)->nonce);
+		}
+		spin_unlock_bh(&peer->bbr_lock);
+	}
+	rcu_read_unlock();
+}
+
 static u64 uwg_packet_pace_delay_ns(struct uwg_peer *peer, unsigned int len)
 {
 	struct uwg_bbr *bbr;
@@ -484,7 +542,7 @@ static void uwg_packet_pace(struct uwg_peer *peer, unsigned int len)
 }
 
 static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
-				bool *data_sent)
+				bool *data_sent, bool pace)
 {
 	bool is_keepalive = PACKET_CB(skb)->is_keepalive;
 	u32 pace_len = PACKET_CB(skb)->pace_len;
@@ -493,26 +551,14 @@ static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
 	/* FEC blocks are paced as a whole: only the first shard carries the
 	 * block length in pace_len, the rest are sent right after it.
 	 */
-	if (!is_keepalive) {
+	if (pace && !is_keepalive) {
 		if (pace_len)
 			uwg_packet_pace(peer, pace_len);
 		else if (!PACKET_CB(skb)->is_fec)
 			uwg_packet_pace(peer, skb->len);
 	}
 
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_ON) {
-		struct uwg_bbr *bbr;
-
-		rcu_read_lock();
-		bbr = uwg_peer_bbr_lookup(peer);
-		if (bbr) {
-			spin_lock_bh(&peer->bbr_lock);
-			uwg_bbr_on_sent(bbr, PACKET_CB(skb)->nonce,
-					ktime_get_ns());
-			spin_unlock_bh(&peer->bbr_lock);
-		}
-		rcu_read_unlock();
-	}
+	uwg_packet_bbr_on_sent(peer, &skb, 1);
 
 	if (likely(!uwg_socket_send_skb_to_peer(peer, skb, ds) && !is_keepalive))
 		*data_sent = true;
@@ -564,17 +610,36 @@ static bool uwg_packet_send_gso(struct uwg_peer *peer, struct sk_buff **pkts,
 	if (unlikely(!agg))
 		return false;
 
+	/* Each segment consumed a nonce and a ring slot; the aggregate skb is
+	 * sent as one device packet but must update all of them.
+	 */
+	uwg_packet_bbr_on_sent(peer, pkts, count);
+
 	for (i = 0; i < count; ++i) {
 		keepalive |= PACKET_CB(pkts[i])->is_keepalive;
 		kfree_skb(pkts[i]);
 	}
 
-	if (!keepalive)
-		uwg_packet_pace(peer, count * len);
-
 	if (likely(!uwg_socket_send_skb_to_peer(peer, agg, ds) && !keepalive))
 		*data_sent = true;
 	return true;
+}
+
+/*
+ * Pacing cost of one datagram. FEC blocks are charged once, on the shard
+ * that carries the whole block length in pace_len.
+ */
+static u32 uwg_packet_pace_bytes(struct sk_buff *skb)
+{
+	u32 pace_len = PACKET_CB(skb)->pace_len;
+
+	if (PACKET_CB(skb)->is_keepalive)
+		return 0;
+	if (pace_len)
+		return pace_len;
+	if (PACKET_CB(skb)->is_fec)
+		return 0;
+	return skb->len;
 }
 
 static void uwg_packet_create_data_done(struct uwg_peer *peer,
@@ -584,6 +649,7 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 	struct sk_buff *skbs[UWG_TX_MAX_SKBS];
 	unsigned int nskbs = 0, i, j;
 	bool data_sent = false;
+	u32 pace_len = 0;
 
 	for (i = 0; i < entries_len; ++i) {
 		struct sk_buff *skb, *next;
@@ -592,14 +658,19 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 			skb_mark_not_on_list(skb);
 			if (likely(nskbs < UWG_TX_MAX_SKBS)) {
 				skbs[nskbs++] = skb;
+				pace_len += uwg_packet_pace_bytes(skb);
 			} else {
-				uwg_packet_send_one(peer, skb, &data_sent);
+				uwg_packet_send_one(peer, skb, &data_sent, true);
 			}
 		}
 	}
 
 	uwg_timers_any_authenticated_packet_traversal(peer);
 	uwg_timers_any_authenticated_packet_sent(peer);
+
+	/* One sleep for the whole batch instead of one per datagram. */
+	if (pace_len)
+		uwg_packet_pace(peer, pace_len);
 
 	for (i = 0; i < nskbs; ) {
 		unsigned int len = skbs[i]->len;
@@ -629,7 +700,7 @@ send_group:
 		}
 
 		for (; i < j; ++i)
-			uwg_packet_send_one(peer, skbs[i], &data_sent);
+			uwg_packet_send_one(peer, skbs[i], &data_sent, false);
 	}
 
 	if (likely(data_sent))
@@ -662,6 +733,7 @@ void uwg_packet_tx_worker(struct work_struct *work)
 				continue;
 			}
 			uwg_noise_keypair_put(PACKET_CB(first)->keypair, false);
+			uwg_packet_bbr_on_drop(peer, first);
 			kfree_skb_list(first);
 			uwg_peer_put(peer);
 		}
@@ -728,6 +800,7 @@ err:
 	rcu_read_unlock_bh();
 	if (likely(!ret || ret == -EPIPE))
 		return;
+	uwg_packet_bbr_on_drop(peer, first);
 	uwg_noise_keypair_put(PACKET_CB(first)->keypair, false);
 	uwg_peer_put(peer);
 	kfree_skb_list(first);

@@ -15,7 +15,12 @@
  *   - There is no timer callback. Time-based work (PROBE_RTT exit, phase
  *     watchdog) runs on ACK/LOSS events, and stale records are bounded by
  *     the ring capacity instead of a periodic sweep.
- *   - The send ring holds 2048 records of 24 bytes (48 KiB) instead of the
+ *   - Loss is inferred from ACK bitmap holes and from records leaving the
+ *     64-bit window without an ACK. Loss cuts are deferred until STARTUP
+ *     ends, so random loss cannot abort bandwidth discovery.
+ *   - cwnd is enforced in the pacer as an extra drain delay instead of
+ *     parking the TX queue; the added delay is capped at 2 ms.
+ *   - The send ring holds 4096 records of 24 bytes (96 KiB) instead of the
  *     8192 records of 32 bytes (256 KiB) the Rust crate uses; see bbr.h.
  */
 
@@ -41,10 +46,16 @@
 #define UWG_BBR_PROBE_RTT_DURATION_NS 200000000ULL
 #define UWG_BBR_FULL_BW_THRESHOLD 1250ULL
 #define UWG_BBR_FULL_BW_ROUNDS 3U
-#define UWG_BBR_LOSS_THRESHOLD_PCT 2ULL
+#define UWG_BBR_LOSS_THRESHOLD_PCT 20ULL
 #define UWG_BBR_LOSS_COMPENSATION_MAX_PCT 25ULL
 #define UWG_BBR_HI_GROWTH_DIVISOR 64ULL
-#define UWG_BBR_RATE_SANITY_FACTOR 4ULL
+/*
+ * The pacing rate must stay close to cwnd/RTT: a large multiplier makes the
+ * window decorative. 1.25 leaves room for delayed ACKs and loss compensation
+ * without letting the sender ignore the congestion window.
+ */
+#define UWG_BBR_RATE_SANITY_GAIN 4000ULL
+#define UWG_BBR_RATE_SANITY_UNIT 1000ULL
 #define UWG_BBR_ACK_WINDOW 63ULL
 #define UWG_BBR_MAX_DATAGRAM 65535U
 #define UWG_BBR_BW_WINDOW_ROUNDS 10U
@@ -105,6 +116,15 @@ static inline u64 uwg_max3(u64 a, u64 b, u64 c)
 static inline u8 uwg_slot_state(const struct uwg_bbr_sent *slot)
 {
 	return (u8)(slot->delivered_state >> UWG_BBR_STATE_SHIFT);
+}
+
+/* True while the record's bytes are still counted in b->inflight. */
+static inline bool uwg_slot_inflight(const struct uwg_bbr_sent *slot)
+{
+	u8 state = uwg_slot_state(slot);
+
+	return state == UWG_BBR_SLOT_INFLIGHT ||
+	       state == UWG_BBR_SLOT_LOST_NOTED;
 }
 
 static inline void uwg_slot_set_state(struct uwg_bbr_sent *slot, u8 state)
@@ -314,6 +334,33 @@ static void uwg_min_rtt_refresh(struct uwg_bbr *b, u64 now_ns)
 }
 
 /*
+ * Advances the oldest-in-flight watermark past records that are no longer
+ * accounted as in flight. Every counter is visited once over its lifetime,
+ * so the cost is amortised O(1) per datagram; the budget only bounds the
+ * worst case of a large counter gap (dropped/handshake-only nonces).
+ */
+static void uwg_ring_advance_oldest(struct uwg_bbr *b)
+{
+	unsigned int budget = UWG_BBR_RING_CAPACITY;
+
+	if (!b->oldest_valid)
+		return;
+
+	while (budget-- && b->oldest_inflight <= b->max_sent) {
+		struct uwg_bbr_sent *slot =
+			&b->ring[b->oldest_inflight & UWG_BBR_RING_MASK];
+
+		if (slot->counter == b->oldest_inflight &&
+		    uwg_slot_inflight(slot))
+			return;
+		b->oldest_inflight++;
+	}
+
+	if (b->oldest_inflight > b->max_sent)
+		b->oldest_valid = false;
+}
+
+/*
  * Inserts a record, returning the length of a displaced in-flight record
  * (0 when the displaced slot was not in flight).
  */
@@ -322,7 +369,7 @@ static u32 uwg_ring_insert(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns)
 	struct uwg_bbr_sent *slot = &b->ring[counter & UWG_BBR_RING_MASK];
 	u32 evicted = 0;
 
-	if (uwg_slot_state(slot) == UWG_BBR_SLOT_INFLIGHT)
+	if (uwg_slot_inflight(slot))
 		evicted = slot->len;
 
 	slot->counter = counter;
@@ -333,21 +380,36 @@ static u32 uwg_ring_insert(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns)
 	return evicted;
 }
 
-static bool uwg_ring_mark_acked(struct uwg_bbr *b, u64 counter,
-				struct uwg_bbr_sent *out)
+/*
+ * Returns 0 when the record is unknown, 1 when it was in flight and 2 when
+ * it had been counted as a loss of this round (LOST_NOTED) and recovered.
+ * In both successful cases the record is copied to @out.
+ */
+static int uwg_ring_mark_acked(struct uwg_bbr *b, u64 counter,
+			       struct uwg_bbr_sent *out)
 {
 	struct uwg_bbr_sent *slot = &b->ring[counter & UWG_BBR_RING_MASK];
+	u8 state = uwg_slot_state(slot);
 
-	if (uwg_slot_state(slot) != UWG_BBR_SLOT_INFLIGHT || slot->counter != counter)
-		return false;
-	*out = *slot;
-	uwg_slot_set_state(slot, UWG_BBR_SLOT_ACKED);
-	return true;
+	if (slot->counter != counter)
+		return 0;
+	if (state == UWG_BBR_SLOT_INFLIGHT) {
+		*out = *slot;
+		uwg_slot_set_state(slot, UWG_BBR_SLOT_ACKED);
+		return 1;
+	}
+	if (state == UWG_BBR_SLOT_LOST_NOTED) {
+		*out = *slot;
+		uwg_slot_set_state(slot, UWG_BBR_SLOT_ACKED);
+		return 2;
+	}
+	return 0;
 }
 
 /*
- * Returns 0 when the record is unknown, 1 when it was in flight and 2 when
- * it had already been released from the in-flight accounting.
+ * Returns 0 when the record is unknown, 1 when it was in flight, 2 when it
+ * had already been counted as a loss of this round (LOST_NOTED), 3 when it
+ * was dropped locally and 4 when the loss was already accounted (LOST).
  */
 static int uwg_ring_mark_lost(struct uwg_bbr *b, u64 counter, u32 *len)
 {
@@ -356,33 +418,87 @@ static int uwg_ring_mark_lost(struct uwg_bbr *b, u64 counter, u32 *len)
 
 	if (slot->counter != counter)
 		return 0;
-	if (state != UWG_BBR_SLOT_INFLIGHT && state != UWG_BBR_SLOT_RELEASED)
+	if (state == UWG_BBR_SLOT_DROPPED)
+		return 3;
+	if (state == UWG_BBR_SLOT_LOST)
+		return 4;
+	if (state != UWG_BBR_SLOT_INFLIGHT && state != UWG_BBR_SLOT_LOST_NOTED)
 		return 0;
 	*len = slot->len;
 	uwg_slot_set_state(slot, UWG_BBR_SLOT_LOST);
 	return state == UWG_BBR_SLOT_INFLIGHT ? 1 : 2;
 }
 
-/* Releases records that the 64-bit ACK bitmap can no longer cover. */
+static void uwg_bbr_note_loss(struct uwg_bbr *b, u64 len, u64 now_ns);
+
+/*
+ * Releases records that the 64-bit ACK bitmap can no longer cover. They
+ * left the window without being acknowledged, which is exactly the loss
+ * signal the controller needs; the walk starts at the watermark instead of
+ * scanning the whole ring.
+ */
 static void uwg_ring_release_unreachable(struct uwg_bbr *b, u64 largest,
-					 u64 *bytes, u64 *packets)
+					 u64 now_ns)
 {
-	unsigned int i;
+	unsigned int budget = UWG_BBR_RING_CAPACITY;
 
-	*bytes = 0;
-	*packets = 0;
-	for (i = 0; i < UWG_BBR_RING_CAPACITY; i++) {
-		struct uwg_bbr_sent *slot = &b->ring[i];
+	if (!b->oldest_valid)
+		return;
 
-		if (uwg_slot_state(slot) != UWG_BBR_SLOT_INFLIGHT)
+	while (budget-- && largest > b->oldest_inflight &&
+	       largest - b->oldest_inflight > UWG_BBR_ACK_WINDOW) {
+		u64 counter = b->oldest_inflight;
+		struct uwg_bbr_sent *slot =
+			&b->ring[counter & UWG_BBR_RING_MASK];
+		u8 state = uwg_slot_state(slot);
+
+		if (slot->counter == counter) {
+			if (state == UWG_BBR_SLOT_INFLIGHT) {
+				u32 len = slot->len;
+
+				b->inflight = b->inflight > len ?
+					      b->inflight - len : 0;
+				uwg_slot_set_state(slot, UWG_BBR_SLOT_LOST);
+				uwg_bbr_note_loss(b, len, now_ns);
+			} else if (state == UWG_BBR_SLOT_LOST_NOTED) {
+				u32 len = slot->len;
+
+				b->inflight = b->inflight > len ?
+					      b->inflight - len : 0;
+				uwg_slot_set_state(slot, UWG_BBR_SLOT_LOST);
+			}
+		}
+		b->oldest_inflight++;
+	}
+
+	uwg_ring_advance_oldest(b);
+}
+
+/*
+ * Counts bitmap holes inside the ACK window as losses of the current round.
+ * Only records that are still in flight qualify: ACKED, LOST and locally
+ * DROPPED slots are skipped, and LOST_NOTED prevents double counting when
+ * the explicit loss report arrives later. Bit 0 (the largest counter) is
+ * always set by a well-formed ACK and is left to the normal ACK path.
+ */
+static void uwg_ring_note_holes(struct uwg_bbr *b, u64 largest, u64 bitmap,
+				u64 now_ns)
+{
+	unsigned int bit;
+
+	for (bit = 1; bit < 64 && (u64)bit <= largest; bit++) {
+		struct uwg_bbr_sent *slot;
+		u64 counter;
+
+		if (bitmap & (1ULL << bit))
 			continue;
-		if (slot->counter >= largest)
+		counter = largest - bit;
+		slot = &b->ring[counter & UWG_BBR_RING_MASK];
+		if (slot->counter != counter ||
+		    uwg_slot_state(slot) != UWG_BBR_SLOT_INFLIGHT)
 			continue;
-		if (largest - slot->counter <= UWG_BBR_ACK_WINDOW)
-			continue;
-		uwg_slot_set_state(slot, UWG_BBR_SLOT_RELEASED);
-		*bytes = uwg_sat_add(*bytes, slot->len);
-		*packets = uwg_sat_add(*packets, 1);
+		uwg_slot_set_state(slot, UWG_BBR_SLOT_LOST_NOTED);
+		uwg_bbr_note_loss(b, slot->len, now_ns);
 	}
 }
 
@@ -431,8 +547,10 @@ static void uwg_bbr_update_pacing(struct uwg_bbr *b, u64 now_ns)
 static void uwg_bbr_settle_bounds(struct uwg_bbr *b)
 {
 	u64 floor = max(uwg_bbr_bdp(b), b->min_cwnd);
+	u64 ceiling = uwg_max3(b->inflight, b->cwnd, floor);
 
-	b->inflight_hi = uwg_max3(b->inflight, b->cwnd, floor);
+	/* Never raise a bound that a loss cut has already lowered. */
+	b->inflight_hi = max(min(b->inflight_hi, ceiling), b->min_cwnd);
 	if (b->inflight_lo > b->inflight_hi)
 		b->inflight_lo = b->inflight_hi;
 	b->bw_hi = b->btl_bw;
@@ -468,13 +586,19 @@ static void uwg_bbr_cut_upper_bounds(struct uwg_bbr *b)
 
 static void uwg_bbr_apply_loss_cut(struct uwg_bbr *b, u64 now_ns)
 {
+	/*
+	 * During STARTUP inflight_hi is not established yet: cutting it here
+	 * would cap the window at the current (small) BtlBw estimate and the
+	 * controller could never discover the real pipe. STARTUP exits on the
+	 * BtlBw plateau instead.
+	 */
+	if (b->mode == UWG_BBR_STARTUP)
+		return;
+
 	uwg_bbr_cut_upper_bounds(b);
-	if (b->mode == UWG_BBR_STARTUP && b->btl_bw) {
-		uwg_bbr_finish_startup(b, now_ns);
-		b->bw_hi = b->btl_bw;
-	}
 	if (b->mode == UWG_BBR_PROBE_BW &&
-	    uwg_bbr_cycle_gains[b->cycle_idx] > UWG_BBR_GAIN_UNIT) {
+	    uwg_bbr_cycle_gains[b->cycle_idx % ARRAY_SIZE(uwg_bbr_cycle_gains)] >
+		    UWG_BBR_GAIN_UNIT) {
 		b->cycle_idx = 1;
 		b->cycle_start_ns = now_ns;
 	}
@@ -498,10 +622,10 @@ static void uwg_bbr_adapt_bounds(struct uwg_bbr *b)
 		uwg_sat_mul(b->round_lost, 100) >= uwg_sat_mul(total, UWG_BBR_LOSS_THRESHOLD_PCT);
 	congestion = lossy || b->round_congestion;
 
-	if (congestion) {
+	if (congestion && b->mode != UWG_BBR_STARTUP) {
 		if (b->round_max_inflight && b->last_cut_round != b->round_count)
 			uwg_bbr_cut_upper_bounds(b);
-	} else {
+	} else if (b->mode != UWG_BBR_STARTUP) {
 		if (uwg_sat_mul(b->btl_bw, 100) >
 		    max(uwg_sat_mul(b->bw_hi, 105), 1ULL)) {
 			b->inflight_hi = max(b->inflight_hi,
@@ -567,7 +691,12 @@ static void uwg_bbr_start_round(struct uwg_bbr *b, u64 now_ns)
 	bool app_limited = uwg_sat_mul(b->round_max_inflight, 2) < b->cwnd;
 
 	uwg_bbr_adapt_bounds(b);
-	if (b->mode == UWG_BBR_STARTUP && b->btl_bw && !app_limited)
+	/*
+	 * Plateau detection also runs on app-limited rounds: btl_bw is a
+	 * windowed maximum, so a lull cannot lower it, and waiting for a
+	 * full round would leave STARTUP stuck when the sender runs dry.
+	 */
+	if (b->mode == UWG_BBR_STARTUP && b->btl_bw)
 		uwg_bbr_check_full_bw(b, now_ns);
 	if (b->mode == UWG_BBR_PROBE_BW)
 		uwg_bbr_advance_cycle(b, now_ns);
@@ -626,7 +755,9 @@ static void uwg_bbr_update_cwnd(struct uwg_bbr *b, u64 acked_bytes)
 	case UWG_BBR_PROBE_BW: {
 		u64 cap = hi;
 
-		if (uwg_bbr_cycle_gains[b->cycle_idx] > UWG_BBR_GAIN_UNIT)
+		if (uwg_bbr_cycle_gains[b->cycle_idx %
+					ARRAY_SIZE(uwg_bbr_cycle_gains)] >
+		    UWG_BBR_GAIN_UNIT)
 			cap = uwg_sat_add(hi, hi / 4);
 		cwnd = max(target, lo);
 		cwnd = min(cwnd, cap);
@@ -636,6 +767,24 @@ static void uwg_bbr_update_cwnd(struct uwg_bbr *b, u64 acked_bytes)
 		cwnd = max(target, lo);
 		cwnd = min(cwnd, hi);
 		break;
+	}
+
+	/*
+	 * During a lossy round inflight_lo acts as a ceiling as well: without
+	 * this the floor semantics below would immediately lift cwnd back to
+	 * the uninflated target and the loss cut would have no effect. The
+	 * cap stays for the round that follows a cut and never drops below
+	 * one BDP, so persistent random loss cannot collapse the window and
+	 * the BtlBw estimate with it.
+	 */
+	if (b->mode != UWG_BBR_STARTUP &&
+	    (b->round_lost || b->round_congestion ||
+	     (b->last_cut_round != U64_MAX &&
+	      b->round_count == b->last_cut_round + 1))) {
+		u64 loss_cap = max3(min(b->inflight_lo, b->inflight_hi),
+				    uwg_bbr_bdp(b), b->min_cwnd);
+
+		cwnd = min(cwnd, loss_cap);
 	}
 
 	cwnd = max(cwnd, b->min_cwnd);
@@ -675,22 +824,29 @@ static void uwg_bbr_note_loss(struct uwg_bbr *b, u64 len, u64 now_ns)
 	b->lost_bytes = uwg_sat_add(b->lost_bytes, len);
 	b->lost_packets = uwg_sat_add(b->lost_packets, 1);
 	b->round_lost = uwg_sat_add(b->round_lost, len);
-	b->round_congestion = true;
 
 	total = uwg_sat_add(b->round_delivered, b->round_lost);
+	/* Random loss on a fat pipe is not congestion: only a loss rate above
+	 * the threshold may drive the bounds or a cut, otherwise a steady 2%
+	 * loss would shrink the window on every round.
+	 */
 	if (total &&
 	    uwg_sat_mul(b->round_lost, 100) >=
-	    uwg_sat_mul(total, UWG_BBR_LOSS_THRESHOLD_PCT) &&
-	    b->last_cut_round != b->round_count)
-		uwg_bbr_apply_loss_cut(b, now_ns);
+	    uwg_sat_mul(total, UWG_BBR_LOSS_THRESHOLD_PCT)) {
+		b->round_congestion = true;
+		if (b->last_cut_round != b->round_count)
+			uwg_bbr_apply_loss_cut(b, now_ns);
+	}
 }
 
 static u64 uwg_bbr_sanity_rate(const struct uwg_bbr *b, u64 rate)
 {
 	u64 rtt = max(uwg_min_rtt_value(b), UWG_BBR_MIN_RTT_SAMPLE_NS);
 	u64 cwnd = max(b->cwnd, b->min_cwnd);
-	u64 bound = uwg_mul_div(cwnd, UWG_BBR_RATE_SANITY_FACTOR * UWG_BBR_NSEC_PER_SEC, rtt);
+	u64 bound = uwg_mul_div(cwnd, UWG_BBR_NSEC_PER_SEC, rtt);
 
+	bound = uwg_mul_div(bound, UWG_BBR_RATE_SANITY_GAIN,
+			    UWG_BBR_RATE_SANITY_UNIT);
 	return min(min(rate, max(bound, 1ULL)), UWG_BBR_MAX_RATE);
 }
 
@@ -715,6 +871,7 @@ static bool uwg_bbr_acknowledge(struct uwg_bbr *b, u64 largest, u64 bitmap,
 	u64 bytes = 0;
 	u64 bits = bitmap;
 	unsigned int bit;
+	int res;
 
 	*have_newest = false;
 	for (bit = 0; bit < 64 && bits; bit++, bits >>= 1) {
@@ -726,8 +883,11 @@ static bool uwg_bbr_acknowledge(struct uwg_bbr *b, u64 largest, u64 bitmap,
 		if (largest < (u64)bit)
 			continue;
 		counter = largest - (u64)bit;
-		if (!uwg_ring_mark_acked(b, counter, &slot))
+		res = uwg_ring_mark_acked(b, counter, &slot);
+		if (!res)
 			continue;
+		if (res == 2)
+			b->spurious_losses = uwg_sat_add(b->spurious_losses, 1);
 		bytes = uwg_sat_add(bytes, slot.len);
 		if (!*have_newest || slot.sent_ns >= newest->sent_ns) {
 			*newest = slot;
@@ -788,6 +948,13 @@ void uwg_bbr_on_send(struct uwg_bbr *b, u64 counter, u32 len, u64 now_ns)
 	}
 	b->inflight = uwg_sat_add(b->inflight, len);
 	b->round_max_inflight = max(b->round_max_inflight, b->inflight);
+	if (!b->oldest_valid || counter < b->oldest_inflight) {
+		b->oldest_inflight = counter;
+		b->oldest_valid = true;
+	} else {
+		/* An eviction may have removed the previous watermark. */
+		uwg_ring_advance_oldest(b);
+	}
 	uwg_pacer_consume(b, len);
 }
 
@@ -810,8 +977,6 @@ void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
 	u64 newly_acked;
 	u64 delay_ns;
 	u64 delivered_since = 0;
-	u64 unreachable_bytes;
-	u64 unreachable_packets;
 	u64 rate = 0;
 	bool have_rate = false;
 	bool starts_round;
@@ -835,14 +1000,9 @@ void uwg_bbr_on_ack(struct uwg_bbr *b, u64 largest, u64 bitmap,
 	uwg_bbr_acknowledge(b, largest, bitmap, &newest, &have_newest);
 	newly_acked = b->delivered - prior_delivered;
 
-	uwg_ring_release_unreachable(b, largest, &unreachable_bytes,
-				     &unreachable_packets);
-	if (unreachable_packets) {
-		b->inflight = b->inflight > unreachable_bytes ?
-			      b->inflight - unreachable_bytes : 0;
-		b->orphaned_packets = uwg_sat_add(b->orphaned_packets,
-						  unreachable_packets);
-	}
+	uwg_ring_release_unreachable(b, largest, now_ns);
+	uwg_ring_note_holes(b, largest, bitmap, now_ns);
+	uwg_ring_advance_oldest(b);
 
 	delay_ns = uwg_delay_ns(ack_delay_us);
 
@@ -891,7 +1051,12 @@ void uwg_bbr_on_loss(struct uwg_bbr *b, u64 counter, u64 now_ns)
 		b->inflight = b->inflight > len ? b->inflight - len : 0;
 		uwg_bbr_note_loss(b, len, now_ns);
 	} else if (state == 2) {
-		uwg_bbr_note_loss(b, len, now_ns);
+		/* The ACK bitmap already reported this hole. */
+		b->inflight = b->inflight > len ? b->inflight - len : 0;
+	} else if (state == 3) {
+		/* Dropped locally: the bytes already left inflight. */
+	} else if (state == 4) {
+		/* Loss was already counted by the bitmap or the watermark. */
 	} else {
 		bool unreachable = counter < b->largest_acked &&
 			b->largest_acked - counter > UWG_BBR_ACK_WINDOW;
@@ -902,8 +1067,29 @@ void uwg_bbr_on_loss(struct uwg_bbr *b, u64 counter, u64 now_ns)
 			b->spurious_losses = uwg_sat_add(b->spurious_losses, 1);
 	}
 
+	uwg_ring_advance_oldest(b);
 	uwg_bbr_update_cwnd(b, 0);
 	uwg_bbr_update_pacing(b, now_ns);
+}
+
+/*
+ * Returns the bytes of a locally dropped datagram to the congestion window
+ * without treating the drop as a delivery or as a congestion signal. Must
+ * be called after uwg_bbr_on_send() and before the skb is freed.
+ */
+void uwg_bbr_on_drop(struct uwg_bbr *b, u64 counter)
+{
+	struct uwg_bbr_sent *slot = &b->ring[counter & UWG_BBR_RING_MASK];
+
+	if (slot->counter != counter || !uwg_slot_inflight(slot))
+		return;
+
+	if (b->inflight > slot->len)
+		b->inflight -= slot->len;
+	else
+		b->inflight = 0;
+	uwg_slot_set_state(slot, UWG_BBR_SLOT_DROPPED);
+	uwg_ring_advance_oldest(b);
 }
 
 /*
@@ -927,6 +1113,7 @@ u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns)
 	const struct uwg_bbr_pacer *p = &b->pacer;
 	s64 allowance;
 	u64 deficit;
+	u64 delay = 0;
 	u64 rate;
 
 	if (!len)
@@ -935,15 +1122,24 @@ u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns)
 		len = UWG_BBR_MAX_DATAGRAM;
 
 	allowance = uwg_pacer_projected_allowance(p, now_ns);
-	if (allowance >= (s64)len)
-		return 0;
-	if (allowance >= 0)
-		deficit = (u64)len - (u64)allowance;
-	else
-		deficit = uwg_sat_add((u64)len, (u64)(-allowance));
+	if (allowance < (s64)len) {
+		if (allowance >= 0)
+			deficit = (u64)len - (u64)allowance;
+		else
+			deficit = uwg_sat_add((u64)len, (u64)(-allowance));
 
-	rate = max(p->rate, 1ULL);
-	return uwg_mul_div(deficit, UWG_BBR_NSEC_PER_SEC, rate);
+		rate = max(p->rate, 1ULL);
+		delay = uwg_mul_div(deficit, UWG_BBR_NSEC_PER_SEC, rate);
+	}
+
+	/*
+	 * The congestion window is not applied as a sleep: on low-RTT links
+	 * cwnd is a few KiB, and a per-batch drain delay turned into a hard
+	 * throughput ceiling. It stays telemetry (uwg_bbr_cwnd) until the
+	 * sender can block on ACK progress instead of sleeping.
+	 */
+
+	return delay;
 }
 
 u64 uwg_bbr_pacing_rate(const struct uwg_bbr *b)
@@ -994,7 +1190,7 @@ struct uwg_bbr_sim_result {
 
 #define UWG_BBR_SIM_CAPACITY 12500000ULL	/* 100 Mbit/s */
 #define UWG_BBR_SIM_PROP_NS 10000000ULL		/* 10 ms one way */
-#define UWG_BBR_SIM_PACKETS 1000U
+#define UWG_BBR_SIM_PACKETS 3000U
 #define UWG_BBR_SIM_ITER_LIMIT 4000000ULL
 
 static bool uwg_bbr_sim_lost(const struct uwg_bbr_sim_params *p, u32 counter)
@@ -1338,8 +1534,8 @@ static int uwg_bbr_selftest_edges(void)
 		return -EINVAL;
 	}
 
-	/* Ring wrap: 3000 unacknowledged sends must stay bounded. */
-	for (i = 0; i < 3000; i++)
+	/* Ring wrap: capacity + 1000 unacknowledged sends must stay bounded. */
+	for (i = 0; i < UWG_BBR_RING_CAPACITY + 1000; i++)
 		uwg_bbr_on_send(b, 100 + i, 1400, 10000 + i * 1000);
 	if (!b->orphaned_packets || b->inflight > UWG_BBR_RING_CAPACITY * 1400ULL) {
 		pr_err("BBR self-test: ring overflow accounting broken\n");
@@ -1395,6 +1591,88 @@ static int uwg_bbr_selftest_edges(void)
 	}
 	if (uwg_bbr_next_delay_ns(b, 2800, 1001000) >= delay) {
 		pr_err("BBR self-test: pacing projection ignores refills\n");
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/*
+	 * A hole in the ACK bitmap is a loss of this round; a later ACK for
+	 * the same counter is spurious and must not be counted twice.
+	 */
+	uwg_bbr_init(b, 1400, 20000);
+	uwg_bbr_on_send(b, 0, 1400, 1000);
+	uwg_bbr_on_send(b, 1, 1400, 1100);
+	uwg_bbr_on_send(b, 2, 1400, 1200);
+	uwg_bbr_on_ack(b, 2, 0x5, 0, 5000000);
+	if (b->lost_packets != 1 || uwg_bbr_inflight(b) != 1400) {
+		pr_err("BBR self-test: bitmap hole not seen as loss (lost=%llu inflight=%llu)\n",
+		       b->lost_packets, uwg_bbr_inflight(b));
+		kfree(b);
+		return -EINVAL;
+	}
+	uwg_bbr_on_ack(b, 2, 0x7, 0, 6000000);
+	if (b->lost_packets != 1 || !b->spurious_losses ||
+	    uwg_bbr_inflight(b) != 0) {
+		pr_err("BBR self-test: hole recovery mis-accounted (lost=%llu spurious=%llu inflight=%llu)\n",
+		       b->lost_packets, b->spurious_losses,
+		       uwg_bbr_inflight(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* An explicit loss report for an already-counted hole is not a second loss. */
+	uwg_bbr_init(b, 1400, 20000);
+	uwg_bbr_on_send(b, 0, 1400, 1000);
+	uwg_bbr_on_send(b, 1, 1400, 1100);
+	uwg_bbr_on_ack(b, 1, 0x1, 0, 5000000);
+	uwg_bbr_on_loss(b, 0, 6000000);
+	if (b->lost_packets != 1 || uwg_bbr_inflight(b) != 0) {
+		pr_err("BBR self-test: hole loss counted twice (lost=%llu inflight=%llu)\n",
+		       b->lost_packets, uwg_bbr_inflight(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* Locally dropped datagrams leave inflight but are not losses. */
+	uwg_bbr_init(b, 1400, 20000);
+	uwg_bbr_on_send(b, 0, 1400, 1000);
+	uwg_bbr_on_drop(b, 0);
+	if (uwg_bbr_inflight(b) != 0 || b->lost_packets) {
+		pr_err("BBR self-test: local drop mis-accounted\n");
+		kfree(b);
+		return -EINVAL;
+	}
+	uwg_bbr_on_loss(b, 0, 2000);
+	if (b->lost_packets) {
+		pr_err("BBR self-test: dropped datagram counted as loss\n");
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/*
+	 * Records that fall out of the 64-bit ACK window without being
+	 * acknowledged are losses and must be released through the watermark,
+	 * not left in inflight forever.
+	 */
+	uwg_bbr_init(b, 1400, 20000);
+	for (i = 0; i < 100; i++)
+		uwg_bbr_on_send(b, i, 1400, 1000000 + i * 1000);
+	uwg_bbr_on_ack(b, 99, U64_MAX, 0, 2000000);
+	if (uwg_bbr_inflight(b) != 0 || b->lost_packets != 36) {
+		pr_err("BBR self-test: watermark release broken (lost=%llu inflight=%llu)\n",
+		       b->lost_packets, uwg_bbr_inflight(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* cwnd is telemetry only: it must not add a sleep on top of pacing. */
+	uwg_bbr_init(b, 1400, 20000);
+	for (i = 0; i < 5; i++)
+		uwg_bbr_on_send(b, i, 1400, 1000 + i);
+	delay = uwg_bbr_next_delay_ns(b, 1400, 1000);
+	if (delay != 15000000ULL) {
+		pr_err("BBR self-test: pure pacing delay %llu, expected 15000000\n",
+		       delay);
 		kfree(b);
 		return -EINVAL;
 	}

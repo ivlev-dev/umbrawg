@@ -4,9 +4,9 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use rand_core::RngCore;
-use umbrawg_cc::{Ack as BbrAck, Bbr, BbrConfig};
-use umbrawg_fec::{FecConfig, FecDecoder, FecEncoder, FecShard};
-use umbrawg_proto::control::{Ack, Caps, CapsFlags, ControlKind};
+use umbrawg_cc::{Ack as BbrAck, Bbr, BbrConfig, BbrStats};
+use umbrawg_fec::{EncodedBlock, FecConfig, FecDecoder, FecEncoder, FecShard};
+use umbrawg_proto::control::{Ack, Caps, CapsFlags, ControlKind, FecShardHeader};
 
 /// Maximum number of CAPS frames sent to one peer per handshake.
 const CAPS_MAX_ATTEMPTS: u8 = 3;
@@ -14,6 +14,21 @@ const CAPS_MAX_ATTEMPTS: u8 = 3;
 const CAPS_FAST_RETRY: Duration = Duration::from_millis(250);
 /// Spacing of the last CAPS retry before the attempts are exhausted.
 const CAPS_SLOW_RETRY: Duration = Duration::from_secs(2);
+
+/// Minimum number of counters one adaptive FEC window must span.
+const ADAPTIVE_WINDOW_MIN: u64 = 256;
+/// A gap larger than this is treated as a counter restart, not as loss.
+const ADAPTIVE_GAP_MAX: u64 = 1 << 20;
+/// Total window length before the first window is judged.
+const ADAPTIVE_OBSERVE_MIN: u64 = 1024;
+/// Loss ratio (in 1/65536 units) that switches adaptive parity on (~1 %).
+const ADAPTIVE_ON_LOSS_Q16: u32 = 655;
+/// Loss ratio (in 1/65536 units) that allows adaptive parity to switch off (~0.2 %).
+const ADAPTIVE_OFF_LOSS_Q16: u32 = 131;
+/// How long the loss estimate must stay below [`ADAPTIVE_OFF_LOSS_Q16`].
+const ADAPTIVE_CLEAN_TIME: Duration = Duration::from_secs(5);
+/// Upper bound on loss reports derived from one ACK bitmap.
+const MAX_BITMAP_LOSSES: usize = 32;
 
 /// Lower bound of the randomized ACK interval, in received datagrams.
 const ACK_INTERVAL_MIN: u16 = 8;
@@ -252,10 +267,6 @@ struct AckTracker {
     interval: u16,
     timeout: Duration,
     jitter: Jitter,
-    window_received: u32,
-    window_highest: u64,
-    window_base: u64,
-    last_loss: f32,
 }
 
 impl AckTracker {
@@ -274,10 +285,6 @@ impl AckTracker {
             interval,
             timeout,
             jitter,
-            window_received: 0,
-            window_highest: 0,
-            window_base: 0,
-            last_loss: 0.0,
         }
     }
 
@@ -308,30 +315,6 @@ impl AckTracker {
         if count_for_ack {
             self.received_since = self.received_since.saturating_add(1);
         }
-        if self.window_received == 0 {
-            self.window_base = counter;
-        }
-        self.window_received = self.window_received.saturating_add(1);
-        self.window_highest = self.window_highest.max(counter);
-        if self.window_received >= 256 {
-            let expected = self
-                .window_highest
-                .saturating_sub(self.window_base)
-                .saturating_add(1);
-            let lost = expected.saturating_sub(u64::from(self.window_received));
-            self.last_loss = if expected == 0 {
-                0.0
-            } else {
-                lost as f32 / expected as f32
-            };
-            self.window_received = 0;
-            self.window_highest = counter;
-            self.window_base = counter.saturating_add(1);
-        }
-    }
-
-    fn last_loss(&self) -> f32 {
-        self.last_loss
     }
 
     fn due(&self, now: Instant) -> bool {
@@ -367,15 +350,136 @@ impl AckTracker {
         self.bitmap = 0;
         self.received_since = 0;
         self.last_sent = None;
-        self.window_received = 0;
-        self.window_highest = 0;
-        self.window_base = 0;
-        self.last_loss = 0.0;
     }
 
     /// Returns the interval advertised in CAPS frames.
     fn advertised_interval(&self) -> u16 {
         self.base_interval
+    }
+}
+
+/// Kind of payload carried by one encrypted datagram.
+///
+/// BBR tracks congestion-controlled bytes only: ordinary data and FEC shards
+/// carry them, while CAPS/ACK frames and keepalives only consume a wire
+/// counter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FrameKind {
+    /// An encapsulated IP packet.
+    Data,
+    /// A CAPS, ACK or keepalive frame.
+    Control,
+    /// One Reed-Solomon shard of a FEC block.
+    FecShard,
+}
+
+impl FrameKind {
+    /// Classifies a plaintext frame by its extension marker.
+    pub(crate) fn classify(plaintext: &[u8]) -> Self {
+        match umbrawg_proto::control::extension_kind(plaintext) {
+            Some(ControlKind::FecShard) => Self::FecShard,
+            Some(_) => Self::Control,
+            None if plaintext.first().is_some_and(|byte| *byte != 0) => Self::Data,
+            None => Self::Control,
+        }
+    }
+
+    const fn carries_data(self) -> bool {
+        matches!(self, Self::Data | Self::FecShard)
+    }
+}
+
+/// Loss estimator for adaptive FEC.
+///
+/// Mirrors the kernel implementation: counters are grouped into windows of at
+/// least [`ADAPTIVE_WINDOW_MIN`] received sequence numbers, the per-window
+/// loss ratio is smoothed with an EWMA (`(old * 3 + new) / 4`) in 1/65536
+/// units, and implausible gaps restart the window instead of poisoning the
+/// estimate.
+#[derive(Clone, Copy, Debug, Default)]
+struct LossWindow {
+    valid: bool,
+    largest: u64,
+    base: u64,
+    received: u64,
+    observed: u64,
+    loss_q16: u32,
+}
+
+impl LossWindow {
+    fn reset(&mut self, counter: u64) {
+        *self = Self {
+            valid: true,
+            largest: counter,
+            base: counter,
+            received: 1,
+            observed: 0,
+            loss_q16: 0,
+        };
+    }
+
+    /// Feeds one received counter; returns `true` when a window was closed.
+    fn observe(&mut self, counter: u64) -> bool {
+        if !self.valid {
+            self.reset(counter);
+            return false;
+        }
+        if counter < self.base {
+            // Small backward jumps are reordering; a huge one is a new
+            // counter space, for example after a peer restart.
+            if self.base.saturating_sub(counter) > ADAPTIVE_GAP_MAX {
+                self.reset(counter);
+            }
+            return false;
+        }
+        if counter > self.largest {
+            self.largest = counter;
+        }
+        self.received = self.received.saturating_add(1);
+        let expected = self.largest.saturating_sub(self.base).saturating_add(1);
+        if expected < ADAPTIVE_WINDOW_MIN {
+            return false;
+        }
+        if expected > ADAPTIVE_GAP_MAX {
+            self.base = self.largest.saturating_add(1);
+            self.received = 0;
+            return false;
+        }
+        let lost = expected.saturating_sub(self.received);
+        let sample = u32::try_from(lost.saturating_mul(65_536) / expected).unwrap_or(u32::MAX);
+        self.loss_q16 = (self.loss_q16.saturating_mul(3).saturating_add(sample)) / 4;
+        self.observed = self.observed.saturating_add(expected);
+        self.base = self.largest.saturating_add(1);
+        self.received = 0;
+        true
+    }
+}
+
+/// Reports bitmap holes that survived at least one ACK as losses.
+///
+/// A counter missing from the current bitmap but below the previous ACK's
+/// largest counter was already missing one feedback frame earlier, so it is
+/// no longer plausible reordering. Counters that left the 64-entry window are
+/// released by [`Bbr::on_ack`] (and by the periodic sweep in
+/// [`Bbr::on_timer`]) without a separate loss report: the controller cannot
+/// tell a datagram lost long ago from one acknowledged long ago.
+fn report_bitmap_losses(bbr: &mut Bbr, ack: &Ack, previous: u64, now: Instant) {
+    let mut reported = 0usize;
+    for bit in 1..64u32 {
+        if ack.received & (1u64 << bit) != 0 {
+            continue;
+        }
+        let Some(counter) = ack.largest_counter.checked_sub(u64::from(bit)) else {
+            continue;
+        };
+        if counter >= previous {
+            continue;
+        }
+        bbr.on_loss(counter, now);
+        reported += 1;
+        if reported >= MAX_BITMAP_LOSSES {
+            break;
+        }
     }
 }
 
@@ -423,13 +527,14 @@ pub(crate) struct PeerExtension {
     fec_tx: Option<FecEncoder>,
     fec_rx: Option<FecDecoder>,
     fec_active: bool,
-    adaptive_observed: u64,
+    loss: LossWindow,
     adaptive_clean_since: Option<Instant>,
     fec_deadline: Option<Instant>,
     jitter: Jitter,
     pending: VecDeque<ControlFrame>,
     bbr_queue: VecDeque<Vec<u8>>,
     bbr_queued_bytes: usize,
+    last_ack_largest: Option<u64>,
 }
 
 impl Default for PeerExtension {
@@ -450,44 +555,125 @@ impl PeerExtension {
             caps_next: None,
             caps_last_sent: None,
             caps_seen: None,
-            ack: AckTracker::new(2),
+            ack: AckTracker::new(ACK_INTERVAL_MIN),
             bbr: None,
             fec_tx: None,
             fec_rx: None,
             fec_active: false,
-            adaptive_observed: 0,
+            loss: LossWindow::default(),
             adaptive_clean_since: None,
             fec_deadline: None,
             jitter: Jitter::seeded(),
             pending: VecDeque::new(),
             bbr_queue: VecDeque::new(),
             bbr_queued_bytes: 0,
+            last_ack_largest: None,
         };
-        extension.configure(config);
+        extension.apply(config);
         extension
     }
 
+    /// Applies a device-wide configuration change.
+    ///
+    /// A configuration that did not change is a no-op: the peer keeps its
+    /// negotiated capabilities and all live state (encoder queue, decoder,
+    /// ACK and BBR trackers). A real change first flushes queued packets so
+    /// nothing is lost, then replaces the affected state.
     pub(crate) fn configure(&mut self, config: ExtConfig) {
+        if self.config == config {
+            return;
+        }
+        self.apply(config);
+    }
+
+    fn apply(&mut self, config: ExtConfig) {
+        let previous = self.config;
+        // Preserve packets accumulated by the outgoing encoder: the partial
+        // block is turned into explicit shard frames and stays queued.
+        self.flush_encoder_frames();
+
         self.config = config;
         self.local_caps = config.local_caps();
         // ACKs are sent every 8..=16 datagrams or after a 2..=5 ms timeout,
         // whichever comes first. The cadence is re-drawn after every ACK so
         // that the feedback stream does not look like a perfect clock.
         self.ack = AckTracker::new(config.ack_interval);
-        self.bbr = config.bbr.enabled().then(|| Bbr::new(config.bbr_config()));
-        self.fec_tx = config
-            .fec
-            .config()
-            .map(|fec| FecEncoder::new(fec, usize::from(config.max_shard_len)));
-        self.fec_rx = config.fec.config().map(FecDecoder::new);
-        self.reset_caps();
-        self.pending.clear();
-        self.bbr_queue.clear();
-        self.bbr_queued_bytes = 0;
+
+        let fec_changed = config.fec != previous.fec
+            || (config.fec.config().is_some() && config.max_shard_len != previous.max_shard_len);
+        if fec_changed {
+            let fec = config.fec.config();
+            self.fec_tx = fec.map(|fec| FecEncoder::new(fec, usize::from(config.max_shard_len)));
+            self.fec_rx = fec.map(FecDecoder::new);
+            self.fec_active = !matches!(config.fec, FecMode::Off | FecMode::Adaptive);
+            self.loss = LossWindow::default();
+            self.adaptive_clean_since = None;
+            self.fec_deadline = None;
+        }
+
+        let bbr_changed = config.bbr != previous.bbr
+            || (config.bbr.enabled() && config.max_shard_len != previous.max_shard_len);
+        if config.bbr != BbrMode::On {
+            if config.bbr.enabled() {
+                self.bbr = Some(Bbr::new(config.bbr_config()));
+            } else {
+                self.bbr = None;
+            }
+            // Only the `On` pacer drains the queue; anything else would strand
+            // the packets there forever.
+            self.bbr_queue.clear();
+            self.bbr_queued_bytes = 0;
+        } else if bbr_changed || self.bbr.is_none() {
+            self.bbr = Some(Bbr::new(config.bbr_config()));
+        }
+
+        // Only a change in what we advertise (or in our FEC block shape)
+        // invalidates what the peer told us. Anything else must keep the
+        // negotiated capabilities intact.
+        if self.local_caps != previous.local_caps()
+            || config.fec_profile() != previous.fec_profile()
+        {
+            self.reset_caps();
+        }
+    }
+
+    /// Emits the packets held by the outgoing encoder as queued shard frames.
+    ///
+    /// The frames are sent by the next control flush with the current
+    /// keypair, so a reconfiguration or a keypair switch does not silently
+    /// drop a partially filled block.
+    fn flush_encoder_frames(&mut self) {
+        let block = self
+            .fec_tx
+            .as_mut()
+            .and_then(|encoder| encoder.flush_with_rng(&mut self.jitter));
+        if let Some(block) = block {
+            self.queue_fec_frames(&block);
+        }
         self.fec_deadline = None;
-        self.adaptive_clean_since = None;
-        self.adaptive_observed = 0;
-        self.fec_active = !matches!(config.fec, FecMode::Off | FecMode::Adaptive);
+    }
+
+    fn queue_fec_frames(&mut self, block: &EncodedBlock) {
+        for (index, shard) in block.shards.iter().enumerate() {
+            let Ok(index) = u8::try_from(index) else {
+                break;
+            };
+            let header = FecShardHeader {
+                block_id: block.block_id,
+                index,
+                k: block.k,
+                m: block.m,
+                parity: index >= block.k,
+                shard_len: block.shard_len,
+            };
+            let mut frame = vec![0u8; 32 + shard.len()];
+            let Ok(header_len) = header.encode(&mut frame) else {
+                break;
+            };
+            frame.truncate(header_len);
+            frame.extend_from_slice(shard);
+            self.push_control(ControlFrame::new(ControlKind::FecShard, frame));
+        }
     }
 
     fn reset_caps(&mut self) {
@@ -518,31 +704,37 @@ impl PeerExtension {
         self.fec_active && self.peer_caps.contains(CapsFlags::FEC)
     }
 
-    fn update_adaptive(&mut self, now: Instant) {
+    /// Feeds one received counter to the adaptive loss estimator.
+    ///
+    /// The estimator follows the kernel: a window closes after at least 256
+    /// counters, the loss ratio is an EWMA, parity is switched on above 1 %
+    /// once 1024 counters were observed and off below 0.2 % after five clean
+    /// seconds.
+    fn observe_adaptive(&mut self, counter: u64, now: Instant) {
         if self.config.fec != FecMode::Adaptive {
             return;
         }
-        self.adaptive_observed = self.adaptive_observed.saturating_add(1);
-        if self.adaptive_observed < 1024 {
+        if !self.loss.observe(counter) {
             return;
         }
-        let loss = self.ack.last_loss();
-        if loss > 0.01 {
-            self.fec_active = true;
-            self.adaptive_clean_since = None;
-        } else if self.fec_active {
-            if loss < 0.002 {
-                let since = *self.adaptive_clean_since.get_or_insert(now);
-                if now.saturating_duration_since(since) >= Duration::from_secs(5) {
-                    self.fec_active = false;
-                    self.fec_tx =
-                        self.config.fec.config().map(|fec| {
-                            FecEncoder::new(fec, usize::from(self.config.max_shard_len))
-                        });
-                }
-            } else {
+        if !self.fec_active {
+            if self.loss.observed >= ADAPTIVE_OBSERVE_MIN
+                && self.loss.loss_q16 > ADAPTIVE_ON_LOSS_Q16
+            {
+                self.fec_active = true;
                 self.adaptive_clean_since = None;
             }
+        } else if self.loss.loss_q16 < ADAPTIVE_OFF_LOSS_Q16 {
+            let since = *self.adaptive_clean_since.get_or_insert(now);
+            if now.saturating_duration_since(since) >= ADAPTIVE_CLEAN_TIME {
+                self.fec_active = false;
+                self.adaptive_clean_since = None;
+                // Do not strand a partially filled block: emit it before
+                // parity generation stops.
+                self.flush_encoder_frames();
+            }
+        } else {
+            self.adaptive_clean_since = None;
         }
     }
 
@@ -613,40 +805,76 @@ impl PeerExtension {
 
     /// Accounts for one encrypted datagram leaving the device.
     ///
-    /// Every frame consumes a wire counter, but only non-empty data payloads
-    /// carry congestion-controlled bytes. Both are reported to BBR so that a
-    /// valid ACK naming a control or FEC frame is not rejected as fabricated.
-    pub(crate) fn on_packet_sent(&mut self, counter: u64, len: usize, is_data: bool, now: Instant) {
+    /// Every frame consumes a wire counter so that a valid ACK naming a
+    /// control or FEC frame is not rejected as fabricated. Only frames that
+    /// carry congestion-controlled bytes (data and FEC shards) enter the
+    /// in-flight accounting and charge the pacer.
+    pub(crate) fn on_packet_sent(
+        &mut self,
+        counter: u64,
+        len: usize,
+        kind: FrameKind,
+        now: Instant,
+    ) {
         if let Some(bbr) = self.bbr.as_mut() {
             bbr.note_sent_counter(counter);
         }
-        if is_data {
+        if kind.carries_data() {
             self.on_send(counter, len, now);
         }
     }
 
     pub(crate) fn on_ack(&mut self, ack: &Ack, now: Instant) {
-        if let Some(bbr) = self.bbr.as_mut() {
-            bbr.on_ack(
-                &BbrAck::new(
-                    ack.largest_counter,
-                    ack.received,
-                    Duration::from_micros(u64::from(ack.ack_delay_us)),
-                    ack.ecn_ce,
-                ),
-                now,
-            );
+        let Some(bbr) = self.bbr.as_mut() else {
+            return;
+        };
+        bbr.on_ack(
+            &BbrAck::new(
+                ack.largest_counter,
+                ack.received,
+                Duration::from_micros(u64::from(ack.ack_delay_us)),
+                ack.ecn_ce,
+            ),
+            now,
+        );
+        // A hole that was already missing one ACK ago is a real loss, not
+        // reordering: report it so STARTUP can exit and `inflight_hi` can be
+        // cut. The very first ACK only establishes the reference point.
+        let previous = self.last_ack_largest;
+        self.last_ack_largest = Some(previous.map_or(ack.largest_counter, |largest| {
+            largest.max(ack.largest_counter)
+        }));
+        if let Some(previous) = previous {
+            if ack.largest_counter >= previous {
+                report_bitmap_losses(bbr, ack, previous, now);
+            }
         }
+    }
+
+    /// Drives the time-based parts of BBR: the `PROBE_BW` phase watchdog,
+    /// `PROBE_RTT` entry/exit and the stale-record sweep. Without an ACK the
+    /// controller would never leave STARTUP or refresh `RTprop`.
+    pub(crate) fn on_timer(&mut self, now: Instant) {
+        if self.config.bbr != BbrMode::On {
+            return;
+        }
+        if let Some(bbr) = self.bbr.as_mut() {
+            bbr.on_timer(now);
+        }
+    }
+
+    pub(crate) fn bbr_stats(&self) -> Option<BbrStats> {
+        self.bbr.as_ref().map(Bbr::stats)
     }
 
     pub(crate) fn observe_received(&mut self, counter: u64, now: Instant) {
         self.ack.observe(counter, now, true);
-        self.update_adaptive(now);
+        self.observe_adaptive(counter, now);
     }
 
     pub(crate) fn observe_control(&mut self, counter: u64, now: Instant) {
         self.ack.observe(counter, now, false);
-        self.update_adaptive(now);
+        self.observe_adaptive(counter, now);
     }
 
     pub(crate) fn bbr_queue_active(&self) -> bool {
@@ -697,11 +925,26 @@ impl PeerExtension {
             .map_or(Duration::ZERO, |bbr| bbr.next_send_delay(bytes, now))
     }
 
+    /// Resets all feedback state after the peer installed a new keypair.
+    ///
+    /// Besides ACK/BBR/CAPS, the FEC state is rebuilt: the decoder's block
+    /// clock is discarded (a restarted peer starts again at `block_id = 0`,
+    /// which the old clock would reject forever) and the encoder queue is
+    /// flushed into explicit shard frames instead of being dropped.
     pub(crate) fn reset_feedback(&mut self) {
+        self.flush_encoder_frames();
         self.ack.reset();
+        self.last_ack_largest = None;
         if self.config.bbr.enabled() {
             self.bbr = Some(Bbr::new(self.config.bbr_config()));
+        } else {
+            self.bbr = None;
         }
+        if let Some(fec) = self.config.fec.config() {
+            self.fec_rx = Some(FecDecoder::new(fec));
+        }
+        self.loss = LossWindow::default();
+        self.adaptive_clean_since = None;
         // A new handshake means the peer's view of our capabilities is
         // unknown again: restart the bounded CAPS exchange.
         self.reset_caps();
@@ -1134,8 +1377,8 @@ mod tests {
         let mut ext = PeerExtension::new(BBR_CONFIG);
         ext.handle_caps(caps(CapsFlags::BBR | CapsFlags::ACK, 0, 0), base);
 
-        ext.on_packet_sent(0, 1400, true, base);
-        ext.on_packet_sent(7, 48, false, base);
+        ext.on_packet_sent(0, 1400, FrameKind::Data, base);
+        ext.on_packet_sent(7, 48, FrameKind::Control, base);
         let ack = Ack {
             largest_counter: 7,
             ack_delay_us: 0,
@@ -1193,5 +1436,316 @@ mod tests {
         assert!(ext.caps_last_sent.is_none());
         assert!(ext.caps_next.is_none());
         assert_eq!(ext.peer_caps.bits(), 0);
+    }
+
+    fn fec_block_fixture() -> (u16, Vec<Vec<u8>>) {
+        let mut encoder = FecEncoder::new(FecConfig::new(2, 1).unwrap(), 1900);
+        let mut block = None;
+        for index in 0..2u8 {
+            block = encoder.push(&[index; 8]).unwrap().or(block);
+        }
+        let block = block.expect("block");
+        (block.shard_len, block.shards)
+    }
+
+    fn push_block(
+        ext: &mut PeerExtension,
+        block_id: u32,
+        shard_len: u16,
+        shards: &[Vec<u8>],
+        now: Instant,
+    ) -> usize {
+        let mut packets = 0;
+        for (index, payload) in shards.iter().enumerate() {
+            let index = u8::try_from(index).unwrap();
+            packets += ext
+                .fec_decode(
+                    FecShard {
+                        block_id,
+                        index,
+                        k: 2,
+                        m: 1,
+                        shard_len,
+                        payload,
+                    },
+                    now,
+                )
+                .len();
+        }
+        packets
+    }
+
+    #[test]
+    fn loss_window_uses_the_kernel_ewma() {
+        let mut window = LossWindow::default();
+        window.observe(0);
+        for counter in 1..=255u64 {
+            window.observe(counter);
+        }
+        assert_eq!(window.loss_q16, 0);
+        assert_eq!(window.observed, 256);
+
+        // One missing counter in the next window: 1/256 == 256 in q16 units,
+        // smoothed as (old * 3 + new) / 4.
+        for counter in 257..=511u64 {
+            window.observe(counter);
+        }
+        assert_eq!(window.loss_q16, 64);
+        assert_eq!(window.observed, 512);
+
+        for counter in 513..=767u64 {
+            window.observe(counter);
+        }
+        assert_eq!(window.loss_q16, 112);
+        assert_eq!(window.observed, 768);
+    }
+
+    #[test]
+    fn loss_window_restarts_on_implausible_gaps() {
+        let mut window = LossWindow::default();
+        window.observe(10);
+        let forward = 10 + ADAPTIVE_GAP_MAX + 1;
+        assert!(!window.observe(forward));
+        assert_eq!(window.observed, 0);
+        assert_eq!(window.base, forward + 1);
+
+        let mut window = LossWindow::default();
+        window.observe(2 * ADAPTIVE_GAP_MAX);
+        window.observe(2 * ADAPTIVE_GAP_MAX);
+        assert!(!window.observe(1));
+        assert_eq!(window.observed, 0);
+        assert!(window.valid);
+        assert_eq!(window.largest, 1);
+    }
+
+    #[test]
+    fn adaptive_parity_follows_loss_with_hysteresis() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Adaptive,
+            ack_interval: 2,
+            max_shard_len: 1900,
+        });
+
+        let mut counter = 0u64;
+        for _ in 0..4 {
+            let start = counter;
+            while counter < start + 256 {
+                if !(10..15).contains(&(counter - start)) {
+                    ext.observe_received(counter, base);
+                }
+                counter += 1;
+            }
+        }
+        assert!(ext.fec_active, "1.95% loss must enable parity");
+
+        // A couple of clean windows are not enough: the switch-off has to
+        // survive five seconds below 0.2%.
+        let mut now = base;
+        for _ in 0..2 {
+            let start = counter;
+            now += Duration::from_secs(1);
+            while counter < start + 256 {
+                ext.observe_received(counter, now);
+                counter += 1;
+            }
+        }
+        assert!(ext.fec_active);
+
+        for _ in 0..16 {
+            let start = counter;
+            now += Duration::from_secs(1);
+            while counter < start + 256 {
+                ext.observe_received(counter, now);
+                counter += 1;
+            }
+        }
+        assert!(!ext.fec_active, "parity must switch off after clean time");
+    }
+
+    #[test]
+    fn configure_is_idempotent() {
+        let base = Instant::now();
+        let config = ExtConfig {
+            bbr: BbrMode::Monitor,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        };
+        let mut ext = PeerExtension::new(config);
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+        assert!(ext.fec_tx_active());
+        assert!(ext.fec_push(&[1u8; 20], base).unwrap().is_none());
+        assert_eq!(ext.fec_tx.as_ref().unwrap().pending(), 1);
+
+        ext.configure(config);
+
+        assert!(ext.fec_tx_active(), "unchanged config must keep peer caps");
+        assert_eq!(
+            ext.fec_tx.as_ref().unwrap().pending(),
+            1,
+            "unchanged config must not recreate the encoder"
+        );
+        assert!(ext.pending.is_empty());
+    }
+
+    #[test]
+    fn reconfigure_flushes_the_encoder_queue() {
+        let base = Instant::now();
+        let config = ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        };
+        let mut ext = PeerExtension::new(config);
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+        assert!(ext.fec_push(&[7u8; 40], base).unwrap().is_none());
+
+        ext.configure(ExtConfig {
+            fec: FecMode::Fixed { k: 4, m: 1 },
+            ..config
+        });
+
+        assert_eq!(ext.fec_tx.as_ref().unwrap().pending(), 0);
+        let frames = ext.pending_control(base);
+        let shards = frames
+            .iter()
+            .filter(|frame| frame.kind() == ControlKind::FecShard)
+            .count();
+        assert_eq!(shards, 1, "the partial block must be queued as a shard");
+    }
+
+    #[test]
+    fn reset_feedback_restarts_the_fec_decoder() {
+        let base = Instant::now();
+        let config = ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        };
+        let mut ext = PeerExtension::new(config);
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+        let (shard_len, shards) = fec_block_fixture();
+        for block_id in 0..4 {
+            assert_eq!(push_block(&mut ext, block_id, shard_len, &shards, base), 2);
+        }
+
+        assert_eq!(
+            push_block(&mut ext, 0, shard_len, &shards, base),
+            0,
+            "a restarted peer is rejected by the stale block clock"
+        );
+
+        ext.reset_feedback();
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+
+        assert_eq!(
+            push_block(&mut ext, 0, shard_len, &shards, base),
+            2,
+            "after the reset block_id 0 must be accepted again"
+        );
+    }
+
+    #[test]
+    fn fec_shards_are_accounted_for_by_bbr() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        ext.handle_caps(caps(CapsFlags::BBR | CapsFlags::ACK, 0, 0), base);
+
+        ext.on_packet_sent(0, 1200, FrameKind::FecShard, base);
+        ext.on_packet_sent(1, 40, FrameKind::Control, base);
+        let bbr = ext.bbr.as_ref().expect("bbr is enabled");
+        assert_eq!(bbr.inflight(), 1200, "shards must enter the BBR ring");
+
+        ext.on_ack(
+            &Ack {
+                largest_counter: 1,
+                ack_delay_us: 0,
+                ecn_ce: false,
+                received: 0b11,
+            },
+            base + Duration::from_millis(10),
+        );
+        let stats = ext.bbr.as_ref().expect("bbr is enabled").stats();
+        assert_eq!(stats.delivered, 1200);
+        assert_eq!(
+            ext.bbr.as_ref().unwrap().inflight(),
+            0,
+            "acknowledged shards leave the ring while control frames are ignored"
+        );
+    }
+
+    #[test]
+    fn ack_holes_that_survive_one_ack_are_reported_as_losses() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        ext.handle_caps(caps(CapsFlags::BBR | CapsFlags::ACK, 0, 0), base);
+        for counter in 0..5u64 {
+            ext.on_packet_sent(counter, 1000, FrameKind::Data, base);
+        }
+
+        // Counter 3 is missing from the bitmap, but the first ACK only
+        // establishes the reference point.
+        let hole = Ack {
+            largest_counter: 4,
+            ack_delay_us: 0,
+            ecn_ce: false,
+            received: 0b1_1101,
+        };
+        ext.on_ack(&hole, base + Duration::from_millis(5));
+        assert_eq!(ext.bbr.as_ref().unwrap().stats().lost_packets, 0);
+
+        ext.on_ack(&hole, base + Duration::from_millis(10));
+        let stats = ext.bbr.as_ref().unwrap().stats();
+        assert_eq!(stats.lost_packets, 1);
+        assert_eq!(stats.lost_bytes, 1000);
+    }
+
+    #[test]
+    fn bbr_timer_sweeps_unacknowledged_datagrams() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(BBR_CONFIG);
+        ext.handle_caps(caps(CapsFlags::BBR | CapsFlags::ACK, 0, 0), base);
+        ext.on_packet_sent(0, 1400, FrameKind::Data, base);
+        assert_eq!(ext.bbr.as_ref().unwrap().inflight(), 1400);
+
+        ext.on_timer(base + Duration::from_secs(3));
+
+        let stats = ext.bbr.as_ref().unwrap().stats();
+        assert_eq!(stats.inflight, 0);
+        assert!(stats.orphaned_packets >= 1);
+    }
+
+    #[test]
+    fn frame_kind_classifies_extension_frames() {
+        assert_eq!(FrameKind::classify(&[]), FrameKind::Control);
+        assert_eq!(FrameKind::classify(&[0u8; 40]), FrameKind::Control);
+        assert_eq!(FrameKind::classify(&[0x45; 40]), FrameKind::Data);
+
+        let caps = Caps {
+            flags: CapsFlags::ACK,
+            ack_interval_packets: 2,
+            fec_k: 0,
+            fec_m: 0,
+        };
+        let mut frame = [0u8; 32];
+        let len = caps.encode(&mut frame).unwrap();
+        assert_eq!(FrameKind::classify(&frame[..len]), FrameKind::Control);
+
+        let header = FecShardHeader {
+            block_id: 3,
+            index: 0,
+            k: 2,
+            m: 1,
+            parity: false,
+            shard_len: 4,
+        };
+        let mut frame = [0u8; 64];
+        let len = header.encode(&mut frame).unwrap();
+        let total = len + usize::from(header.shard_len);
+        assert_eq!(FrameKind::classify(&frame[..total]), FrameKind::FecShard);
     }
 }

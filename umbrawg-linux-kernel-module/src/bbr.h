@@ -13,13 +13,21 @@
 
 /*
  * Number of tracked datagrams. Each record is 24 bytes, so the ring costs
- * 48 KiB per peer. At 1400-byte datagrams this covers 2.8 MiB, i.e. one
- * bandwidth-delay product of a 1 Gbit/s path with a 22 ms RTT. The Rust
- * crate used 8192 records of 32 bytes (256 KiB per peer), which is too
- * much to keep in struct uwg_peer; 2048 records still cover every path
- * the tunnel targets and evictions are accounted as orphaned packets.
+ * 96 KiB per peer. At 1400-byte datagrams this covers 5.7 MiB, i.e. one
+ * bandwidth-delay product of a 1 Gbit/s path with a 46 ms RTT or, with the
+ * 1.5x FEC overhead, roughly 3.8 MiB of inner traffic. The Rust crate used
+ * 8192 records of 32 bytes (256 KiB per peer); 4096 records are allocated
+ * on the heap with the rest of struct uwg_bbr and still leave the delivered
+ * window below 2^29 (4096 * 65535 bytes).
  */
-#define UWG_BBR_RING_CAPACITY 2048
+#define UWG_BBR_RING_CAPACITY 4096
+
+/*
+ * Upper bound on the extra delay the congestion window may add on top of
+ * the token-bucket wait. Matches UWG_TX_PACE_MAX_NS in send.c: delaying a
+ * datagram for longer than this is worse than briefly exceeding cwnd.
+ */
+#define UWG_BBR_DRAIN_DELAY_MAX_NS 2000000ULL
 
 /* Defaults for uwg_bbr_init() when the caller passes zeroes. */
 #define UWG_BBR_DEFAULT_MSS 1400
@@ -35,9 +43,12 @@ enum uwg_bbr_mode {
 enum uwg_bbr_slot_state {
 	UWG_BBR_SLOT_EMPTY = 0,
 	UWG_BBR_SLOT_INFLIGHT,
-	UWG_BBR_SLOT_RELEASED,
 	UWG_BBR_SLOT_ACKED,
 	UWG_BBR_SLOT_LOST,
+	/* Counted as a loss of the current round, bytes still in flight. */
+	UWG_BBR_SLOT_LOST_NOTED,
+	/* Dropped locally after on_send(): bytes were returned to the caller. */
+	UWG_BBR_SLOT_DROPPED,
 };
 
 /*
@@ -47,7 +58,7 @@ enum uwg_bbr_slot_state {
  * delivered counter at the moment of the send; the top 3 bits hold the
  * slot state. All delivered-length deltas are computed modulo 2^29, which
  * is safe because a record is evicted after at most UWG_BBR_RING_CAPACITY
- * datagrams: 2048 * 65535 bytes is far below 2^29. This keeps the record
+ * datagrams: 4096 * 65535 bytes is far below 2^29. This keeps the record
  * at exactly 24 bytes with no padding.
  */
 struct uwg_bbr_sent {
@@ -95,6 +106,11 @@ struct uwg_bbr {
 	u64 delivered;
 	u64 largest_acked;
 	u64 max_sent;
+	/* Smallest counter that may still be in flight, for range-limited
+	 * release instead of a full ring scan on every ACK.
+	 */
+	u64 oldest_inflight;
+	bool oldest_valid;
 
 	struct uwg_bbr_pacer pacer;
 	struct uwg_bbr_sent ring[UWG_BBR_RING_CAPACITY];
@@ -142,6 +158,7 @@ u64 uwg_bbr_pacing_rate(const struct uwg_bbr *b);
 u64 uwg_bbr_cwnd(const struct uwg_bbr *b);
 u64 uwg_bbr_inflight(const struct uwg_bbr *b);
 void uwg_bbr_on_loss(struct uwg_bbr *b, u64 counter, u64 now_ns);
+void uwg_bbr_on_drop(struct uwg_bbr *b, u64 counter);
 int uwg_bbr_selftest(void);
 
 #endif /* _UWG_BBR_H */

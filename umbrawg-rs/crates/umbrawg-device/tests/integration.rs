@@ -6,10 +6,11 @@ use rand_core::RngCore;
 
 use umbrawg_crypto::{Key, PrivateKey, PublicKey};
 use umbrawg_device::{
-    AllowedIp, DatagramSink, Device, DeviceConfig, DeviceControl, DeviceError, IncomingMeta,
-    IncomingOutcome, IoContext, PacketIo, Peer, PeerConfig, PeerState, PreparedIncoming,
-    SendOutcome, Timings, DEFAULT_EXTRA_PORTS,
+    AllowedIp, BbrMode, DatagramSink, Device, DeviceConfig, DeviceControl, DeviceError, ExtConfig,
+    FecMode, IncomingMeta, IncomingOutcome, IoContext, PacketIo, Peer, PeerConfig, PeerState,
+    PreparedIncoming, SendOutcome, TimerEvent, TimerKind, Timings, DEFAULT_EXTRA_PORTS,
 };
+use umbrawg_proto::control::{Caps, CapsFlags};
 use umbrawg_proto::special::SpecialPacket;
 use umbrawg_proto::ObfParams;
 use umbrawg_uapi::{
@@ -190,6 +191,90 @@ fn flush(
     sent.into_iter()
         .map(|packet| deliver_one(packet, source, dst, dst_io, rng, now, scratch))
         .collect()
+}
+
+fn send_data(pair: &mut Pair, from_a: bool, payload: &[u8], now: Instant) {
+    let mut output = vec![0u8; 65_535];
+    if from_a {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_data(&pair.peer_b, payload, &mut output, &mut ctx)
+            .unwrap();
+    } else {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_b);
+        pair.b
+            .send_data(&pair.peer_a, payload, &mut output, &mut ctx)
+            .unwrap();
+    }
+}
+
+fn deliver_all(pair: &mut Pair, from_a: bool, now: Instant) {
+    if from_a {
+        flush(
+            pair.addr_a,
+            &pair.b,
+            &mut pair.io_a,
+            &mut pair.io_b,
+            &mut pair.rng,
+            now,
+            &mut pair.scratch,
+        );
+    } else {
+        flush(
+            pair.addr_b,
+            &pair.a,
+            &mut pair.io_b,
+            &mut pair.io_a,
+            &mut pair.rng,
+            now,
+            &mut pair.scratch,
+        );
+    }
+}
+
+fn send_caps_frame(
+    pair: &mut Pair,
+    from_a: bool,
+    flags: CapsFlags,
+    fec_k: u8,
+    fec_m: u8,
+    now: Instant,
+) {
+    let caps = Caps {
+        flags,
+        ack_interval_packets: 2,
+        fec_k,
+        fec_m,
+    };
+    let mut frame = [0u8; 32];
+    let length = caps.encode(&mut frame).unwrap();
+    let mut dst = [0u8; 1024];
+    if from_a {
+        let length = pair
+            .a
+            .encrypt_control_packet(&pair.peer_b, &frame[..length], &mut dst, &mut pair.rng, now)
+            .unwrap();
+        pair.io_a
+            .send_datagram(pair.addr_a, Some(&pair.peer_b), &dst[..length], None);
+    } else {
+        let length = pair
+            .b
+            .encrypt_control_packet(&pair.peer_a, &frame[..length], &mut dst, &mut pair.rng, now)
+            .unwrap();
+        pair.io_b
+            .send_datagram(pair.addr_b, Some(&pair.peer_a), &dst[..length], None);
+    }
+}
+
+fn has_new_handshake(device: &Device, peer: &Peer, at: Instant) -> bool {
+    let mut events = [TimerEvent {
+        peer: peer.id(),
+        kind: TimerKind::NewHandshake,
+    }; 8];
+    let count = device.poll_timers(at, &mut events);
+    events[..count]
+        .iter()
+        .any(|event| event.peer == peer.id() && event.kind == TimerKind::NewHandshake)
 }
 
 fn complete_handshake(pair: &mut Pair, now: Instant) {
@@ -1360,4 +1445,108 @@ fn full_mtu_random_trailers_keep_a_small_reserve() {
         lengths.len() > 1,
         "full-MTU packets must not share one length"
     );
+}
+
+#[test]
+fn extension_frames_disarm_the_new_handshake_timer() {
+    let mut pair = pair(ObfParams::default());
+    let ext = ExtConfig {
+        bbr: BbrMode::Monitor,
+        ..ExtConfig::default()
+    };
+    pair.a.set_ext_config(ext);
+    pair.b.set_ext_config(ext);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    let at = now + Duration::from_secs(30);
+    let data = ipv4_packet([10, 0, 0, 2], [10, 0, 0, 1], b"ping");
+
+    send_data(&mut pair, false, &data, now);
+    deliver_all(&mut pair, false, now);
+    assert!(
+        has_new_handshake(&pair.b, &pair.peer_a, at),
+        "sending data must arm NewHandshake"
+    );
+
+    send_data(&mut pair, false, &data, now);
+    deliver_all(&mut pair, false, now);
+    assert!(
+        has_new_handshake(&pair.b, &pair.peer_a, at),
+        "sending data must re-arm NewHandshake after a tick"
+    );
+
+    send_data(&mut pair, false, &data, now);
+    deliver_all(&mut pair, false, now);
+    send_caps_frame(&mut pair, true, CapsFlags::BBR | CapsFlags::ACK, 0, 0, now);
+    deliver_all(&mut pair, true, now);
+    assert!(
+        !has_new_handshake(&pair.b, &pair.peer_a, at),
+        "an authenticated extension frame must disarm NewHandshake"
+    );
+}
+
+#[test]
+fn fec_shards_are_visible_to_bbr() {
+    let mut pair = pair(ObfParams::default());
+    let ext = ExtConfig {
+        bbr: BbrMode::On,
+        fec: FecMode::Fixed { k: 2, m: 1 },
+        ack_interval: 2,
+        max_shard_len: 1900,
+    };
+    pair.a.set_ext_config(ext);
+    pair.b.set_ext_config(ext);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let flags = CapsFlags::BBR | CapsFlags::ACK | CapsFlags::FEC;
+    send_caps_frame(&mut pair, true, flags, 2, 1, now);
+    deliver_all(&mut pair, true, now);
+    send_caps_frame(&mut pair, false, flags, 2, 1, now);
+    deliver_all(&mut pair, false, now);
+    pair.io_a.take_sent();
+    pair.io_b.take_sent();
+
+    let first = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"first");
+    let second = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"second");
+    let mut output = vec![0u8; 65_535];
+    let layout = {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        let sent = pair
+            .a
+            .send_batch(&pair.peer_b, &[&first, &second], &mut output, &mut ctx)
+            .unwrap();
+        assert_eq!(sent.sent, 2);
+        sent.layout
+    };
+    let ranges: Vec<std::ops::Range<usize>> = layout
+        .groups()
+        .iter()
+        .flat_map(|group| group.ranges())
+        .collect();
+    assert_eq!(ranges.len(), 3, "k=2, m=1 must produce three shards");
+    for range in ranges {
+        pair.io_a
+            .send_datagram(pair.addr_a, Some(&pair.peer_b), &output[range], None);
+    }
+
+    let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
+    assert!(stats.inflight > 0, "FEC shards must enter the BBR ring");
+    assert_eq!(stats.delivered, 0);
+
+    deliver_all(&mut pair, true, now);
+    assert_eq!(pair.io_b.delivered.len(), 2);
+
+    {
+        let later = now + Duration::from_millis(5);
+        let mut ctx = IoContext::new(&mut pair.rng, later, &mut pair.scratch, &mut pair.io_b);
+        pair.b.flush_staged(&pair.peer_a, &mut ctx).unwrap();
+    }
+    assert!(!pair.io_b.sent.is_empty(), "the receiver must ACK shards");
+    let later = now + Duration::from_millis(5);
+    deliver_all(&mut pair, false, later);
+
+    let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
+    assert!(stats.delivered > 0, "ACKed shards must count as delivered");
+    assert_eq!(stats.inflight, 0);
 }
