@@ -1897,6 +1897,102 @@ fn config_change_flushes_full_size_shards_instead_of_stranding_them() {
 }
 
 #[test]
+fn turning_fec_off_revokes_the_stale_advertisement_with_zero_caps() {
+    let mut pair = pair(ObfParams::default());
+    let ext = fec_ext_config();
+    pair.a.set_ext_config(ext);
+    pair.b.set_ext_config(ext);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    exchange_caps(&mut pair, now);
+    pair.io_a.take_sent();
+    pair.io_b.take_sent();
+
+    // B switches every extension off while A still believes B runs FEC.
+    pair.b.set_ext_config(ExtConfig::default());
+    let revocation_at = now + Duration::from_millis(1);
+    {
+        let mut ctx = IoContext::new(
+            &mut pair.rng,
+            revocation_at,
+            &mut pair.scratch,
+            &mut pair.io_b,
+        );
+        pair.b.flush_control(&pair.peer_a, &mut ctx);
+    }
+    assert!(
+        !pair.io_b.sent.is_empty(),
+        "the all-off side must retract its old CAPS instead of staying silent"
+    );
+    deliver_all(&mut pair, false, revocation_at);
+
+    // A must have dropped the stale peer FEC capability: a batch now goes out
+    // as plain packets instead of FEC shards.
+    let first = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"first");
+    let second = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"second");
+    let mut output = vec![0u8; 65_535];
+    let layout = {
+        let mut ctx = IoContext::new(
+            &mut pair.rng,
+            revocation_at + Duration::from_millis(1),
+            &mut pair.scratch,
+            &mut pair.io_a,
+        );
+        pair.a
+            .send_batch(&pair.peer_b, &[&first, &second], &mut output, &mut ctx)
+            .unwrap()
+            .layout
+    };
+    let groups = layout
+        .groups()
+        .iter()
+        .flat_map(|group| group.ranges())
+        .count();
+    assert_eq!(
+        groups, 2,
+        "after the zero CAPS the sender must stop FEC encoding"
+    );
+}
+
+#[test]
+fn fec_block_ids_survive_a_one_sided_mtu_change() {
+    let mut pair = pair(ObfParams::default());
+    let ext = fec_ext_config();
+    pair.a.set_ext_config(ext);
+    pair.b.set_ext_config(ext);
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+    exchange_caps(&mut pair, now);
+
+    let first = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &vec![0x11; 900]);
+    let second = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &vec![0x22; 900]);
+    assert_eq!(send_fec_batch(&mut pair, true, &[&first, &second], now), 3);
+    deliver_all(&mut pair, true, now);
+    assert_eq!(pair.io_b.delivered.len(), 2);
+    pair.io_b.delivered.clear();
+
+    // One-sided MTU change: `k`/`m` stay the same, so TX remains enabled, but
+    // the encoder is recreated. Its block sequence must continue.
+    pair.a.set_ext_config(ExtConfig {
+        max_shard_len: 1200,
+        ..ext
+    });
+    let third = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &vec![0x33; 900]);
+    let fourth = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &vec![0x44; 900]);
+    let later = now + Duration::from_millis(1);
+    assert_eq!(
+        send_fec_batch(&mut pair, true, &[&third, &fourth], later),
+        3
+    );
+    deliver_all(&mut pair, true, later);
+    assert_eq!(
+        pair.io_b.delivered.len(),
+        2,
+        "block ids restarted at 0 would be rejected by the peer as ancient"
+    );
+}
+
+#[test]
 fn stale_ack_from_the_previous_keypair_is_ignored() {
     let mut pair = pair(ObfParams::default());
     let ext = ExtConfig {
@@ -1908,8 +2004,9 @@ fn stale_ack_from_the_previous_keypair_is_ignored() {
     let now = Instant::now();
     complete_handshake(&mut pair, now);
     let flags = CapsFlags::BBR | CapsFlags::ACK;
-    send_caps_frame(&mut pair, true, flags, 0, 0, now);
-    deliver_all(&mut pair, true, now);
+    // Only the responder advertises: A receives ACK feedback and can track
+    // inflight, while its own first data packet still uses counter 0. That is
+    // what makes the stale ACK below name a counter of the new epoch too.
     send_caps_frame(&mut pair, false, flags, 0, 0, now);
     deliver_all(&mut pair, false, now);
 
@@ -1943,10 +2040,18 @@ fn stale_ack_from_the_previous_keypair_is_ignored() {
         0
     );
 
-    // The first data packet of the new epoch reuses counter 2, exactly the
-    // `largest_counter` of the ACK captured above (keepalive 0, CAPS 1).
+    // The first data packet of the new epoch reuses counter 0, exactly the
+    // `largest_counter` of the ACK captured above.
     let three = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"three");
     send_data(&mut pair, true, &three, rekey_at + Duration::from_millis(1));
+    {
+        let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
+        assert!(
+            stats.inflight > 0,
+            "the new epoch must carry data for a stale ACK to bite"
+        );
+        assert_eq!(stats.delivered, 0);
+    }
 
     let deliver_at = rekey_at + Duration::from_millis(2);
     for packet in stale_ack {
@@ -1961,12 +2066,13 @@ fn stale_ack_from_the_previous_keypair_is_ignored() {
         );
     }
 
+    let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
     assert_eq!(
-        pair.a
-            .bbr_stats(&pair.peer_b)
-            .expect("bbr is enabled")
-            .delivered,
-        0,
+        stats.delivered, 0,
         "an ACK decrypted with the previous keypair must not acknowledge the new epoch"
+    );
+    assert!(
+        stats.inflight > 0,
+        "the stale ACK must not release the new epoch's in-flight data"
     );
 }

@@ -40,11 +40,22 @@ impl FecEncoder {
     /// [`FecError::PacketTooLarge`].
     #[must_use]
     pub fn new(config: FecConfig, max_shard_len: usize) -> Self {
+        Self::with_block_id(config, max_shard_len, 0)
+    }
+
+    /// Creates an encoder whose first emitted block carries `block_id`.
+    ///
+    /// A reconfigured encoder must not restart the sequence: peers keep the
+    /// last `block_id` they accepted and reject a restart as an ancient
+    /// duplicate. Callers therefore pass the id the previous encoder would
+    /// have used next.
+    #[must_use]
+    pub fn with_block_id(config: FecConfig, max_shard_len: usize, block_id: u32) -> Self {
         Self {
             config,
             code: RSCode::try_new(config.k(), config.m()),
             max_shard_len,
-            block_id: 0,
+            block_id,
             pending: Vec::with_capacity(config.k()),
         }
     }
@@ -252,6 +263,20 @@ mod tests {
         assert_eq!(encoder.push(&[9u8; 10]), Ok(None));
         assert_eq!(encoder.flush().unwrap().block_id, 1);
         assert_eq!(encoder.block_id(), 2);
+    }
+
+    #[test]
+    fn with_block_id_continues_the_sequence() {
+        let mut encoder = FecEncoder::with_block_id(config(2, 1), 1500, 7);
+        assert_eq!(encoder.block_id(), 7);
+        assert!(encoder.push(&[1u8; 10]).unwrap().is_none());
+        let block = encoder.push(&[2u8; 10]).unwrap().expect("block");
+        assert_eq!(block.block_id, 7);
+        assert_eq!(encoder.block_id(), 8);
+        assert!(encoder.push(&[3u8; 10]).unwrap().is_none());
+        let partial = encoder.flush().expect("partial block");
+        assert_eq!(partial.block_id, 8);
+        assert_eq!(encoder.block_id(), 9);
     }
 
     #[test]

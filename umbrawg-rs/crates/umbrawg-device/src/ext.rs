@@ -17,6 +17,18 @@ const CAPS_MAX_ATTEMPTS: u8 = 3;
 const CAPS_FAST_RETRY: Duration = Duration::from_millis(250);
 /// Spacing of the last CAPS retry before the attempts are exhausted.
 const CAPS_SLOW_RETRY: Duration = Duration::from_secs(2);
+/// Minimum spacing between two zero-CAPS revocations towards one peer.
+///
+/// With the extension disabled locally there is nothing to advertise, but a
+/// peer may still hold a stale FEC advertisement. A zero CAPS retracts it.
+/// Revoking at most once per two seconds bounds the reply rate while the peer
+/// keeps showing extension traffic.
+const CAPS_REVOKE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Largest FEC `k` the data plane implements; larger peer profiles are ignored.
+const MAX_PEER_FEC_K: u8 = 8;
+/// Largest FEC `m` the data plane implements; larger peer profiles are ignored.
+const MAX_PEER_FEC_M: u8 = 2;
 
 /// Minimum number of counters one adaptive FEC window must span.
 const ADAPTIVE_WINDOW_MIN: u64 = 256;
@@ -543,6 +555,7 @@ fn draw_timeout(jitter: &mut Jitter) -> Duration {
 /// frames never touch the allocator on the send path.
 const CONTROL_INLINE_LEN: usize = 64;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ControlPayload {
     Inline {
         bytes: [u8; CONTROL_INLINE_LEN],
@@ -552,6 +565,7 @@ enum ControlPayload {
 }
 
 /// One encoded control frame waiting for transmission.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ControlFrame {
     kind: ControlKind,
     payload: ControlPayload,
@@ -881,9 +895,15 @@ pub(crate) struct PeerExtension {
     caps_next: Option<Instant>,
     caps_last_sent: Option<Instant>,
     caps_seen: Option<Caps>,
+    /// A zero CAPS must be sent to retract a stale FEC advertisement.
+    revoke_pending: bool,
+    /// Last time a zero CAPS left this peer; enforces [`CAPS_REVOKE_INTERVAL`].
+    revoke_last_sent: Option<Instant>,
     ack: AckTracker,
     bbr: Option<Bbr>,
     fec_tx: Option<FecEncoder>,
+    /// Next `block_id` used when the encoder is recreated by a reconfiguration.
+    next_block_id: u32,
     fec_rx: Option<FecDecoder>,
     fec_active: bool,
     fec_stats: FecStats,
@@ -892,6 +912,14 @@ pub(crate) struct PeerExtension {
     fec_deadline: Option<Instant>,
     jitter: Jitter,
     pending: VecDeque<ControlFrame>,
+    /// Frames handed to a control flush that have not been confirmed sent.
+    ///
+    /// [`Self::pending_control`] drains the queue so the caller can encrypt
+    /// every frame, but a flush can abort on a missing endpoint or keypair.
+    /// The drained copies are kept here until [`Self::note_frame_sent`]
+    /// confirms each one; whatever is left is restored to `pending` on the
+    /// next flush, so no frame is ever lost without being counted.
+    control_lease: VecDeque<ControlFrame>,
     bbr_queue: BbrQueue,
     last_ack_largest: Option<u64>,
 }
@@ -914,9 +942,12 @@ impl PeerExtension {
             caps_next: None,
             caps_last_sent: None,
             caps_seen: None,
+            revoke_pending: false,
+            revoke_last_sent: None,
             ack: AckTracker::new(ACK_INTERVAL_MIN),
             bbr: None,
             fec_tx: None,
+            next_block_id: 0,
             fec_rx: None,
             fec_active: false,
             fec_stats: FecStats::default(),
@@ -925,6 +956,7 @@ impl PeerExtension {
             fec_deadline: None,
             jitter: Jitter::seeded(),
             pending: VecDeque::new(),
+            control_lease: VecDeque::new(),
             bbr_queue: BbrQueue::new(),
             last_ack_largest: None,
         };
@@ -947,12 +979,31 @@ impl PeerExtension {
 
     fn apply(&mut self, config: ExtConfig) {
         let previous = self.config;
+        let peer_had_fec =
+            self.peer_caps.contains(CapsFlags::FEC) || self.peer_fec_k != 0 || self.peer_fec_m != 0;
         // Preserve packets accumulated by the outgoing encoder: the partial
         // block is turned into explicit shard frames and stays queued.
         self.flush_encoder_frames();
+        // `block_id` is a peer-visible sequence, not encoder state: a
+        // reconfiguration (for example a one-sided MTU change) must continue
+        // it, otherwise the peer rejects the restarted ids as ancient.
+        self.next_block_id = self
+            .fec_tx
+            .as_ref()
+            .map_or(self.next_block_id, FecEncoder::block_id);
 
         self.config = config;
         self.local_caps = config.local_caps();
+        // A CAPS frame already in the queue advertises the previous
+        // generation. Replacing it is mandatory when the profile shrinks to
+        // all-off, otherwise a stale non-zero frame could re-arm the peer's
+        // FEC just before our revocation.
+        let caps_changed = self.local_caps != previous.local_caps()
+            || config.fec_profile() != previous.fec_profile();
+        if caps_changed {
+            self.pending
+                .retain(|frame| frame.kind() != ControlKind::Caps);
+        }
         // ACKs are sent every 8..=16 datagrams or after a 2..=5 ms timeout,
         // whichever comes first. The cadence is re-drawn after every ACK so
         // that the feedback stream does not look like a perfect clock.
@@ -962,7 +1013,10 @@ impl PeerExtension {
             || (config.fec.config().is_some() && config.max_shard_len != previous.max_shard_len);
         if fec_changed {
             let fec = config.fec.config();
-            self.fec_tx = fec.map(|fec| FecEncoder::new(fec, usize::from(config.max_shard_len)));
+            let block_id = self.next_block_id;
+            self.fec_tx = fec.map(|fec| {
+                FecEncoder::with_block_id(fec, usize::from(config.max_shard_len), block_id)
+            });
             self.fec_rx = fec.map(FecDecoder::new);
             self.fec_active = !matches!(config.fec, FecMode::Off | FecMode::Adaptive);
             self.loss = LossWindow::default();
@@ -985,12 +1039,17 @@ impl PeerExtension {
             self.bbr = Some(Bbr::new(config.bbr_config()));
         }
 
+        // Switching every extension off while the peer still believes we run
+        // FEC must retract that advertisement right away, not only after the
+        // next incoming shard.
+        if self.local_caps.bits() == 0 && peer_had_fec {
+            self.revoke_pending = true;
+        }
+
         // Only a change in what we advertise (or in our FEC block shape)
         // invalidates what the peer told us. Anything else must keep the
         // negotiated capabilities intact.
-        if self.local_caps != previous.local_caps()
-            || config.fec_profile() != previous.fec_profile()
-        {
+        if caps_changed {
             self.reset_caps();
         }
     }
@@ -1158,9 +1217,12 @@ impl PeerExtension {
     }
 
     pub(crate) fn fec_rx(&mut self) -> Option<&mut FecDecoder> {
-        if !self.peer_caps.contains(CapsFlags::FEC) {
-            return None;
-        }
+        // A shard is authenticated and carries its own profile, so a shard
+        // matching the local RX profile is decodable even before the peer's
+        // CAPS arrive. Rejecting it here turned a lost CAPS into a permanent
+        // one-way black hole after the peer was re-created. The decoder still
+        // validates `k`, `m`, the index and the shard length.
+        self.config.fec.config()?;
         self.fec_rx.as_mut()
     }
 
@@ -1194,6 +1256,11 @@ impl PeerExtension {
     }
 
     pub(crate) fn on_ack(&mut self, ack: &Ack, now: Instant) {
+        // An authenticated ACK is extension traffic: if our extensions are
+        // off, the peer still expects feedback and needs a zero CAPS.
+        if self.local_caps.bits() == 0 {
+            self.revoke_pending = true;
+        }
         let Some(bbr) = self.bbr.as_mut() else {
             return;
         };
@@ -1331,12 +1398,27 @@ impl PeerExtension {
         self.caps_seen = None;
     }
 
-    pub(crate) fn handle_caps(&mut self, caps: Caps, now: Instant) {
+    pub(crate) fn handle_caps(&mut self, mut caps: Caps, now: Instant) {
+        // Evidence is what the peer actually advertised, before our profile
+        // sanitization: even an unsupported FEC shape still shows a stale
+        // advertisement that a zero CAPS must retract.
+        let peer_has_extensions = caps.flags.bits() != 0 || caps.fec_k != 0 || caps.fec_m != 0;
+        sanitize_peer_caps(&mut caps);
         let changed = self.caps_seen != Some(caps);
         self.caps_seen = Some(caps);
         self.peer_caps = caps.flags;
         self.peer_fec_k = caps.fec_k;
         self.peer_fec_m = caps.fec_m;
+        if self.local_caps.bits() == 0 {
+            // Nothing to advertise, but an extension frame from the peer is
+            // evidence that it still holds a stale advertisement and needs a
+            // zero CAPS. An all-off CAPS is not evidence: treating it as such
+            // would let two all-off peers answer each other forever.
+            if peer_has_extensions {
+                self.revoke_pending = true;
+            }
+            return;
+        }
         if !changed && self.caps_attempts > 0 {
             return;
         }
@@ -1396,12 +1478,57 @@ impl PeerExtension {
         }
     }
 
+    /// Builds the zero CAPS frame that retracts a stale FEC advertisement.
+    ///
+    /// The frame is only produced while [`Self::revoke_pending`] is set and at
+    /// most once per [`CAPS_REVOKE_INTERVAL`], so a peer that keeps sending
+    /// extension traffic cannot turn the retraction into a packet storm.
+    fn request_revocation(&mut self, now: Instant) {
+        if !self.revoke_pending {
+            return;
+        }
+        if self
+            .revoke_last_sent
+            .is_some_and(|sent| now < sent + CAPS_REVOKE_INTERVAL)
+        {
+            return;
+        }
+        if self
+            .pending
+            .iter()
+            .any(|frame| frame.kind() == ControlKind::Caps)
+        {
+            return;
+        }
+        let caps = Caps {
+            flags: CapsFlags::default(),
+            ack_interval_packets: self.ack.advertised_interval(),
+            fec_k: 0,
+            fec_m: 0,
+        };
+        if let Some(frame) =
+            ControlFrame::inline(ControlKind::Caps, |output| caps.encode(output).ok())
+        {
+            self.pending.push_back(frame);
+        }
+    }
+
     /// Accounts for one transmitted control frame.
     ///
     /// Only a CAPS frame spends an attempt: ACK frames share the control
-    /// path but must never exhaust the CAPS budget.
+    /// path but must never exhaust the CAPS budget. A zero CAPS is a
+    /// revocation rather than a negotiation attempt, so it only advances the
+    /// revocation rate limiter.
     pub(crate) fn note_frame_sent(&mut self, kind: ControlKind, now: Instant) {
+        if let Some(frame) = self.control_lease.pop_front() {
+            debug_assert_eq!(frame.kind(), kind);
+        }
         if kind != ControlKind::Caps {
+            return;
+        }
+        if self.local_caps.bits() == 0 {
+            self.revoke_last_sent = Some(now);
+            self.revoke_pending = false;
             return;
         }
         self.caps_attempts = self.caps_attempts.saturating_add(1).min(CAPS_MAX_ATTEMPTS);
@@ -1417,6 +1544,8 @@ impl PeerExtension {
     }
 
     pub(crate) fn pending_control(&mut self, now: Instant) -> Vec<ControlFrame> {
+        // Frames from a flush that aborted before sending them are still ours.
+        self.restore_control_lease();
         // Producing new CAPS/ACK frames needs our advertised capabilities.
         // Frames that already sit in the queue, however, must always leave:
         // an encoder flushed right before FEC was turned off would otherwise
@@ -1430,15 +1559,41 @@ impl PeerExtension {
                     self.pending.push_back(frame);
                 }
             }
+        } else {
+            self.request_revocation(now);
         }
-        self.pending.drain(..).collect()
+        let frames: Vec<ControlFrame> = self.pending.drain(..).collect();
+        // Keep one copy until the caller confirms each send. `note_frame_sent`
+        // pops the matching front; a flush that aborts via `push_control`
+        // restores the rest instead of dropping it.
+        self.control_lease = frames.iter().cloned().collect();
+        frames
+    }
+
+    /// Puts frames from an unconfirmed flush back in front of the queue.
+    fn restore_control_lease(&mut self) {
+        if self.control_lease.is_empty() {
+            return;
+        }
+        let mut restored = std::mem::take(&mut self.control_lease);
+        restored.append(&mut self.pending);
+        self.pending = restored;
     }
 
     pub(crate) fn push_control(&mut self, frame: ControlFrame) {
+        if self.control_lease.front() == Some(&frame) {
+            // The flush failed on this frame and stopped. Every remaining
+            // leased frame is still unsent; put all of them back in order
+            // ahead of anything queued in the meantime.
+            let mut restored = std::mem::take(&mut self.control_lease);
+            restored.append(&mut self.pending);
+            self.pending = restored;
+            return;
+        }
         if self.pending.len() < CONTROL_QUEUE_CAPACITY {
             self.pending.push_back(frame);
         } else {
-            self.note_control_drop();
+            self.count_control_drop();
             warn!(
                 "dropping {:?} control frame: the per-peer queue is full",
                 frame.kind()
@@ -1447,13 +1602,29 @@ impl PeerExtension {
     }
 
     /// Accounts for one control frame dropped before it reached the transport.
+    ///
+    /// Called on an encryption failure that is not recoverable (bad buffer
+    /// shape, MTU mismatch, ...). The frame was handed out by
+    /// [`Self::pending_control`], so it is also removed from the lease.
     pub(crate) fn note_control_drop(&mut self) {
+        self.control_lease.pop_front();
+        self.count_control_drop();
+    }
+
+    fn count_control_drop(&mut self) {
         self.fec_stats.dropped_control = self.fec_stats.dropped_control.saturating_add(1);
     }
 
-    /// Returns FEC accounting for this peer, or `None` when FEC is disabled.
+    /// Returns FEC accounting for this peer.
+    ///
+    /// The counters are reported while FEC is enabled and also while it is off
+    /// as soon as anything was recorded (a control frame dropped by the peer
+    /// extension or a shard rejected as disabled). This keeps
+    /// [`FecStats::dropped_control`] observable without changing the
+    /// `None`-while-clean contract for peers that never used the extension.
     pub(crate) fn fec_stats(&self) -> Option<FecStats> {
-        (self.config.fec != FecMode::Off).then_some(self.fec_stats)
+        (self.config.fec != FecMode::Off || self.fec_stats != FecStats::default())
+            .then_some(self.fec_stats)
     }
 
     /// Accounts for one shard handed to the transport.
@@ -1463,6 +1634,11 @@ impl PeerExtension {
 
     /// Accounts for a shard rejected before decoding (bad or out-of-bounds header).
     pub(crate) fn note_fec_reject(&mut self) {
+        // Even a malformed shard proves the peer still sends extension
+        // traffic; while we are all-off it needs the zero-CAPS retraction.
+        if self.local_caps.bits() == 0 {
+            self.revoke_pending = true;
+        }
         self.fec_stats.decode_fail = self.fec_stats.decode_fail.saturating_add(1);
         self.fec_stats.dropped_bounds = self.fec_stats.dropped_bounds.saturating_add(1);
     }
@@ -1488,6 +1664,12 @@ impl PeerExtension {
     }
 
     pub(crate) fn fec_decode(&mut self, shard: FecShard<'_>, now: Instant) -> Vec<Vec<u8>> {
+        // The shard reached us authenticated and with a valid header, so it is
+        // extension traffic even when the local decoder is off. Note it before
+        // the disabled check so a stale FEC peer learns about the revocation.
+        if self.local_caps.bits() == 0 {
+            self.revoke_pending = true;
+        }
         let result = {
             let Some(decoder) = self.fec_rx() else {
                 self.fec_stats.dropped_disabled = self.fec_stats.dropped_disabled.saturating_add(1);
@@ -1509,6 +1691,33 @@ impl PeerExtension {
             }
         }
     }
+}
+
+/// Rejects a peer FEC profile the data plane cannot decode.
+///
+/// Mirrors the kernel: a `k` or `m` beyond the implemented maximum is not an
+/// error, the peer simply must never be matched. Dropping the FEC flags keeps
+/// both sides from negotiating a profile one of them would discard.
+fn sanitize_peer_caps(caps: &mut Caps) {
+    if !caps.flags.contains(CapsFlags::FEC) {
+        return;
+    }
+    if caps.fec_k >= 1
+        && caps.fec_k <= MAX_PEER_FEC_K
+        && caps.fec_m >= 1
+        && caps.fec_m <= MAX_PEER_FEC_M
+    {
+        return;
+    }
+    warn!(
+        "peer advertised unsupported FEC {}:{}; ignoring FEC",
+        caps.fec_k, caps.fec_m
+    );
+    caps.flags = CapsFlags::from_bits(
+        caps.flags.bits() & !(CapsFlags::FEC.bits() | CapsFlags::FEC_ADAPTIVE.bits()),
+    );
+    caps.fec_k = 0;
+    caps.fec_m = 0;
 }
 
 fn is_bounds_error(error: FecError) -> bool {
@@ -1659,7 +1868,11 @@ mod tests {
     fn control_backlog_is_bounded_and_keeps_kind() {
         let base = Instant::now();
         let mut ext = PeerExtension::new(BBR_CONFIG);
-        assert!(!ext.pending_control(base).is_empty());
+        let initial = ext.pending_control(base);
+        assert!(!initial.is_empty());
+        for frame in &initial {
+            ext.note_frame_sent(frame.kind(), base);
+        }
         for index in 0..32u8 {
             ext.push_control(ControlFrame::owned(ControlKind::FecShard, vec![index; 8]));
         }
@@ -2498,6 +2711,245 @@ mod tests {
     }
 
     #[test]
+    fn zero_caps_retracts_a_stale_fec_advertisement() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::default();
+        assert_eq!(ext.local_caps.bits(), 0);
+
+        // A long-lived peer still advertises FEC while everything is off
+        // locally: the next control flush must retract our capabilities.
+        ext.handle_caps(caps(CapsFlags::ACK | CapsFlags::FEC, 2, 1), base);
+        let frames = ext.pending_control(base);
+        assert_eq!(kinds(&frames), vec![ControlKind::Caps]);
+        let decoded = Caps::decode(frames[0].bytes()).expect("caps frame decodes");
+        assert_eq!(decoded.flags.bits(), 0);
+        assert_eq!((decoded.fec_k, decoded.fec_m), (0, 0));
+        ext.note_frame_sent(ControlKind::Caps, base);
+
+        // A silent peer must not keep the retraction alive.
+        assert!(ext
+            .pending_control(base + Duration::from_secs(30))
+            .is_empty());
+
+        // Repeated evidence is answered at most once per interval.
+        ext.handle_caps(
+            caps(CapsFlags::ACK | CapsFlags::FEC, 2, 1),
+            base + Duration::from_secs(1),
+        );
+        assert!(ext
+            .pending_control(base + Duration::from_secs(1))
+            .is_empty());
+        let frames = ext.pending_control(base + CAPS_REVOKE_INTERVAL);
+        assert_eq!(kinds(&frames), vec![ControlKind::Caps]);
+        assert_eq!(ext.fec_stats.dropped_control, 0);
+    }
+
+    #[test]
+    fn incoming_extension_traffic_revokes_while_off() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::default();
+        let (shard_len, shards) = fec_block_fixture();
+        assert!(ext
+            .fec_decode(
+                FecShard {
+                    block_id: 0,
+                    index: 0,
+                    k: 2,
+                    m: 1,
+                    shard_len,
+                    payload: &shards[0],
+                },
+                base,
+            )
+            .is_empty());
+        assert_eq!(ext.fec_stats.dropped_disabled, 1);
+        let frames = ext.pending_control(base);
+        assert_eq!(kinds(&frames), vec![ControlKind::Caps]);
+        let decoded = Caps::decode(frames[0].bytes()).expect("caps frame decodes");
+        assert_eq!(decoded.flags.bits(), 0);
+    }
+
+    #[test]
+    fn queued_caps_is_replaced_when_the_profile_turns_off() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        });
+        ext.handle_caps(caps(CapsFlags::ACK | CapsFlags::FEC, 2, 1), base);
+        let stale = Caps {
+            flags: CapsFlags::ACK | CapsFlags::FEC,
+            ack_interval_packets: 2,
+            fec_k: 2,
+            fec_m: 1,
+        };
+        ext.push_control(
+            ControlFrame::inline(ControlKind::Caps, |output| stale.encode(output).ok())
+                .expect("caps frame fits"),
+        );
+
+        ext.configure(ExtConfig::default());
+        let frames = ext.pending_control(base + Duration::from_millis(1));
+        assert_eq!(kinds(&frames), vec![ControlKind::Caps]);
+        let decoded = Caps::decode(frames[0].bytes()).expect("caps frame decodes");
+        assert_eq!(
+            decoded.flags.bits(),
+            0,
+            "a stale non-zero CAPS must not survive the switch to all-off"
+        );
+    }
+
+    #[test]
+    fn all_off_caps_is_not_extension_traffic() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::default();
+        ext.handle_caps(caps(CapsFlags::default(), 0, 0), base);
+        assert!(
+            ext.pending_control(base + Duration::from_secs(1))
+                .is_empty(),
+            "two all-off peers must fall silent instead of answering each other"
+        );
+        assert!(!ext.revoke_pending);
+    }
+
+    #[test]
+    fn fec_shard_of_the_local_profile_is_decoded_before_caps() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        });
+        let (shard_len, shards) = fec_block_fixture();
+
+        // No `handle_caps`: the shard itself carries and authenticates the
+        // profile, so it must still decode.
+        assert_eq!(push_block(&mut ext, 0, shard_len, &shards, base), 2);
+        let stats = ext.fec_stats().expect("counters are always observable");
+        assert_eq!(stats.blocks_decoded, 1);
+        assert_eq!(stats.dropped_disabled, 0);
+
+        // A profile the local decoder was not built for is still rejected.
+        assert!(ext
+            .fec_decode(
+                FecShard {
+                    block_id: 1,
+                    index: 0,
+                    k: 3,
+                    m: 1,
+                    shard_len,
+                    payload: &shards[0],
+                },
+                base,
+            )
+            .is_empty());
+        assert_eq!(ext.fec_stats().unwrap().decode_fail, 1);
+    }
+
+    #[test]
+    fn unsupported_peer_fec_profile_is_ignored() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        });
+
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 9, 1), base);
+        assert!(!ext.peer_caps.contains(CapsFlags::FEC));
+        assert_eq!((ext.peer_fec_k, ext.peer_fec_m), (0, 0));
+        assert!(!ext.fec_tx_active());
+
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 3), base);
+        assert!(!ext.peer_caps.contains(CapsFlags::FEC));
+        assert_eq!((ext.peer_fec_k, ext.peer_fec_m), (0, 0));
+
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+        assert!(ext.peer_caps.contains(CapsFlags::FEC));
+        assert!(ext.fec_tx_active());
+    }
+
+    #[test]
+    fn configure_preserves_the_fec_block_id() {
+        let base = Instant::now();
+        let config = ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        };
+        let mut ext = PeerExtension::new(config);
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+
+        assert!(ext.fec_push(&[1u8; 40], base).unwrap().is_none());
+        let first = ext.fec_push(&[2u8; 40], base).unwrap().expect("block");
+        assert_eq!(first.block_id, 0);
+        assert!(ext.fec_push(&[3u8; 40], base).unwrap().is_none());
+        let second = ext.fec_push(&[4u8; 40], base).unwrap().expect("block");
+        assert_eq!(second.block_id, 1);
+
+        // Only the MTU changes: `k`/`m` stay the same, so TX stays active.
+        ext.configure(ExtConfig {
+            max_shard_len: 1200,
+            ..config
+        });
+        assert!(ext.fec_tx_active());
+        assert_eq!(ext.fec_tx.as_ref().unwrap().block_id(), 2);
+
+        assert!(ext.fec_push(&[5u8; 40], base).unwrap().is_none());
+        let third = ext.fec_push(&[6u8; 40], base).unwrap().expect("block");
+        assert_eq!(
+            third.block_id, 2,
+            "a recreated encoder must not restart the peer-visible sequence"
+        );
+    }
+
+    #[test]
+    fn aborted_control_flush_keeps_every_frame() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::default();
+        let first = ControlFrame::owned(ControlKind::FecShard, vec![1u8; 8]);
+        let second = ControlFrame::owned(ControlKind::FecShard, vec![2u8; 8]);
+        let third = ControlFrame::owned(ControlKind::FecShard, vec![3u8; 8]);
+        ext.push_control(first.clone());
+        ext.push_control(second.clone());
+        ext.push_control(third.clone());
+
+        let frames = ext.pending_control(base);
+        assert_eq!(frames, vec![first, second.clone(), third.clone()]);
+        // The first frame was sent; the flush then hit `NoEndpoint`/`NoKeypair`
+        // on the second one and the caller pushed it back.
+        ext.note_frame_sent(frames[0].kind(), base);
+        ext.push_control(frames[1].clone());
+
+        let remaining = ext.pending_control(base);
+        assert_eq!(
+            remaining,
+            vec![second, third],
+            "the aborted tail must be resent"
+        );
+        assert_eq!(ext.fec_stats.dropped_control, 0);
+    }
+
+    #[test]
+    fn dropped_control_is_counted_and_not_resent() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::default();
+        let frame = ControlFrame::owned(ControlKind::FecShard, vec![7u8; 8]);
+        ext.push_control(frame);
+        let frames = ext.pending_control(base);
+        assert_eq!(frames.len(), 1);
+        // An encryption failure that is not recoverable drops this frame.
+        ext.note_control_drop();
+        assert_eq!(ext.fec_stats().unwrap().dropped_control, 1);
+        assert!(ext.pending_control(base).is_empty());
+    }
+
+    #[test]
     fn reset_feedback_keeps_negotiated_caps_and_rearms_the_exchange() {
         let base = Instant::now();
         let config = ExtConfig {
@@ -2793,7 +3245,11 @@ mod tests {
             )
             .is_empty());
         assert_eq!(ext.fec_stats.dropped_disabled, 1);
-        assert!(ext.fec_stats().is_none());
+        let stats = ext
+            .fec_stats()
+            .expect("counters stay observable with FEC off");
+        assert_eq!(stats.dropped_disabled, 1);
+        assert_eq!(stats.dropped_control, 0);
     }
 
     #[test]
