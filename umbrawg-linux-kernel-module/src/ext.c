@@ -550,6 +550,18 @@ static void uwg_ext_bbr_on_ack(struct uwg_peer *peer, u64 keypair_id,
 		spin_unlock_bh(&peer->bbr_lock);
 	}
 	rcu_read_unlock();
+
+	/* The ACK just released inflight, so whatever the cwnd gate parked can
+	 * go now. This is the RX/NAPI path: uwg_ext_receive() runs from
+	 * uwg_packet_consume_data_done(), which already calls
+	 * uwg_packet_send_staged_packets() in the same context, so no
+	 * workqueue is needed here. The function never sleeps -- it moves skbs
+	 * between queue heads and hands them to the crypto workqueue -- and all
+	 * its locks are bh-safe.
+	 */
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_ON &&
+	    !skb_queue_empty_lockless(&peer->staged_packet_queue))
+		uwg_packet_send_staged_packets(peer);
 }
 
 static void uwg_ext_handle_ack(struct uwg_peer *peer, u64 keypair_id,

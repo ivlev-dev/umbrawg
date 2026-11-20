@@ -18,6 +18,7 @@
 #include "bbr.h"
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
+#include <linux/jiffies.h>
 
 #include <linux/uio.h>
 #include <linux/inetdevice.h>
@@ -38,6 +39,21 @@
  */
 #define UWG_TX_PACE_MIN_BYTES 512
 #define UWG_TX_PACE_MAX_NS UWG_BBR_DRAIN_DELAY_MAX_NS
+
+/*
+ * A staged batch withheld by the congestion window is released
+ * unconditionally after this long. The window only reopens on ACKs, so
+ * without the timeout a lost ACK stream would park the tunnel for good.
+ */
+#define UWG_TX_CWND_BLOCK_MAX_NS (5ULL * NSEC_PER_MSEC)
+
+/*
+ * After the cwnd gate cut a batch short, pacing stays quiet for this long:
+ * the gate already spaces batches at cwnd/RTT, and a token-bucket sleep on
+ * top of it would add a second throughput ceiling. The window covers the
+ * encrypt-queue hand-off, so ordinary batches are still paced.
+ */
+#define UWG_TX_CWND_PACE_QUIET_NS (2ULL * NSEC_PER_MSEC)
 
 /* Handshake outer TOS is sampled per frame: DSCP is not negotiated and the
  * peer ignores it, but a constant value is a stable fingerprint.
@@ -538,7 +554,7 @@ static u64 uwg_packet_pace_delay_ns(struct uwg_peer *peer, unsigned int len)
  */
 static void uwg_packet_pace(struct uwg_peer *peer, unsigned int len)
 {
-	u64 delay_ns;
+	u64 delay_ns, gate_ns;
 	u32 delay_us;
 
 	if (len < UWG_TX_PACE_MIN_BYTES)
@@ -546,6 +562,13 @@ static void uwg_packet_pace(struct uwg_peer *peer, unsigned int len)
 	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_ON)
 		return;
 	if (!preemptible())
+		return;
+
+	/* A batch the cwnd gate cut short is already spaced by the window:
+	 * sleeping it out here as well would halve the achieved rate.
+	 */
+	gate_ns = READ_ONCE(peer->cwnd_gate_ns);
+	if (gate_ns && ktime_get_ns() - gate_ns < UWG_TX_CWND_PACE_QUIET_NS)
 		return;
 
 	delay_ns = uwg_packet_pace_delay_ns(peer, len);
@@ -923,11 +946,179 @@ void uwg_packet_send_fec_frames(struct uwg_peer *peer,
 	uwg_packet_send_staged_packets(peer);
 }
 
+/*
+ * Wakes a batch the cwnd gate parked. The emergency release has to be
+ * retried by somebody: with every ACK lost and no fresh traffic nothing
+ * would ever look at the queue again. The peer's keepalive timer already
+ * runs exactly the staged-send path and stays silent while packets are
+ * queued, so it is re-armed a few milliseconds out instead of adding a
+ * second timer per peer.
+ */
+static void uwg_packet_cwnd_arm_retry(struct uwg_peer *peer)
+{
+	unsigned long delay = usecs_to_jiffies(UWG_TX_CWND_BLOCK_MAX_NS /
+					       NSEC_PER_USEC);
+
+	rcu_read_lock_bh();
+	if (likely(netif_running(peer->device->dev) &&
+		   !READ_ONCE(peer->is_dead)))
+		mod_timer(&peer->timer_send_keepalive,
+			  jiffies + max_t(unsigned long, 1, delay));
+	rcu_read_unlock_bh();
+}
+
+static void uwg_packet_stage_head(struct uwg_peer *peer,
+				  struct sk_buff_head *packets)
+{
+	if (skb_queue_empty(packets))
+		return;
+	spin_lock_bh(&peer->staged_packet_queue.lock);
+	skb_queue_splice(packets, &peer->staged_packet_queue);
+	spin_unlock_bh(&peer->staged_packet_queue.lock);
+}
+
+/*
+ * ACK-clocked congestion window gate.
+ *
+ * Returns false when the whole batch has to stay queued; it then sits in
+ * `hold` in its original order. When only a prefix fits the remaining
+ * allowance, the prefix is left in `packets` and the rest is moved to
+ * `hold`, again in order, so the caller can put it back at the head of the
+ * staged queue. Keepalives bypass the gate: parking them would stall the
+ * very traffic that is supposed to reopen the window.
+ *
+ * The allowance is taken from uwg_bbr_cwnd_allowance(), i.e. from the
+ * effective window (raw cwnd floored at one worst-case ACK interval of
+ * pacing). Without that floor a low-RTT path would send its whole cwnd and
+ * then sit idle until the next delayed-ACK burst, which is the sleep
+ * ceiling this gate exists to avoid.
+ *
+ * The gate is armed only after uwg_bbr_full_bw_reached() and only while
+ * uwg_bbr_loss_limited() holds: in STARTUP, and on a clean channel, the
+ * pacer is the only limiter. See the comment on the activation check below.
+ *
+ * All the BBR state is read under bbr_lock through the rcu-protected
+ * pointer, exactly like the neighbouring send/ACK accounting.
+ */
+static bool uwg_packet_cwnd_gate(struct uwg_peer *peer,
+				 struct sk_buff_head *packets,
+				 struct sk_buff_head *hold)
+{
+	struct uwg_bbr *bbr;
+	struct sk_buff *skb;
+	u64 allowance, used = 0, now_ns, blocked_ns;
+	unsigned int keep = 0, qlen;
+	bool arm_retry = false;
+
+	__skb_queue_head_init(hold);
+
+	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_ON)
+		return true;
+	/* Control frames never enter this queue; keepalives do, and are what
+	 * keeps a stalled tunnel alive.
+	 */
+	if (PACKET_CB(skb_peek(packets))->is_keepalive)
+		return true;
+
+	now_ns = ktime_get_ns();
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (unlikely(!bbr)) {
+		rcu_read_unlock();
+		return true;
+	}
+	spin_lock_bh(&peer->bbr_lock);
+	/*
+	 * The gate is armed only in the steady, loss-bound state:
+	 *
+	 *  - STARTUP must not be gated. There cwnd is 2 * BDP while the pacer
+	 *    runs at a 2.77x gain, so the window is only marginally ahead of
+	 *    the token bucket; withholding on it thins the ACK stream (the
+	 *    peer acks in 8-16 packet bursts), which starves the bandwidth
+	 *    estimate and keeps cwnd -- and with it the floor -- from growing.
+	 *
+	 *  - On a clean channel cwnd is not a limit, it is a guess: the path
+	 *    is paced, not congestion-bound. Gating on it would let the ACK
+	 *    cadence, not the path, set the ceiling.
+	 *
+	 * cwnd is the reaction to congestion. inflight_hi is initialised to
+	 * U64_MAX and is only lowered by a loss cut, so inflight_hi < cwnd
+	 * means a loss response has already set a bound below the window and
+	 * withholding on it is the honest thing to do. Everything else stays
+	 * pacer-driven.
+	 */
+	if (!uwg_bbr_full_bw_reached(bbr) || !uwg_bbr_loss_limited(bbr)) {
+		peer->cwnd_blocked_ns = 0;
+		spin_unlock_bh(&peer->bbr_lock);
+		rcu_read_unlock();
+		return true;
+	}
+	allowance = uwg_bbr_cwnd_allowance(bbr);
+	blocked_ns = peer->cwnd_blocked_ns;
+	/* Emergency release: the window did not reopen in time, most likely
+	 * because the ACK stream is gone. Sending is better than a dead tunnel.
+	 */
+	if (blocked_ns && now_ns - blocked_ns >= UWG_TX_CWND_BLOCK_MAX_NS) {
+		peer->cwnd_blocked_ns = 0;
+		spin_unlock_bh(&peer->bbr_lock);
+		rcu_read_unlock();
+		net_dbg_ratelimited("%s: cwnd gate timed out for peer %llu, sending %u packet(s)\n",
+				    peer->device->dev->name, peer->internal_id,
+				    packets->qlen);
+		return true;
+	}
+	spin_unlock_bh(&peer->bbr_lock);
+	rcu_read_unlock();
+
+	qlen = packets->qlen;
+	skb_queue_walk(packets, skb) {
+		/* Datagrams are charged with the same length uwg_bbr_on_send()
+		 * accounts, so the gate and inflight stay in one unit.
+		 */
+		if (used + skb->len > allowance)
+			break;
+		used += skb->len;
+		++keep;
+	}
+
+	if (!keep) {
+		skb_queue_splice_tail_init(packets, hold);
+		spin_lock_bh(&peer->bbr_lock);
+		if (!peer->cwnd_blocked_ns) {
+			peer->cwnd_blocked_ns = now_ns;
+			arm_retry = true;
+		}
+		spin_unlock_bh(&peer->bbr_lock);
+		if (arm_retry)
+			uwg_packet_cwnd_arm_retry(peer);
+		return false;
+	}
+
+	if (keep < qlen) {
+		/* Move the tail over one skb at a time so `hold` keeps the
+		 * original order for skb_queue_splice() back to the head.
+		 */
+		while (packets->qlen > keep) {
+			skb = skb_dequeue_tail(packets);
+			__skb_queue_head(hold, skb);
+		}
+		WRITE_ONCE(peer->cwnd_gate_ns, now_ns);
+	}
+
+	/* Something goes out: the next stall starts its own timeout. */
+	spin_lock_bh(&peer->bbr_lock);
+	peer->cwnd_blocked_ns = 0;
+	spin_unlock_bh(&peer->bbr_lock);
+	return true;
+}
+
 void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 {
 	struct noise_keypair *keypair;
-	struct sk_buff_head packets;
+	struct sk_buff_head packets, hold;
 	struct sk_buff *skb;
+
+	__skb_queue_head_init(&hold);
 
 	/* Steal the current queue into our local one. */
 	__skb_queue_head_init(&packets);
@@ -952,6 +1143,18 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 
 	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_OFF)
 		uwg_peer_bbr_keypair_changed(peer, keypair->internal_id);
+
+	/* The congestion window gates the batch before a single nonce is
+	 * burned, so withheld packets keep their place in the queue. They are
+	 * left with their socket owner intact: unlike the handshake wait in
+	 * out_nokey, this is a short ACK-clocked pause, and the charged write
+	 * memory is the backpressure the application should see.
+	 */
+	if (!uwg_packet_cwnd_gate(peer, &packets, &hold)) {
+		uwg_packet_stage_head(peer, &hold);
+		uwg_noise_keypair_put(keypair, false);
+		return;
+	}
 
 	/* After we know we have a somewhat valid key, we now try to assign
 	 * nonces to all of the packets in the queue. If we can't assign nonces
@@ -980,12 +1183,22 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 	uwg_peer_get(keypair->entry.peer);
 	PACKET_CB(packets.next)->keypair = keypair;
 	uwg_packet_create_data(peer, packets.next);
+	/* The prefix is on its way, so the withheld tail can go back to the
+	 * head of the staged queue without a concurrent sender overtaking the
+	 * prefix. Order inside both lists is preserved.
+	 */
+	uwg_packet_stage_head(peer, &hold);
 	return;
 
 out_invalid:
 	WRITE_ONCE(keypair->sending.is_valid, false);
 out_nokey:
 	uwg_noise_keypair_put(keypair, false);
+
+	/* Restore the part the cwnd gate withheld behind the prefix, so the
+	 * batch goes back as one ordered queue.
+	 */
+	skb_queue_splice_tail_init(&hold, &packets);
 
 	/* We orphan the packets if we're waiting on a handshake, so that they
 	 * don't block a socket's pool.

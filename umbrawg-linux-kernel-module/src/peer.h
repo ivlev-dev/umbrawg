@@ -81,6 +81,15 @@ struct uwg_peer {
 	struct uwg_peer_ack_state ack_state;
 	struct uwg_bbr __rcu *bbr;
 	u64 bbr_keypair_id;
+	/* Monotonic ns when the cwnd gate first withheld the staged queue;
+	 * zero while nothing is blocked. Guarded by bbr_lock.
+	 */
+	u64 cwnd_blocked_ns;
+	/* Monotonic ns of the last batch the cwnd gate cut short. Read
+	 * lockless by the pacer to avoid stacking a token-bucket sleep on top
+	 * of an ACK-clocked window.
+	 */
+	u64 cwnd_gate_ns;
 	struct uwg_fec_tx __rcu *fec_tx;
 	struct uwg_fec_rx __rcu *fec_rx;
 	struct uwg_fec_counters fec_counters;

@@ -23,9 +23,10 @@
 #define UWG_BBR_RING_CAPACITY 4096
 
 /*
- * Upper bound on the extra delay the congestion window may add on top of
- * the token-bucket wait. Matches UWG_TX_PACE_MAX_NS in send.c: delaying a
- * datagram for longer than this is worse than briefly exceeding cwnd.
+ * Upper bound on the extra delay the token bucket may add to a datagram.
+ * Matches UWG_TX_PACE_MAX_NS in send.c: delaying a datagram for longer
+ * than this is worse than briefly exceeding cwnd. The congestion window
+ * itself is not enforced here any more, see uwg_packet_cwnd_gate().
  */
 #define UWG_BBR_DRAIN_DELAY_MAX_NS 2000000ULL
 
@@ -33,6 +34,25 @@
 #define UWG_BBR_DEFAULT_MSS 1400
 #define UWG_BBR_DEFAULT_RTT_US 20000
 #define UWG_BBR_MIN_CWND_PACKETS 4
+
+/*
+ * Lower bound on the window the sender is allowed to use, expressed as the
+ * amount of data that fits in UWG_BBR_CWND_FLOOR_NS at the current pacing
+ * rate.
+ *
+ * The peer acknowledges in bursts: an ACK covers 8-16 datagrams or arrives
+ * after up to 5 ms of delayed-ACK time. On a low-RTT path cwnd (= 2 * BDP)
+ * is smaller than one such burst, so an ACK-clocked gate would send the
+ * window and then idle until the next ACK -- which is exactly the sleep
+ * ceiling cwnd used to impose on short-RTT links. Covering one worst-case
+ * ACK interval keeps the gate open at line rate there, while on normal RTTs
+ * cwnd is far above the floor and the gate behaves as before.
+ *
+ * The floor is capped so an extreme pacing rate (or a bogus bandwidth
+ * estimate) cannot inflate the window without bound.
+ */
+#define UWG_BBR_CWND_FLOOR_NS 5000000ULL
+#define UWG_BBR_CWND_FLOOR_MAX (4ULL << 20)
 
 enum uwg_bbr_mode {
 	UWG_BBR_STARTUP = 0,
@@ -177,6 +197,28 @@ u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns);
 u64 uwg_bbr_pacing_rate(const struct uwg_bbr *b);
 u64 uwg_bbr_cwnd(const struct uwg_bbr *b);
 u64 uwg_bbr_inflight(const struct uwg_bbr *b);
+/* Window the sender may actually use: max(cwnd, floor), where the floor is
+ * UWG_BBR_CWND_FLOOR_NS worth of traffic at the pacing rate, capped at
+ * UWG_BBR_CWND_FLOOR_MAX. uwg_bbr_cwnd() keeps reporting the raw value.
+ * Caller must hold the peer's bbr_lock.
+ */
+u64 uwg_bbr_effective_cwnd(const struct uwg_bbr *b);
+/* True once STARTUP has established the pipe is full. The sender arms the
+ * cwnd gate only then: during STARTUP the window tracks the pacer and
+ * withholding on it stalls bandwidth discovery instead of shaping it.
+ * Caller must hold the peer's bbr_lock.
+ */
+bool uwg_bbr_full_bw_reached(const struct uwg_bbr *b);
+/* True when a loss cut has pushed inflight_hi below the congestion window,
+ * i.e. the loss response, not the path, is the binding constraint. On a
+ * clean channel inflight_hi starts at U64_MAX and only ever grows, so this
+ * stays false. Caller must hold the peer's bbr_lock.
+ */
+bool uwg_bbr_loss_limited(const struct uwg_bbr *b);
+/* Bytes the effective congestion window still admits, zero when it is
+ * saturated. Caller must hold the peer's bbr_lock.
+ */
+u64 uwg_bbr_cwnd_allowance(const struct uwg_bbr *b);
 void uwg_bbr_on_loss(struct uwg_bbr *b, u64 counter, u64 now_ns);
 void uwg_bbr_on_drop(struct uwg_bbr *b, u64 counter);
 int uwg_bbr_selftest(void);

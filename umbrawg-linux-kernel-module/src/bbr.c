@@ -18,8 +18,9 @@
  *   - Loss is inferred from ACK bitmap holes and from records leaving the
  *     64-bit window without an ACK. Loss cuts are deferred until STARTUP
  *     ends, so random loss cannot abort bandwidth discovery.
- *   - cwnd is enforced in the pacer as an extra drain delay instead of
- *     parking the TX queue; the added delay is capped at 2 ms.
+ *   - cwnd is not translated into a sleep. It is enforced by the sender as
+ *     an ACK-clocked gate on the staged queue (see uwg_packet_cwnd_gate()
+ *     in send.c); the pacer below applies only the token bucket.
  *   - The send ring holds 4096 records of 24 bytes (96 KiB) instead of the
  *     8192 records of 32 bytes (256 KiB) the Rust crate uses; see bbr.h.
  */
@@ -1228,10 +1229,10 @@ u64 uwg_bbr_next_delay_ns(struct uwg_bbr *b, u32 len, u64 now_ns)
 	}
 
 	/*
-	 * The congestion window is not applied as a sleep: on low-RTT links
-	 * cwnd is a few KiB, and a per-batch drain delay turned into a hard
-	 * throughput ceiling. It stays telemetry (uwg_bbr_cwnd) until the
-	 * sender can block on ACK progress instead of sleeping.
+	 * The congestion window is enforced by the sender, which withholds
+	 * packets instead of sleeping on them: on low-RTT links cwnd is a few
+	 * KiB and a per-batch drain delay turned into a hard throughput
+	 * ceiling. Here only the token bucket is applied.
 	 */
 
 	return delay;
@@ -1250,6 +1251,32 @@ u64 uwg_bbr_cwnd(const struct uwg_bbr *b)
 u64 uwg_bbr_inflight(const struct uwg_bbr *b)
 {
 	return b->inflight;
+}
+
+u64 uwg_bbr_effective_cwnd(const struct uwg_bbr *b)
+{
+	u64 floor = uwg_mul_div(b->pacing_rate, UWG_BBR_CWND_FLOOR_NS,
+				UWG_BBR_NSEC_PER_SEC);
+
+	return max(b->cwnd, min(floor, UWG_BBR_CWND_FLOOR_MAX));
+}
+
+u64 uwg_bbr_cwnd_allowance(const struct uwg_bbr *b)
+{
+	u64 cwnd = uwg_bbr_effective_cwnd(b);
+	u64 inflight = b->inflight;
+
+	return cwnd > inflight ? cwnd - inflight : 0;
+}
+
+bool uwg_bbr_full_bw_reached(const struct uwg_bbr *b)
+{
+	return b->full_bw_reached;
+}
+
+bool uwg_bbr_loss_limited(const struct uwg_bbr *b)
+{
+	return b->inflight_hi < b->cwnd;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -1473,6 +1500,12 @@ static int uwg_bbr_selftest_path(void)
 		ret = -EINVAL;
 		goto out;
 	}
+	/* The simulated path found the full pipe: the cwnd gate is armed. */
+	if (!uwg_bbr_full_bw_reached(b)) {
+		pr_err("BBR self-test: PROBE_BW without full_bw_reached\n");
+		ret = -EINVAL;
+		goto out;
+	}
 	if (!res.drained || uwg_bbr_inflight(b) != 0) {
 		pr_err("BBR self-test: inflation not released (%llu)\n",
 		       uwg_bbr_inflight(b));
@@ -1527,6 +1560,16 @@ static int uwg_bbr_selftest_clean(void)
 	if (!res.drained || uwg_bbr_inflight(b) != 0 || !b->cwnd ||
 	    b->lost_packets || b->spurious_losses) {
 		pr_err("BBR self-test: clean path accounting broken\n");
+		ret = -EINVAL;
+		goto out;
+	}
+	/*
+	 * A clean path never cuts inflight_hi, so the sender must not gate on
+	 * the window there: the pacer, not the ACK cadence, sets the rate.
+	 */
+	if (uwg_bbr_loss_limited(b)) {
+		pr_err("BBR self-test: clean path armed the cwnd gate (hi=%llu cwnd=%llu)\n",
+		       b->inflight_hi, uwg_bbr_cwnd(b));
 		ret = -EINVAL;
 		goto out;
 	}
@@ -1600,6 +1643,12 @@ static int uwg_bbr_selftest_edges(void)
 	    b->min_cwnd != UWG_BBR_DEFAULT_MSS * UWG_BBR_MIN_CWND_PACKETS ||
 	    !b->pacing_rate || b->cwnd != b->min_cwnd) {
 		pr_err("BBR self-test: zero config not sanitised\n");
+		kfree(b);
+		return -EINVAL;
+	}
+	/* A fresh controller is in STARTUP: the sender must not gate on it. */
+	if (uwg_bbr_full_bw_reached(b)) {
+		pr_err("BBR self-test: STARTUP already reported a full pipe\n");
 		kfree(b);
 		return -EINVAL;
 	}
@@ -1760,7 +1809,7 @@ static int uwg_bbr_selftest_edges(void)
 		return -EINVAL;
 	}
 
-	/* cwnd is telemetry only: it must not add a sleep on top of pacing. */
+	/* The pacer must not fold cwnd into the delay: the sender gates on it. */
 	uwg_bbr_init(b, 1400, 20000);
 	for (i = 0; i < 5; i++)
 		uwg_bbr_on_send(b, b->keypair_id, i, 1400, 1000 + i);
@@ -1880,11 +1929,187 @@ static int uwg_bbr_selftest_epoch(void)
 	return 0;
 }
 
+/*
+ * The sender's cwnd gate reads uwg_bbr_cwnd_allowance() under the peer's
+ * bbr_lock: an empty window admits the whole effective cwnd, a saturated
+ * one admits nothing, and an ACK must hand the window back.
+ */
+static int uwg_bbr_selftest_cwnd(void)
+{
+	struct uwg_bbr *b;
+	u64 cwnd, inflight, nonce = 0;
+	unsigned int i;
+
+	b = kzalloc(sizeof(*b), GFP_KERNEL);
+	if (!b)
+		return -ENOMEM;
+
+	uwg_bbr_init(b, 1400, 20000);
+	cwnd = uwg_bbr_cwnd(b);
+	if (!cwnd || uwg_bbr_inflight(b)) {
+		pr_err("BBR self-test: cwnd fixture not empty (cwnd=%llu inflight=%llu)\n",
+		       cwnd, uwg_bbr_inflight(b));
+		kfree(b);
+		return -EINVAL;
+	}
+	if (uwg_bbr_cwnd_allowance(b) != cwnd) {
+		pr_err("BBR self-test: empty window admits %llu of %llu\n",
+		       uwg_bbr_cwnd_allowance(b), cwnd);
+		kfree(b);
+		return -EINVAL;
+	}
+
+	uwg_bbr_on_send(b, b->keypair_id, nonce, 1400, 1000);
+	if (uwg_bbr_cwnd_allowance(b) != cwnd - 1400) {
+		pr_err("BBR self-test: one datagram in flight leaves %llu, expected %llu\n",
+		       uwg_bbr_cwnd_allowance(b), cwnd - 1400);
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* Fill the window: the gate must stop admitting new datagrams. */
+	for (i = 1; i < 64 && uwg_bbr_inflight(b) < cwnd; i++)
+		uwg_bbr_on_send(b, b->keypair_id, ++nonce, 1400,
+				1000 + (u64)i * 1000);
+	inflight = uwg_bbr_inflight(b);
+	if (inflight < cwnd || uwg_bbr_cwnd_allowance(b)) {
+		pr_err("BBR self-test: saturated window still admits %llu (inflight=%llu cwnd=%llu)\n",
+		       uwg_bbr_cwnd_allowance(b), inflight, uwg_bbr_cwnd(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* The ACK that drains inflight must reopen the window. */
+	uwg_bbr_on_ack(b, b->keypair_id, nonce, 1, 0, 5000000);
+	if (uwg_bbr_inflight(b) >= inflight || !uwg_bbr_cwnd_allowance(b)) {
+		pr_err("BBR self-test: ACK did not reopen the window (inflight %llu -> %llu)\n",
+		       inflight, uwg_bbr_inflight(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/*
+	 * The effective window is floored at one worst-case ACK interval of
+	 * pacing, never below the raw cwnd and never above the cap.
+	 */
+	uwg_bbr_init(b, 1400, 20000);
+	if (uwg_bbr_effective_cwnd(b) != uwg_bbr_cwnd(b)) {
+		pr_err("BBR self-test: floor lifted a large cwnd (%llu vs %llu)\n",
+		       uwg_bbr_effective_cwnd(b), uwg_bbr_cwnd(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* 2 MB/s over 5 ms is 10 KB, above the 5600-byte minimum window. */
+	b->pacing_rate = 2000000;
+	if (uwg_bbr_effective_cwnd(b) != 10000 ||
+	    uwg_bbr_cwnd_allowance(b) != 10000) {
+		pr_err("BBR self-test: cwnd floor %llu, expected 10000 (cwnd=%llu)\n",
+		       uwg_bbr_effective_cwnd(b), uwg_bbr_cwnd(b));
+		kfree(b);
+		return -EINVAL;
+	}
+	b->inflight = 4000;
+	if (uwg_bbr_cwnd_allowance(b) != 6000) {
+		pr_err("BBR self-test: floor allowance %llu, expected 6000\n",
+		       uwg_bbr_cwnd_allowance(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/* An extreme rate must not inflate the floor past the cap. */
+	b->pacing_rate = UWG_BBR_MAX_RATE;
+	if (uwg_bbr_effective_cwnd(b) != UWG_BBR_CWND_FLOOR_MAX) {
+		pr_err("BBR self-test: cwnd floor %llu exceeds cap %llu\n",
+		       uwg_bbr_effective_cwnd(b), UWG_BBR_CWND_FLOOR_MAX);
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/*
+	 * The gate is armed only after STARTUP: while full_bw_reached is
+	 * false a saturated window must not stop the sender, after the
+	 * transition the very same state is a hard stop for the batch.
+	 */
+	uwg_bbr_init(b, 1400, 20000);
+	if (uwg_bbr_full_bw_reached(b)) {
+		pr_err("BBR self-test: gate armed during STARTUP\n");
+		kfree(b);
+		return -EINVAL;
+	}
+	b->inflight = uwg_bbr_effective_cwnd(b);
+	if (uwg_bbr_cwnd_allowance(b)) {
+		pr_err("BBR self-test: saturated STARTUP window admits %llu\n",
+		       uwg_bbr_cwnd_allowance(b));
+		kfree(b);
+		return -EINVAL;
+	}
+	b->full_bw_reached = true;
+	if (!uwg_bbr_full_bw_reached(b) || uwg_bbr_cwnd_allowance(b)) {
+		pr_err("BBR self-test: gate state lost after STARTUP (reached=%d allowance=%llu)\n",
+		       uwg_bbr_full_bw_reached(b), uwg_bbr_cwnd_allowance(b));
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/*
+	 * The gate additionally needs a loss-established bound: a fresh
+	 * controller keeps inflight_hi at U64_MAX, a loss cut lowers it below
+	 * the window, and a later growth of the bound releases it again.
+	 */
+	if (uwg_bbr_loss_limited(b)) {
+		pr_err("BBR self-test: clean controller reports loss-limited (hi=%llu cwnd=%llu)\n",
+		       b->inflight_hi, b->cwnd);
+		kfree(b);
+		return -EINVAL;
+	}
+	b->inflight_hi = b->cwnd - 1400;
+	if (!uwg_bbr_loss_limited(b)) {
+		pr_err("BBR self-test: cut bound not seen as loss-limited (hi=%llu cwnd=%llu)\n",
+		       b->inflight_hi, b->cwnd);
+		kfree(b);
+		return -EINVAL;
+	}
+	b->inflight_hi = b->cwnd + 1400;
+	if (uwg_bbr_loss_limited(b)) {
+		pr_err("BBR self-test: rebuilt bound still loss-limited (hi=%llu cwnd=%llu)\n",
+		       b->inflight_hi, b->cwnd);
+		kfree(b);
+		return -EINVAL;
+	}
+
+	/*
+	 * A real loss cut (a hole in the ACK bitmap, PROBE_BW so the cut is
+	 * applied) must move inflight_hi down to at most the window: that is
+	 * the state in which the sender starts withholding.
+	 */
+	uwg_bbr_init(b, 1400, 20000);
+	b->full_bw_reached = true;
+	b->mode = UWG_BBR_PROBE_BW;
+	uwg_bbr_on_send(b, b->keypair_id, 0, 1400, 1000000);
+	uwg_bbr_on_send(b, b->keypair_id, 1, 1400, 1000000);
+	uwg_bbr_on_send(b, b->keypair_id, 2, 1400, 1000000);
+	uwg_bbr_on_ack(b, b->keypair_id, 2, 0x5, 0, 2000000);
+	if (!b->lost_packets || b->inflight_hi == U64_MAX ||
+	    b->inflight_hi > b->cwnd) {
+		pr_err("BBR self-test: loss cut did not bound the window (lost=%llu hi=%llu cwnd=%llu)\n",
+		       b->lost_packets, b->inflight_hi, b->cwnd);
+		kfree(b);
+		return -EINVAL;
+	}
+
+	kfree(b);
+	return 0;
+}
+
 int uwg_bbr_selftest(void)
 {
 	int ret;
 
 	ret = uwg_bbr_selftest_edges();
+	if (ret < 0)
+		return ret;
+	ret = uwg_bbr_selftest_cwnd();
 	if (ret < 0)
 		return ret;
 	ret = uwg_bbr_selftest_epoch();
