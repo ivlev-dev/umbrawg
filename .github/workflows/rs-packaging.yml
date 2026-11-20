@@ -68,8 +68,11 @@ jobs:
       - name: Установить зависимости
         run: |
           set -euo pipefail
-          pacman -Syu --noconfirm --needed base-devel cargo git rust
+          # ring 0.17.14 не линкуется с rust 1.100 из rolling Arch;
+          # фиксируем тулчейн 1.99.1 через rustup.
+          pacman -Syu --noconfirm --needed base-devel git rustup
           useradd -m builder
+          su builder -c 'rustup default 1.99.1' 
 
       - name: Checkout monorepo
         uses: actions/checkout@v4
@@ -85,7 +88,7 @@ jobs:
         run: |
           set -euo pipefail
           pkgdir="$PWD"
-          su builder -c "cd '$pkgdir' && makepkg -f --noconfirm --nodeps"
+          su builder -c "export PATH=/home/builder/.cargo/bin:\$PATH && cd '$pkgdir' && makepkg -f --noconfirm --nodeps"
 
       - name: Проверить версию собранного -git пакета
         working-directory: umbrawg-rs/contrib/arch/umbrawg-daemon-git
