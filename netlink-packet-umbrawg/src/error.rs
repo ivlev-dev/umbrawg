@@ -265,8 +265,8 @@ impl fmt::Display for UmbrawgConfigError {
             ),
             Self::InvalidFecShards { k, m } => write!(
                 f,
-                "invalid FEC shards {k}:{m}: expected K >= 1, M >= 1 and \
-                 K + M <= 255"
+                "invalid FEC shards {k}:{m}: expected K >= 1, M >= 1 and K + \
+                 M <= 255"
             ),
             Self::UnsupportedCommand { command } => write!(
                 f,

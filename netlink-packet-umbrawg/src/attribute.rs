@@ -9,8 +9,10 @@ use netlink_packet_core::{
 };
 
 use super::peer::UmbrawgPeers;
-use crate::device::EXTRA_PORTS_MAX;
-use crate::{constants::UWG_KEY_LEN, range::u32_range_unpack, UmbrawgPeer};
+use crate::{
+    constants::UWG_KEY_LEN, device::EXTRA_PORTS_MAX, range::u32_range_unpack,
+    UmbrawgPeer,
+};
 
 const UWGDEVICE_A_IFINDEX: u16 = 1;
 const UWGDEVICE_A_IFNAME: u16 = 2;
@@ -664,7 +666,8 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                     .context("invalid UWGDEVICE_A_EXTRA_PORTS value")?;
                 if ports > EXTRA_PORTS_MAX {
                     return Err(DecodeError::from(format!(
-                        "UWGDEVICE_A_EXTRA_PORTS value {ports} exceeds {EXTRA_PORTS_MAX}"
+                        "UWGDEVICE_A_EXTRA_PORTS value {ports} exceeds \
+                         {EXTRA_PORTS_MAX}"
                     )));
                 }
                 Self::ExtraPorts(ports)

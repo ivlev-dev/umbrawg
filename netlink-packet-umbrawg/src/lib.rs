@@ -43,9 +43,9 @@
 //! - `HeaderProtectionKey` is exactly 32 bytes.
 //! - With a header protection key configured, the kernel requires `S1`..`S4` to
 //!   be at least [`HEADER_PROTECTION_NONCE_LEN`] bytes.
-//! - `Bbr` is a `u8` mode (`0` off, `1` monitor, `2` on), `Fec` a `u32`
-//!   payload (`0` off, `1` adaptive, otherwise `(K << 8) | M`). The builders
-//!   accept [`BbrMode`] and [`FecMode`] and convert them to these payloads.
+//! - `Bbr` is a `u8` mode (`0` off, `1` monitor, `2` on), `Fec` a `u32` payload
+//!   (`0` off, `1` adaptive, otherwise `(K << 8) | M`). The builders accept
+//!   [`BbrMode`] and [`FecMode`] and convert them to these payloads.
 //!
 //! # Building a configuration
 //!
