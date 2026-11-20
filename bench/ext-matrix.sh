@@ -58,7 +58,7 @@ read -r -a DIRS <<< "$DIR_LIST"
 [ "${#DIRS[@]}" -gt 0 ] || die "DIR_LIST is empty"
 
 for impl in "${IMPLS[@]}"; do
-    [ "$impl" = "rust" ] || [ "$impl" = "kernel" ] || die "bad IMPL_LIST value: $impl"
+    [ "$impl" = "rust" ] || [ "$impl" = "kernel" ] || [ "$impl" = "rust2" ] || die "bad IMPL_LIST value: $impl"
 done
 for dir in "${DIRS[@]}"; do
     [ "$dir" = "k0" ] || [ "$dir" = "k1" ] || die "bad DIR_LIST value: $dir"

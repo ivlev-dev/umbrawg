@@ -1,0 +1,77 @@
+name: Bench matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 * * *"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+# Ночной прогон матрицы расширения BBR/FEC в режиме Rust↔Rust (rust2): на
+# раннере нет подходящего ядра, поэтому kernel-модуль не собирается и не
+# загружается — rust2 работает без umbrawg.ko. Запуск только по cron и
+# вручную, не на каждый push.
+jobs:
+  bench-matrix:
+    name: rust2 ext matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v4
+
+      - name: Проверить синтаксис скриптов
+        run: bash -n bench/wire-ext.sh bench/ext-matrix.sh
+
+      - name: Установить Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Кэш Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            umbrawg-rs -> umbrawg-rs/target
+            umbrawg-tools -> umbrawg-tools/target
+
+      - name: Собрать Rust-демон и uwg
+        run: |
+          set -euo pipefail
+          cargo build --release --locked --manifest-path umbrawg-rs/Cargo.toml -p umbrawg
+          cargo build --release --locked --manifest-path umbrawg-tools/Cargo.toml -p uwg
+          test -x umbrawg-rs/target/release/umbrawg
+          test -x umbrawg-tools/target/release/uwg
+
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            iperf3 iproute2 tcpdump python3
+
+      - name: PLAN_ONLY для матрицы
+        env:
+          IMPL_LIST: rust2
+          FEC_LIST: "off 2:1 8:2 adaptive"
+          BBR_LIST: "off on"
+          LOSS_LIST: "0 2"
+        run: PLAN_ONLY=1 bash bench/ext-matrix.sh
+
+      - name: Полный прогон матрицы (root)
+        run: |
+          set -euo pipefail
+          sudo -E env DUR=2 IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive" BBR_LIST="off on" LOSS_LIST="0 2" bash bench/ext-matrix.sh
+
+      - name: Загрузить CSV и логи
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-matrix-logs
+          path: |
+            bench/tmp/ext-matrix-*.csv
+            bench/tmp/ext-matrix-*/
+          if-no-files-found: ignore
+          retention-days: 30
