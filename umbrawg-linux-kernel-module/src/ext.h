@@ -49,6 +49,11 @@ struct uwg_peer;
 #define UWG_EXT_CONTROL_PADDING_MAX 15
 
 #define UWG_EXT_CAPS_MAX_ATTEMPTS 3
+/* Bounded number of answers to an identical peer CAPS within one negotiation
+ * epoch. A repeat can mean a lost frame and must be answered, but two kernels
+ * must not answer each other forever.
+ */
+#define UWG_EXT_CAPS_MAX_REPLIES 2
 #define UWG_EXT_CAPS_RETRY_MS 2000
 #define UWG_EXT_CAPS_FAST_RETRY_MS 250
 
@@ -108,12 +113,19 @@ struct uwg_ext_fec_shard {
 struct uwg_peer_caps {
 	struct uwg_ext_caps local;
 	struct uwg_ext_caps peer;
-	/* Last profile received from the peer; a repeat must not be answered. */
+	/* Last profile received from the peer; a repeat must not be answered
+	 * more than UWG_EXT_CAPS_MAX_REPLIES times.
+	 */
 	struct uwg_ext_caps last_peer;
 	bool peer_valid;
 	bool last_peer_valid;
 	bool resend;
+	/* The peer sent us an extension frame while this device has the
+	 * extension switched off; its profile advertisement is stale.
+	 */
+	bool extension_seen;
 	u8 send_attempts;
+	u8 reply_attempts;
 	ktime_t next_send;
 	spinlock_t lock;
 };
@@ -167,6 +179,9 @@ int uwg_ext_build_fec_shard_header(u8 *buf, size_t len,
 				   const struct uwg_ext_fec_shard *shard);
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer);
 void uwg_ext_caps_changed(struct uwg_device *uwg);
+void uwg_ext_caps_keypair_changed(struct uwg_peer *peer);
+bool uwg_ext_peer_extension(const struct sk_buff *skb);
+void uwg_ext_caps_extension_seen(struct uwg_peer *peer);
 void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce,
 			   bool count_for_ack);
 void uwg_ext_ack_timeout(struct uwg_peer *peer);

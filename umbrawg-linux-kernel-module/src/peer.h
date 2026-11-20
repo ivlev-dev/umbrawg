@@ -93,6 +93,12 @@ struct uwg_peer {
 	struct uwg_fec_tx __rcu *fec_tx;
 	struct uwg_fec_rx __rcu *fec_rx;
 	struct uwg_fec_counters fec_counters;
+	/* Next FEC block id for this peer. It lives outside uwg_fec_tx so a
+	 * profile change that replaces the TX state does not restart the
+	 * sequence: the receiver keeps its block clock across the change and
+	 * would drop every restarted id as stale.
+	 */
+	atomic_t fec_block_id;
 	spinlock_t bbr_lock;
 };
 
@@ -107,7 +113,7 @@ int uwg_peer_bbr_sync(struct uwg_peer *peer);
 int uwg_peer_bbr_sync_device(struct uwg_device *uwg);
 
 int uwg_peer_fec_sync(struct uwg_peer *peer);
-int uwg_peer_fec_sync_device(struct uwg_device *uwg);
+int uwg_peer_fec_sync_device(struct uwg_device *uwg, u32 mode);
 void uwg_peer_fec_release(struct uwg_peer *peer);
 
 struct uwg_peer *__must_check uwg_peer_get_maybe_zero(struct uwg_peer *peer);

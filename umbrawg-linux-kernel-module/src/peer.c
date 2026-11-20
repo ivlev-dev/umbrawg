@@ -205,9 +205,11 @@ static void peer_remove_after_dead(struct uwg_peer *peer)
 	uwg_noise_keypairs_clear(&peer->keypairs);
 
 	/* Destroy all ongoing timers that were in-flight at the beginning of
-	 * this function.
+	 * this function. The peer is already dead and synchronize_net() has
+	 * run, so they cannot be armed again; shutting them down also stops a
+	 * late arm from touching the peer after it is freed.
 	 */
-	uwg_timers_stop(peer);
+	uwg_timers_shutdown(peer);
 
 	/* The transition between packet encryption/decryption queues isn't
 	 * guarded by is_dead, but each reference's life is strictly bounded by

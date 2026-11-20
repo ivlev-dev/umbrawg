@@ -266,6 +266,21 @@ void uwg_timers_init(struct uwg_peer *peer)
 	peer->timer_need_another_keepalive = false;
 }
 
+/* Arm the delayed-ACK timer with the same guard as mod_peer_timer().
+ * uwg_ext_ack_armed() runs from the NAPI poll (and from the ACK timer
+ * callback itself), so it can race with peer teardown; timer_reduce() has no
+ * is_dead/netif_running check of its own and would re-arm a timer after
+ * uwg_timers_stop() has already returned.
+ */
+void uwg_timers_ack_reduce(struct uwg_peer *peer, unsigned long expires)
+{
+	rcu_read_lock_bh();
+	if (likely(netif_running(peer->device->dev) &&
+		   !READ_ONCE(peer->is_dead)))
+		timer_reduce(&peer->timer_send_ack, expires);
+	rcu_read_unlock_bh();
+}
+
 void uwg_timers_stop(struct uwg_peer *peer)
 {
 	timer_delete_sync(&peer->timer_retransmit_handshake);
@@ -274,5 +289,26 @@ void uwg_timers_stop(struct uwg_peer *peer)
 	timer_delete_sync(&peer->timer_zero_key_material);
 	timer_delete_sync(&peer->timer_persistent_keepalive);
 	timer_delete_sync(&peer->timer_send_ack);
+	flush_work(&peer->clear_peer_work);
+}
+
+/* Final peer teardown. The caller has already marked the peer dead and run
+ * synchronize_net() (uwg_peer_remove()/uwg_peer_remove_all()), so no RCU/NAPI
+ * reader can pass the is_dead check in mod_peer_timer() or
+ * uwg_timers_ack_reduce() and arm a timer any more. timer_shutdown_sync()
+ * additionally poisons the timers, which matters because the peer is freed
+ * later from an RCU callback: a late arm would otherwise target freed memory.
+ *
+ * uwg_stop() must keep using uwg_timers_stop(): the netdev can be brought
+ * back up and the timers must remain usable for a restart.
+ */
+void uwg_timers_shutdown(struct uwg_peer *peer)
+{
+	timer_shutdown_sync(&peer->timer_retransmit_handshake);
+	timer_shutdown_sync(&peer->timer_send_keepalive);
+	timer_shutdown_sync(&peer->timer_new_handshake);
+	timer_shutdown_sync(&peer->timer_zero_key_material);
+	timer_shutdown_sync(&peer->timer_persistent_keepalive);
+	timer_shutdown_sync(&peer->timer_send_ack);
 	flush_work(&peer->clear_peer_work);
 }

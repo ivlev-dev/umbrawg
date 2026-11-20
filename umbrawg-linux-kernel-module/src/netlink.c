@@ -1044,11 +1044,19 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 			ret = -EINVAL;
 			goto out;
 		}
-		uwg->fec_mode = val32;
-		if (uwg_peer_fec_sync_device(uwg))
+		/* The sync is transactional: it allocates the state for every
+		 * peer first and only then commits fec_mode. On -ENOMEM the
+		 * old profile stays fully active, so CAPS cannot advertise
+		 * FEC that RX cannot decode - and userspace sees the error
+		 * instead of a silently broken tunnel.
+		 */
+		ret = uwg_peer_fec_sync_device(uwg, val32);
+		if (ret) {
 			net_dbg_ratelimited(
 				"%s: Could not allocate FEC state for every peer\n",
 				uwg->dev->name);
+			goto out;
+		}
 		uwg_ext_caps_changed(uwg);
 	}
 

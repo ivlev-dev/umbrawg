@@ -40,7 +40,6 @@ struct uwg_fec_tx {
 	u16 lens[UWG_FEC_DATA_MAX_K];
 	u8 *shards;
 	u8 *block;
-	u32 block_id;
 };
 
 struct uwg_fec_rx_block {
@@ -299,10 +298,15 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 	struct net_device *dev = peer->device->dev;
 	unsigned int i, n = tx->count, shard_len = 0, total, limit;
 	u8 block_k, block_m, order[UWG_FEC_DATA_MAX_SHARDS];
-	u32 block_id = tx->block_id;
+	u32 block_id;
 
 	if (!n)
 		return;
+	/* Taken from the peer, not from this tx instance: replacing the FEC
+	 * state on a profile change must not restart the sequence, or the
+	 * receiver's block clock would drop every new id as stale.
+	 */
+	block_id = (u32)atomic_fetch_inc(&peer->fec_block_id);
 
 	for (i = 0; i < n; i++) {
 		unsigned int len = (unsigned int)tx->lens[i] + 2;
@@ -429,7 +433,6 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 
 out:
 	tx->count = 0;
-	tx->block_id = block_id + 1;
 }
 
 static bool uwg_fec_tx_push_locked(struct uwg_fec_tx *tx,
@@ -695,12 +698,24 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 
 	rcu_read_lock();
 	rx = rcu_dereference(peer->fec_rx);
-	if (!rx || !READ_ONCE(peer->caps.peer_valid) ||
-	    !(READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_FEC)) {
+	if (unlikely(!rx)) {
 		atomic64_inc(&peer->fec_counters.dropped_disabled);
 		ret = -EINVAL;
 		goto out_rcu;
 	}
+	/* A shard carries its own profile and is authenticated, so a shard that
+	 * matches the local RX profile is decodable even when the peer's CAPS
+	 * are not known yet. That happens after the peer was re-created: it
+	 * forgot the profile we advertised and starts sending shards before the
+	 * CAPS exchange completes. Rejecting them here turned a lost CAPS into
+	 * a permanent one-way black hole. The profile checks below remain the
+	 * real guard.
+	 */
+	if (unlikely(!READ_ONCE(peer->caps.peer_valid) ||
+		     !(READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_FEC)))
+		net_dbg_ratelimited("%s: FEC shard from peer %llu arrives before CAPS\n",
+				    peer->device->dev->name,
+				    peer->internal_id);
 	if (shard->m == 0) {
 		if (!shard->k || shard->k > rx->k)
 			invalid = true;
@@ -867,7 +882,6 @@ static struct uwg_fec_tx *uwg_fec_tx_alloc(struct uwg_peer *peer, u8 k, u8 m,
 	tx->k = k;
 	tx->m = m;
 	tx->adaptive = adaptive;
-	tx->block_id = 0;
 	spin_lock_init(&tx->lock);
 	timer_setup(&tx->timer, uwg_fec_tx_timeout, 0);
 	return tx;
@@ -923,39 +937,78 @@ static void uwg_fec_mark_resend(struct uwg_peer *peer)
 {
 	spin_lock_bh(&peer->caps.lock);
 	peer->caps.send_attempts = 0;
+	peer->caps.reply_attempts = 0;
 	peer->caps.next_send = 0;
 	WRITE_ONCE(peer->caps.resend, true);
 	spin_unlock_bh(&peer->caps.lock);
 }
 
-int uwg_peer_fec_sync(struct uwg_peer *peer)
+static bool uwg_fec_state_matches(struct uwg_peer *peer, bool want,
+				  u8 k, u8 m, bool adaptive)
 {
-	struct uwg_device *uwg = peer->device;
-	struct uwg_fec_tx *tx;
-	struct uwg_fec_rx *rx;
-	u8 k = 0, m = 0;
-	bool adaptive = false;
-	bool want;
+	struct uwg_fec_tx *tx = rcu_dereference_protected(peer->fec_tx, 1);
+	struct uwg_fec_rx *rx = rcu_dereference_protected(peer->fec_rx, 1);
 
-	want = uwg_fec_mode_config(READ_ONCE(uwg->fec_mode), &k, &m,
-				   &adaptive);
-	tx = rcu_dereference_protected(peer->fec_tx, 1);
-	rx = rcu_dereference_protected(peer->fec_rx, 1);
+	if (!want)
+		return !tx && !rx;
+	return tx && rx && tx->k == k && tx->m == m && rx->k == k &&
+	       rx->m == m && tx->adaptive == adaptive && rx->adaptive == adaptive;
+}
 
-	if (want && tx && rx && tx->k == k && tx->m == m &&
-	    rx->k == k && rx->m == m && tx->adaptive == adaptive &&
-	    rx->adaptive == adaptive)
-		return 0;
+/* Stop a tx/rx pair that has already been unpublished and followed by a
+ * synchronize_net(): in-flight readers may have armed its timers, so they
+ * can only be shut down once those readers are gone.
+ */
+static void uwg_fec_state_stop(struct uwg_fec_tx *tx, struct uwg_fec_rx *rx)
+{
+	if (tx) {
+		spin_lock_bh(&tx->lock);
+		tx->disabled = true;
+		spin_unlock_bh(&tx->lock);
+		timer_shutdown_sync(&tx->timer);
+		uwg_fec_tx_free(tx);
+	}
+	if (rx) {
+		spin_lock_bh(&rx->lock);
+		rx->disabled = true;
+		spin_unlock_bh(&rx->lock);
+		timer_shutdown_sync(&rx->timer);
+		uwg_fec_rx_free(rx);
+	}
+}
 
-	if (!want && !tx && !rx)
-		return 0;
+struct uwg_fec_sync_entry {
+	struct uwg_peer *peer;
+	struct uwg_fec_tx *old_tx, *tx;
+	struct uwg_fec_rx *old_rx, *rx;
+	bool fresh;
+};
 
-	uwg_peer_fec_release(peer);
-	uwg_fec_mark_resend(peer);
+/* Allocate the state for the requested profile without touching the live
+ * one. On -ENOMEM the peer keeps running with its previous tx/rx pair, so it
+ * still decodes exactly the profile CAPS advertised before the change.
+ */
+static int uwg_fec_state_prepare(struct uwg_peer *peer, bool want, u8 k,
+				 u8 m, bool adaptive,
+				 struct uwg_fec_sync_entry *entry)
+{
+	struct uwg_fec_tx *tx = rcu_dereference_protected(peer->fec_tx, 1);
+	struct uwg_fec_rx *rx = rcu_dereference_protected(peer->fec_rx, 1);
+
+	entry->peer = peer;
+	entry->old_tx = tx;
+	entry->old_rx = rx;
+	entry->tx = tx;
+	entry->rx = rx;
+	entry->fresh = false;
+
 	if (!want) {
-		uwg_ext_maybe_send_caps(peer);
+		entry->tx = NULL;
+		entry->rx = NULL;
 		return 0;
 	}
+	if (uwg_fec_state_matches(peer, want, k, m, adaptive))
+		return 0;
 
 	tx = uwg_fec_tx_alloc(peer, k, m, adaptive);
 	if (!tx)
@@ -965,23 +1018,137 @@ int uwg_peer_fec_sync(struct uwg_peer *peer)
 		uwg_fec_tx_free(tx);
 		return -ENOMEM;
 	}
-	rcu_assign_pointer(peer->fec_tx, tx);
-	rcu_assign_pointer(peer->fec_rx, rx);
+	entry->tx = tx;
+	entry->rx = rx;
+	entry->fresh = true;
+	return 0;
+}
+
+int uwg_peer_fec_sync(struct uwg_peer *peer)
+{
+	struct uwg_device *uwg = peer->device;
+	struct uwg_fec_sync_entry entry;
+	u8 k = 0, m = 0;
+	bool adaptive = false;
+	bool want;
+	int ret;
+
+	want = uwg_fec_mode_config(READ_ONCE(uwg->fec_mode), &k, &m,
+				   &adaptive);
+	ret = uwg_fec_state_prepare(peer, want, k, m, adaptive, &entry);
+	if (ret)
+		return ret;
+	if (entry.old_tx == entry.tx && entry.old_rx == entry.rx)
+		return 0;
+
+	rcu_assign_pointer(peer->fec_tx, entry.tx);
+	rcu_assign_pointer(peer->fec_rx, entry.rx);
+	uwg_fec_mark_resend(peer);
+	if (entry.old_tx || entry.old_rx) {
+		synchronize_net();
+		uwg_fec_state_stop(entry.old_tx, entry.old_rx);
+	}
 	uwg_ext_maybe_send_caps(peer);
 	return 0;
 }
 
-int uwg_peer_fec_sync_device(struct uwg_device *uwg)
+static bool uwg_fec_device_synced(struct uwg_device *uwg, bool want,
+				  u8 k, u8 m, bool adaptive)
 {
 	struct uwg_peer *peer;
+
+	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
+		if (!uwg_fec_state_matches(peer, want, k, m, adaptive))
+			return false;
+	}
+	return true;
+}
+
+int uwg_peer_fec_sync_device(struct uwg_device *uwg, u32 mode)
+{
+	struct uwg_fec_sync_entry *entries;
+	struct uwg_peer *peer;
+	unsigned int i, count = 0, n;
+	u8 k = 0, m = 0;
+	bool adaptive = false;
+	bool want;
 	int ret = 0;
 
 	lockdep_assert_held(&uwg->device_update_lock);
 
-	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
-		if (unlikely(uwg_peer_fec_sync(peer)))
-			ret = -ENOMEM;
+	want = uwg_fec_mode_config(mode, &k, &m, &adaptive);
+	if (!want && mode != UWG_FEC_MODE_OFF)
+		return -EINVAL;
+	if (uwg_fec_device_synced(uwg, want, k, m, adaptive)) {
+		WRITE_ONCE(uwg->fec_mode, mode);
+		return 0;
 	}
+
+	n = uwg->num_peers;
+	if (!n)
+		return 0;
+	entries = kvcalloc(n, sizeof(*entries), GFP_KERNEL);
+	if (!entries)
+		return -ENOMEM;
+
+	/* Prepare phase: allocate everything first. If any peer fails, the
+	 * live state is untouched and the caller can safely keep the old
+	 * fec_mode, so CAPS never promises a profile without a matching RX.
+	 */
+	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
+		if (WARN_ON_ONCE(count >= n)) {
+			ret = -EINVAL;
+			goto err_discard;
+		}
+		ret = uwg_fec_state_prepare(peer, want, k, m, adaptive,
+					    &entries[count]);
+		if (ret)
+			goto err_discard;
+		++count;
+	}
+
+	/* Commit phase: publish every prepared state, then wait out the old
+	 * readers once. Nothing can fail from here on.
+	 */
+	for (i = 0; i < count; ++i) {
+		struct uwg_fec_sync_entry *entry = &entries[i];
+
+		if (entry->old_tx == entry->tx && entry->old_rx == entry->rx)
+			continue;
+		rcu_assign_pointer(entry->peer->fec_tx, entry->tx);
+		rcu_assign_pointer(entry->peer->fec_rx, entry->rx);
+		uwg_fec_mark_resend(entry->peer);
+	}
+	/* Commit point: the new RX state is in place before CAPS starts
+	 * advertising it, so a peer can never send a profile we cannot decode.
+	 */
+	WRITE_ONCE(uwg->fec_mode, mode);
+	synchronize_net();
+	for (i = 0; i < count; ++i) {
+		struct uwg_fec_sync_entry *entry = &entries[i];
+
+		if (entry->old_tx == entry->tx && entry->old_rx == entry->rx)
+			continue;
+		uwg_fec_state_stop(entry->old_tx, entry->old_rx);
+	}
+	/* The caller advertises the committed profile: uwg_ext_caps_changed()
+	 * re-arms one CAPS burst per peer once fec_mode is visible. Sending here
+	 * as well would put two identical CAPS frames on the wire for a single
+	 * change and burn the retry budget twice. The committed per-peer state
+	 * must match what CAPS advertises.
+	 */
+	WARN_ON_ONCE(!uwg_fec_device_synced(uwg, want, k, m, adaptive));
+	kvfree(entries);
+	return 0;
+
+err_discard:
+	for (i = 0; i < count; ++i) {
+		if (!entries[i].fresh)
+			continue;
+		uwg_fec_tx_free(entries[i].tx);
+		uwg_fec_rx_free(entries[i].rx);
+	}
+	kvfree(entries);
 	return ret;
 }
 
@@ -999,20 +1166,7 @@ void uwg_peer_fec_release(struct uwg_peer *peer)
 	RCU_INIT_POINTER(peer->fec_tx, NULL);
 	RCU_INIT_POINTER(peer->fec_rx, NULL);
 	synchronize_net();
-	if (tx) {
-		spin_lock_bh(&tx->lock);
-		tx->disabled = true;
-		spin_unlock_bh(&tx->lock);
-		timer_shutdown_sync(&tx->timer);
-	}
-	if (rx) {
-		spin_lock_bh(&rx->lock);
-		rx->disabled = true;
-		spin_unlock_bh(&rx->lock);
-		timer_shutdown_sync(&rx->timer);
-	}
-	uwg_fec_tx_free(tx);
-	uwg_fec_rx_free(rx);
+	uwg_fec_state_stop(tx, rx);
 }
 
 void uwg_peer_fec_rcu_free(struct uwg_peer *peer)

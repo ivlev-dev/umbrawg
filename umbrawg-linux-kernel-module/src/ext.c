@@ -7,6 +7,7 @@
 #include "bbr.h"
 #include "fec.h"
 #include "fec_data.h"
+#include "timers.h"
 
 #include <linux/errno.h>
 #include <linux/jiffies.h>
@@ -256,10 +257,47 @@ void uwg_ext_caps_changed(struct uwg_device *uwg)
 		spin_lock_bh(&peer->caps.lock);
 		peer->caps.resend = true;
 		peer->caps.send_attempts = 0;
+		peer->caps.reply_attempts = 0;
 		peer->caps.next_send = 0;
 		spin_unlock_bh(&peer->caps.lock);
 		uwg_ext_maybe_send_caps(peer);
 	}
+}
+
+/* A new session key is a fresh negotiation epoch. CAPS frames sent under the
+ * previous keypair may have been dropped by the peer (it installs the new
+ * keypair only when it completes the handshake), so a spent attempt budget
+ * must not be allowed to keep the exchange silent after a rekey. This is the
+ * kernel counterpart of the userspace device re-arming CAPS on the same
+ * event.
+ */
+void uwg_ext_caps_keypair_changed(struct uwg_peer *peer)
+{
+	spin_lock_bh(&peer->caps.lock);
+	peer->caps.resend = true;
+	peer->caps.send_attempts = 0;
+	peer->caps.reply_attempts = 0;
+	peer->caps.next_send = 0;
+	spin_unlock_bh(&peer->caps.lock);
+}
+
+/* True when the decrypted packet starts with a well-formed extension header.
+ * Only used to notice that a peer still sends extension traffic while the
+ * extension is disabled locally.
+ */
+bool uwg_ext_peer_extension(const struct sk_buff *skb)
+{
+	u8 buf[UWG_EXT_HEADER_LEN];
+	const u8 *hdr = skb_header_pointer(skb, 0, sizeof(buf), buf);
+
+	return hdr && uwg_ext_detect(hdr, sizeof(buf));
+}
+
+void uwg_ext_caps_extension_seen(struct uwg_peer *peer)
+{
+	spin_lock_bh(&peer->caps.lock);
+	peer->caps.extension_seen = true;
+	spin_unlock_bh(&peer->caps.lock);
 }
 
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
@@ -267,31 +305,42 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 	struct uwg_ext_caps local;
 	u8 frame[UWG_EXT_MAX_FRAME_LEN];
 	ktime_t now;
+	bool revoke;
 	int len;
-
-	if (!uwg_ext_enabled(peer->device))
-		return;
 
 	now = ktime_get();
 	spin_lock_bh(&peer->caps.lock);
 	uwg_ext_local_caps(peer->device, &peer->caps.local);
-	if (!peer->caps.local.flags ||
-	    (peer->caps.peer_valid && !peer->caps.resend) ||
-	    peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS ||
+	/* With FEC and BBR both off there is nothing to advertise, but a peer
+	 * that still believes we run FEC keeps sending shards we no longer
+	 * parse. A zero CAPS retracts that stale advertisement: right away when
+	 * the local profile is switched off, and again while the peer actually
+	 * shows extension traffic. A silent tunnel therefore stays silent.
+	 */
+	revoke = !peer->caps.local.flags &&
+		 (peer->caps.extension_seen ||
+		  (peer->caps.resend && peer->caps.peer_valid &&
+		   (peer->caps.peer.flags & UWG_EXT_CAP_FEC)));
+	if ((!revoke && !peer->caps.local.flags) ||
+	    (!revoke && peer->caps.peer_valid && !peer->caps.resend) ||
+	    (!revoke &&
+	     peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS) ||
 	    (peer->caps.send_attempts &&
 	     ktime_before(now, peer->caps.next_send))) {
 		spin_unlock_bh(&peer->caps.lock);
 		return;
 	}
-	++peer->caps.send_attempts;
+	if (peer->caps.send_attempts < UWG_EXT_CAPS_MAX_ATTEMPTS)
+		++peer->caps.send_attempts;
 	peer->caps.resend = false;
+	peer->caps.extension_seen = false;
 	/* The very first CAPS frame races with the peer installing the new
 	 * keypair and can be lost. Retry quickly at first, then back off.
 	 */
 	peer->caps.next_send = ktime_add_ms(
-		now, peer->caps.send_attempts < UWG_EXT_CAPS_MAX_ATTEMPTS ?
-			     UWG_EXT_CAPS_FAST_RETRY_MS :
-			     UWG_EXT_CAPS_RETRY_MS);
+		now, revoke ||
+		peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS ?
+			     UWG_EXT_CAPS_RETRY_MS : UWG_EXT_CAPS_FAST_RETRY_MS);
 	local = peer->caps.local;
 	spin_unlock_bh(&peer->caps.lock);
 
@@ -390,7 +439,11 @@ static void uwg_ext_ack_armed(struct uwg_peer *peer)
 	deadline = READ_ONCE(peer->ack_state.ack_deadline);
 	if (time_before(deadline, jiffies + 1))
 		deadline = jiffies + 1;
-	timer_reduce(&peer->timer_send_ack, deadline);
+	/* Never touch the timer directly here: this runs from the NAPI poll,
+	 * which can overlap peer teardown. The helper repeats the is_dead/
+	 * netif_running check under rcu_read_lock_bh().
+	 */
+	uwg_timers_ack_reduce(peer, deadline);
 }
 
 void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce,
@@ -515,19 +568,33 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	peer->caps.last_peer_valid = true;
 	peer->caps.peer = caps;
 	peer->caps.peer_valid = true;
+	if (changed)
+		peer->caps.reply_attempts = 0;
 	/* Our own CAPS frame may have been sent before the peer installed the
 	 * new keypair and was lost. Hearing a new profile from the peer is a
-	 * good moment to (re)send ours, but an identical repeat must stay
-	 * silent: two kernels would otherwise answer each other forever.
+	 * good moment to (re)send ours.
 	 * send_attempts == 0 means we have not managed to send CAPS at all.
 	 */
 	if (changed || !peer->caps.send_attempts) {
-		if (peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
-			peer->caps.send_attempts = UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
+		peer->caps.resend = true;
+		peer->caps.next_send = 0;
+		send = true;
+	} else if (peer->caps.reply_attempts < UWG_EXT_CAPS_MAX_REPLIES) {
+		/* An identical repeat is not necessarily our own frame echoed
+		 * back: a re-created peer has no memory of the CAPS we sent
+		 * it, and if our earlier frame was lost it would keep dropping
+		 * every shard as dropped_disabled forever. Answer a bounded
+		 * number of repeats per received profile so the exchange always
+		 * converges, while two kernels still cannot answer each other
+		 * indefinitely.
+		 */
+		++peer->caps.reply_attempts;
 		peer->caps.resend = true;
 		peer->caps.next_send = 0;
 		send = true;
 	}
+	if (send && peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
+		peer->caps.send_attempts = UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
 	spin_unlock_bh(&peer->caps.lock);
 	if (send)
 		uwg_ext_maybe_send_caps(peer);

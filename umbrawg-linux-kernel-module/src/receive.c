@@ -582,6 +582,7 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 						    PACKET_CB(skb)->keypair))) {
 		uwg_timers_handshake_complete(peer);
 		uwg_packet_send_staged_packets(peer);
+		uwg_ext_caps_keypair_changed(peer);
 		uwg_ext_maybe_send_caps(peer);
 	}
 
@@ -593,6 +594,9 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 	/* Retry capability negotiation on any authenticated traffic: the first
 	 * CAPS frame may have raced the keypair installation on the peer.
 	 */
+	if (unlikely(!uwg_ext_enabled(peer->device)) &&
+	    uwg_ext_peer_extension(skb))
+		uwg_ext_caps_extension_seen(peer);
 	uwg_ext_maybe_send_caps(peer);
 	uwg_fec_adaptive_observe(peer, PACKET_CB(skb)->nonce);
 

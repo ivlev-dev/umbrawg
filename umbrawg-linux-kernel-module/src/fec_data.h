@@ -110,7 +110,7 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 		     bool use_napi);
 
 int uwg_peer_fec_sync(struct uwg_peer *peer);
-int uwg_peer_fec_sync_device(struct uwg_device *uwg);
+int uwg_peer_fec_sync_device(struct uwg_device *uwg, u32 mode);
 void uwg_peer_fec_release(struct uwg_peer *peer);
 void uwg_peer_fec_rcu_free(struct uwg_peer *peer);
 void uwg_fec_tx_free(struct uwg_fec_tx *tx);

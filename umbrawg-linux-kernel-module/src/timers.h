@@ -12,6 +12,8 @@ struct uwg_peer;
 
 void uwg_timers_init(struct uwg_peer *peer);
 void uwg_timers_stop(struct uwg_peer *peer);
+void uwg_timers_shutdown(struct uwg_peer *peer);
+void uwg_timers_ack_reduce(struct uwg_peer *peer, unsigned long expires);
 void uwg_timers_data_sent(struct uwg_peer *peer);
 void uwg_timers_data_received(struct uwg_peer *peer);
 void uwg_timers_any_authenticated_packet_sent(struct uwg_peer *peer);
