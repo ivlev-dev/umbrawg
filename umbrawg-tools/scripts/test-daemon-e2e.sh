@@ -391,6 +391,8 @@ KeepaliveTimeout = 10
 MaxHandshakeAttempts = 18
 RandomTrailers = on
 DisableCookies = off
+BBR = off
+FEC = off
 
 [Peer]
 PublicKey = $PEER1_PUB
