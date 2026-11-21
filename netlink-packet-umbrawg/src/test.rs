@@ -1154,6 +1154,7 @@ fn test_parse_fec_and_bbr_stats() {
         min_rtt_ns: 12_345,
         round_lost: 8,
         peers: 9,
+        peers_no_ack: 1,
     };
 
     let mut fec_buf = Vec::new();
@@ -1179,7 +1180,11 @@ fn test_parse_fec_and_bbr_stats() {
     ] {
         bbr_buf.extend_from_slice(&nla(kind, &value.to_le_bytes()));
     }
-    for (kind, value) in [(7u16, bbr.round_lost), (8, bbr.peers)] {
+    for (kind, value) in [
+        (7u16, bbr.round_lost),
+        (8, bbr.peers),
+        (9, bbr.peers_no_ack),
+    ] {
         bbr_buf.extend_from_slice(&nla(kind, &value.to_le_bytes()));
     }
 
@@ -1227,6 +1232,7 @@ fn test_fec_and_bbr_stats_roundtrip() {
                 min_rtt_ns: 5,
                 round_lost: u32::MAX,
                 peers: 0,
+                peers_no_ack: 3,
             }),
         ],
     };
@@ -1261,6 +1267,28 @@ fn test_stats_nested_attribute_unknown_fields_are_ignored() {
         vec![UmbrawgAttribute::FecStats(crate::FecStats {
             blocks_encoded: 7,
             ..crate::FecStats::default()
+        })]
+    );
+}
+
+#[test]
+fn test_bbr_stats_nested_unknown_fields_are_ignored() {
+    let mut bbr_buf = Vec::new();
+    bbr_buf.extend_from_slice(&nla(1, &[2]));
+    bbr_buf.extend_from_slice(&nla(8, &7u32.to_le_bytes()));
+    bbr_buf.extend_from_slice(&nla(9, &1u32.to_le_bytes()));
+    bbr_buf.extend_from_slice(&nla(99, &[1, 2, 3, 4]));
+    let raw = nla(39 | 0x8000, &bbr_buf);
+
+    let parsed =
+        UmbrawgMessage::parse_with_param(&raw, get_device_header()).unwrap();
+    assert_eq!(
+        parsed.attributes,
+        vec![UmbrawgAttribute::BbrStats(crate::BbrStats {
+            mode: 2,
+            peers: 7,
+            peers_no_ack: 1,
+            ..crate::BbrStats::default()
         })]
     );
 }

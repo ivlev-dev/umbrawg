@@ -1,9 +1,43 @@
 use std::net::SocketAddr;
 
-use netlink_packet_umbrawg::BbrStats;
 use umbrawg_config::{
     AllowedIp, Cipher, Config, DeviceConfig, Key, ObfuscationConfig, PeerConfig, U16Range,
 };
+
+/// Device-wide BBR state.
+///
+/// Matches the kernel netlink aggregate. `peers_no_ack` counts peers that do
+/// not advertise ACK support in CAPS; BBR is not applied to them and they are
+/// excluded from the aggregates. The userspace daemon reports zero until it
+/// tracks the same gate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BbrStats {
+    pub mode: u8,
+    pub cwnd: u64,
+    pub inflight: u64,
+    pub pacing_rate: u64,
+    pub btl_bw: u64,
+    pub min_rtt_ns: u64,
+    pub round_lost: u32,
+    pub peers: u32,
+    pub peers_no_ack: u32,
+}
+
+impl From<netlink_packet_umbrawg::BbrStats> for BbrStats {
+    fn from(stats: netlink_packet_umbrawg::BbrStats) -> Self {
+        Self {
+            mode: stats.mode,
+            cwnd: stats.cwnd,
+            inflight: stats.inflight,
+            pacing_rate: stats.pacing_rate,
+            btl_bw: stats.btl_bw,
+            min_rtt_ns: stats.min_rtt_ns,
+            round_lost: stats.round_lost,
+            peers: stats.peers,
+            peers_no_ack: stats.peers_no_ack,
+        }
+    }
+}
 
 /// Device-wide FEC counters.
 ///

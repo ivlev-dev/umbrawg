@@ -204,3 +204,10 @@ pub const UWGDEVICE_BBR_STATS_A_ROUND_LOST: u16 = 7;
 
 /// `UWGDEVICE_BBR_STATS_A_PEERS`: `u32` number of peers tracked by BBR.
 pub const UWGDEVICE_BBR_STATS_A_PEERS: u16 = 8;
+
+/// `UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK`: `u32` number of peers that do not
+/// advertise ACK support in CAPS.
+///
+/// BBR is not applied to these peers and their state is excluded from the
+/// aggregates above.
+pub const UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK: u16 = 9;

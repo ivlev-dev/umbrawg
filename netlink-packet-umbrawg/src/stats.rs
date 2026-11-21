@@ -27,8 +27,8 @@ use crate::{
         UWGDEVICE_BBR_STATS_A_BTL_BW, UWGDEVICE_BBR_STATS_A_CWND,
         UWGDEVICE_BBR_STATS_A_INFLIGHT, UWGDEVICE_BBR_STATS_A_MIN_RTT_NS,
         UWGDEVICE_BBR_STATS_A_MODE, UWGDEVICE_BBR_STATS_A_PACING_RATE,
-        UWGDEVICE_BBR_STATS_A_PEERS, UWGDEVICE_BBR_STATS_A_ROUND_LOST,
-        UWGDEVICE_FEC_STATS_A_BLOCKS_DECODED,
+        UWGDEVICE_BBR_STATS_A_PEERS, UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK,
+        UWGDEVICE_BBR_STATS_A_ROUND_LOST, UWGDEVICE_FEC_STATS_A_BLOCKS_DECODED,
         UWGDEVICE_FEC_STATS_A_BLOCKS_ENCODED,
         UWGDEVICE_FEC_STATS_A_DECODE_FAIL,
         UWGDEVICE_FEC_STATS_A_DROPPED_BOUNDS,
@@ -209,11 +209,16 @@ pub struct BbrStats {
     pub round_lost: u32,
     /// Number of peers tracked by BBR.
     pub peers: u32,
+    /// Number of peers that do not advertise ACK support in CAPS.
+    ///
+    /// BBR is not applied to these peers and their state is not part of the
+    /// aggregates above.
+    pub peers_no_ack: u32,
 }
 
 impl Nla for BbrStats {
     fn value_len(&self) -> usize {
-        nla_len(1) + 5 * nla_len(8) + 2 * nla_len(4)
+        nla_len(1) + 5 * nla_len(8) + 3 * nla_len(4)
     }
 
     fn kind(&self) -> u16 {
@@ -240,6 +245,7 @@ impl Nla for BbrStats {
         for (kind, value) in [
             (UWGDEVICE_BBR_STATS_A_ROUND_LOST, self.round_lost),
             (UWGDEVICE_BBR_STATS_A_PEERS, self.peers),
+            (UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK, self.peers_no_ack),
         ] {
             emit_nla(buffer, &mut offset, kind, &value.to_le_bytes());
         }
@@ -296,6 +302,11 @@ impl<T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&T>> for BbrStats {
                 UWGDEVICE_BBR_STATS_A_PEERS => {
                     stats.peers = parse_u32(payload)
                         .context("invalid UWGDEVICE_BBR_STATS_A_PEERS value")?;
+                }
+                UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK => {
+                    stats.peers_no_ack = parse_u32(payload).context(
+                        "invalid UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK value",
+                    )?;
                 }
                 _ => {}
             }

@@ -582,7 +582,7 @@ fn show_reports_daemon_bbr_and_fec_stats() {
     let response = "listen_port=51820\n\
                     bbr_stats=1\nbbr_mode=monitor\nbbr_cwnd=131072\nbbr_inflight=4096\n\
                     bbr_pacing_rate=1000000\nbbr_btl_bw=2000000\nbbr_min_rtt_ns=12345\n\
-                    bbr_round_lost=8\nbbr_peers=1\n\
+                    bbr_round_lost=8\nbbr_peers=1\nbbr_peers_no_ack=1\n\
                     fec_stats=1\nfec_blocks_encoded=10\nfec_shards_sent=12\n\
                     fec_blocks_decoded=9\nfec_packets_recovered=1\nfec_decode_fail=2\n\
                     fec_dropped_bounds=3\nfec_dropped_disabled=4\nfec_dropped_control=5\nerrno=0\n\n";
@@ -593,7 +593,7 @@ fn show_reports_daemon_bbr_and_fec_stats() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf-8"),
         "mode=monitor\ncwnd=131072\ninflight=4096\npacing_rate=1000000\nbtl_bw=2000000\n\
-         min_rtt_ns=12345\nround_lost=8\npeers=1\n"
+         min_rtt_ns=12345\nround_lost=8\npeers=1\npeers_no_ack=1\n"
     );
 
     let output = run(&directory, &["show", "uwg0", "fec-stats"]);

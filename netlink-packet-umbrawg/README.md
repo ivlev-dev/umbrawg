@@ -155,12 +155,22 @@ In addition to standard WireGuard attributes (`PrivateKey`, `PublicKey`, `Peers`
 | `Fec(u32)` | `UWGDEVICE_A_FEC` (37): `0` off, `1` adaptive, иначе `(K << 8) \| M` с `1 <= K <= 8`, `1 <= M <= 2`. Builders use `FecMode` |
 | `UnderlayMtu(u16)` | `UWGDEVICE_A_UNDERLAY_MTU` (40): MTU пути, `576..=65535`, по умолчанию `1500`; при FEC из него выводятся MTU интерфейса и бюджет шарда |
 | `FecStats(FecStats)` | `UWGDEVICE_A_FEC_STATS` (38, nested): `blocks_encoded`, `shards_sent`, `blocks_decoded`, `packets_recovered`, `decode_fail`, `dropped_bounds`, `dropped_disabled` |
-| `BbrStats(BbrStats)` | `UWGDEVICE_A_BBR_STATS` (39, nested): `mode`, `cwnd`, `inflight`, `pacing_rate`, `btl_bw`, `min_rtt_ns`, `round_lost`, `peers` |
+| `BbrStats(BbrStats)` | `UWGDEVICE_A_BBR_STATS` (39, nested): `mode`, `cwnd`, `inflight`, `pacing_rate`, `btl_bw`, `min_rtt_ns`, `round_lost`, `peers`, `peers_no_ack` (пиры без ACK в CAPS; BBR к ним не применяется и в агрегаты не входят) |
 
 `FecStats`/`BbrStats` приходят только в ответе `GET_DEVICE` и не
 отправляются в `SET_DEVICE`. `ExtraPorts = 0` — дефолт: один сокет на
 воркера; включайте дополнительные порты только в сетях без
 port-restricted NAT.
+
+`BbrStats::peers_no_ack` — вложенный атрибут 9: пиры, не подтвердившие
+`ACK` в CAPS. BBR к ним не применяется, их состояние не входит в
+`cwnd`/`inflight`/`pacing_rate`-агрегаты.
+
+Partial FEC parity не добавляет netlink-атрибутов: это CAPS-флаг
+`FEC_PARTIAL` (бит 4). При включённом FEC обе стороны его анонсируют, и
+неполный блок несёт `k' = n`, `m' = m` (data + parity); пир без флага
+получает legacy `m' = 0`. RX принимает `k' <= k`, `m' <= m`,
+`k' + m' <= k + m` и всегда принимает `m' = 0`.
 
 Peer attributes: `PersistentKeepalive(u16)` is the pre-3.0 wire format, while
 UmbraWG 3.0 sends a `u32` (packed `u16` range), parsed into

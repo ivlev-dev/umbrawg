@@ -799,6 +799,7 @@ fn bbr_stats_text(stats: &BbrStats, prefix: &str) -> String {
         ("min_rtt_ns", stats.min_rtt_ns.to_string()),
         ("round_lost", stats.round_lost.to_string()),
         ("peers", stats.peers.to_string()),
+        ("peers_no_ack", stats.peers_no_ack.to_string()),
     ] {
         let _ = writeln!(output, "{prefix}{name}={value}");
     }
@@ -940,6 +941,7 @@ mod tests {
             min_rtt_ns: 12_345,
             round_lost: 8,
             peers: 1,
+            peers_no_ack: 2,
         });
         device.fec_stats = Some(FecStats {
             blocks_encoded: 10,
@@ -1016,7 +1018,7 @@ mod tests {
         let device = sample_device();
         assert_eq!(
             ugly(&device, "bbr-stats", false).expect("valid"),
-            "mode=on\ncwnd=131072\ninflight=4096\npacing_rate=1000000\nbtl_bw=2000000\nmin_rtt_ns=12345\nround_lost=8\npeers=1\n"
+            "mode=on\ncwnd=131072\ninflight=4096\npacing_rate=1000000\nbtl_bw=2000000\nmin_rtt_ns=12345\nround_lost=8\npeers=1\npeers_no_ack=2\n"
         );
         assert_eq!(
             ugly(&device, "fec-stats", false).expect("valid"),

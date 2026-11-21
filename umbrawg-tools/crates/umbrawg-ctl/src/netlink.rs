@@ -423,7 +423,9 @@ impl DeviceBuilder {
                 UmbrawgAttribute::UnderlayMtu(value) => {
                     self.device.underlay_mtu = Some(*value);
                 }
-                UmbrawgAttribute::BbrStats(value) => self.device.bbr_stats = Some(*value),
+                UmbrawgAttribute::BbrStats(value) => {
+                    self.device.bbr_stats = Some((*value).into());
+                }
                 UmbrawgAttribute::FecStats(value) => {
                     self.device.fec_stats = Some((*value).into());
                 }
@@ -1292,7 +1294,7 @@ mod tests {
             dropped_bounds: 6,
             dropped_disabled: 7,
         };
-        let bbr = crate::BbrStats {
+        let kernel_bbr = netlink_packet_umbrawg::BbrStats {
             mode: 2,
             cwnd: 131_072,
             inflight: 4096,
@@ -1301,12 +1303,13 @@ mod tests {
             min_rtt_ns: 12_345,
             round_lost: 8,
             peers: 1,
+            peers_no_ack: 2,
         };
         let mut builder = DeviceBuilder::new("test0");
         builder
             .apply(&[
                 UmbrawgAttribute::FecStats(kernel_fec),
-                UmbrawgAttribute::BbrStats(bbr),
+                UmbrawgAttribute::BbrStats(kernel_bbr),
             ])
             .expect("apply");
         let device = builder.finish();
@@ -1317,7 +1320,13 @@ mod tests {
             0,
             "the kernel has no dropped_control counter"
         );
-        assert_eq!(device.bbr_stats, Some(bbr));
+        let expected = crate::BbrStats::from(kernel_bbr);
+        assert_eq!(device.bbr_stats, Some(expected));
+        assert_eq!(
+            device.bbr_stats.expect("stats").peers_no_ack,
+            2,
+            "the kernel reports the ACK-gated peers"
+        );
     }
 
     #[test]

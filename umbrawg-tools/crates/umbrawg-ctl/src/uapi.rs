@@ -2,13 +2,12 @@ use std::fmt::Write as _;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-use netlink_packet_umbrawg::BbrStats;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use umbrawg_config::{format_endpoint, parse_endpoint, AllowedIp, Cipher, Key, U16Range, U32Range};
 
 use crate::error::Error;
-use crate::model::{Device, FecStats, Peer, SetDevice};
+use crate::model::{BbrStats, Device, FecStats, Peer, SetDevice};
 
 pub const DEFAULT_SOCKET_DIR: &str = "/var/run/umbrawg";
 pub const SOCKET_SUFFIX: &str = ".sock";
@@ -346,6 +345,12 @@ fn apply_device_line(device: &mut Device, key: &str, value: &str) -> Result<(), 
         }
         "bbr_peers" => {
             device.bbr_stats.get_or_insert_with(BbrStats::default).peers = parse_u32(key, value)?;
+        }
+        "bbr_peers_no_ack" => {
+            device
+                .bbr_stats
+                .get_or_insert_with(BbrStats::default)
+                .peers_no_ack = parse_u32(key, value)?;
         }
         "fec_stats" => device.fec_stats = Some(FecStats::default()),
         "fec_blocks_encoded" => {
@@ -690,6 +695,7 @@ bbr_btl_bw=2000000
 bbr_min_rtt_ns=12345
 bbr_round_lost=8
 bbr_peers=1
+bbr_peers_no_ack=2
 fec_stats=1
 fec_blocks_encoded=10
 fec_shards_sent=12
@@ -780,6 +786,7 @@ errno=0
                 min_rtt_ns: 12_345,
                 round_lost: 8,
                 peers: 1,
+                peers_no_ack: 2,
             })
         );
         assert_eq!(
