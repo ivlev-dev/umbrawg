@@ -1,6 +1,7 @@
 //! Peer-level protocol extension: capabilities, ACK feedback, BBRv3 and FEC.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use log::warn;
@@ -24,6 +25,8 @@ const CAPS_SLOW_RETRY: Duration = Duration::from_secs(2);
 /// Revoking at most once per two seconds bounds the reply rate while the peer
 /// keeps showing extension traffic.
 const CAPS_REVOKE_INTERVAL: Duration = Duration::from_secs(2);
+/// Minimum spacing between two "unsupported peer FEC profile" warnings.
+const CAPS_WARN_INTERVAL: Duration = Duration::from_secs(5);
 
 /// Largest FEC `k` the data plane implements; larger peer profiles are ignored.
 const MAX_PEER_FEC_K: u8 = 8;
@@ -32,8 +35,16 @@ const MAX_PEER_FEC_M: u8 = 2;
 
 /// Minimum number of counters one adaptive FEC window must span.
 const ADAPTIVE_WINDOW_MIN: u64 = 256;
-/// A gap larger than this is treated as a counter restart, not as loss.
+/// Largest window before its counters are treated as a restart, not loss.
+const ADAPTIVE_WINDOW_MAX: u64 = 1 << 24;
+/// A backward jump larger than this is a counter restart, not reordering.
 const ADAPTIVE_GAP_MAX: u64 = 1 << 20;
+/// How long a window stays open so reordered counters can still fill it.
+///
+/// Mirrors `UWG_FEC_ADAPTIVE_SETTLE_JIFFIES = HZ` in `fec_data.c`: evaluating
+/// on the packet count alone closed the window a few hundred microseconds
+/// after a gap opened, so 25 % reordering on a fast link looked like loss.
+const ADAPTIVE_SETTLE_TIME: Duration = Duration::from_secs(1);
 /// Total window length before the first window is judged.
 const ADAPTIVE_OBSERVE_MIN: u64 = 1024;
 /// Loss ratio (in 1/65536 units) that switches adaptive parity on (~1 %).
@@ -448,11 +459,12 @@ impl FrameKind {
 
 /// Loss estimator for adaptive FEC.
 ///
-/// Mirrors the kernel implementation: counters are grouped into windows of at
-/// least [`ADAPTIVE_WINDOW_MIN`] received sequence numbers, the per-window
-/// loss ratio is smoothed with an EWMA (`(old * 3 + new) / 4`) in 1/65536
-/// units, and implausible gaps restart the window instead of poisoning the
-/// estimate.
+/// Mirrors the kernel implementation in `fec_data.c`: counters are grouped
+/// into windows of at least [`ADAPTIVE_WINDOW_MIN`] received sequence numbers,
+/// a window is only judged after [`ADAPTIVE_SETTLE_TIME`] so reordered
+/// counters still arrive and fill it, the per-window loss ratio is smoothed
+/// with an EWMA (`(old * 3 + new) / 4`) in 1/65536 units, and implausible
+/// gaps restart the window instead of poisoning the estimate.
 #[derive(Clone, Copy, Debug, Default)]
 struct LossWindow {
     valid: bool,
@@ -461,10 +473,15 @@ struct LossWindow {
     received: u64,
     observed: u64,
     loss_q16: u32,
+    segment_start: Option<Instant>,
+    /// Increments whenever the window is restarted, so the peer can drop a
+    /// stale clean-time reference like the kernel does.
+    epoch: u32,
 }
 
 impl LossWindow {
-    fn reset(&mut self, counter: u64) {
+    fn reset(&mut self, counter: u64, now: Instant) {
+        let epoch = self.epoch.wrapping_add(1);
         *self = Self {
             valid: true,
             largest: counter,
@@ -472,23 +489,27 @@ impl LossWindow {
             received: 1,
             observed: 0,
             loss_q16: 0,
+            segment_start: Some(now),
+            epoch,
         };
     }
 
     /// Feeds one received counter; returns `true` when a window was closed.
-    fn observe(&mut self, counter: u64) -> bool {
+    fn observe(&mut self, counter: u64, now: Instant) -> bool {
         if !self.valid {
-            self.reset(counter);
+            self.reset(counter, now);
             return false;
         }
         if counter < self.base {
             // Small backward jumps are reordering; a huge one is a new
             // counter space, for example after a peer restart.
             if self.base.saturating_sub(counter) > ADAPTIVE_GAP_MAX {
-                self.reset(counter);
+                self.reset(counter, now);
             }
             return false;
         }
+        // A late counter inside the open window is counted here: the window
+        // is not closed until it had time to settle.
         if counter > self.largest {
             self.largest = counter;
         }
@@ -497,17 +518,34 @@ impl LossWindow {
         if expected < ADAPTIVE_WINDOW_MIN {
             return false;
         }
-        if expected > ADAPTIVE_GAP_MAX {
+        if expected > ADAPTIVE_WINDOW_MAX {
+            // A counter jump this large is a restart, not loss: drop the
+            // segment instead of turning it into a bogus estimate.
             self.base = self.largest.saturating_add(1);
             self.received = 0;
+            self.segment_start = Some(now);
+            return false;
+        }
+        if !self
+            .segment_start
+            .is_some_and(|start| now.saturating_duration_since(start) >= ADAPTIVE_SETTLE_TIME)
+        {
             return false;
         }
         let lost = expected.saturating_sub(self.received);
         let sample = u32::try_from(lost.saturating_mul(65_536) / expected).unwrap_or(u32::MAX);
-        self.loss_q16 = (self.loss_q16.saturating_mul(3).saturating_add(sample)) / 4;
+        // Kernel semantics: seed the estimate with the first sample, then
+        // smooth it. Seeding as `(0 * 3 + sample) / 4` would hide the first
+        // few windows below the switch-on threshold.
+        if self.loss_q16 == 0 {
+            self.loss_q16 = sample;
+        } else {
+            self.loss_q16 = (self.loss_q16.saturating_mul(3).saturating_add(sample)) / 4;
+        }
         self.observed = self.observed.saturating_add(expected);
         self.base = self.largest.saturating_add(1);
         self.received = 0;
+        self.segment_start = Some(now);
         true
     }
 }
@@ -565,10 +603,15 @@ enum ControlPayload {
 }
 
 /// One encoded control frame waiting for transmission.
+///
+/// The payload sits behind an [`Arc`]: [`PeerExtension::pending_control`]
+/// hands the frame to the caller without removing it from the queue, so a
+/// clone must not copy a full-size FEC shard. Confirmation
+/// ([`PeerExtension::note_frame_sent`]) removes the queued original.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ControlFrame {
     kind: ControlKind,
-    payload: ControlPayload,
+    payload: Arc<ControlPayload>,
 }
 
 impl ControlFrame {
@@ -581,7 +624,7 @@ impl ControlFrame {
         }
         Some(Self {
             kind,
-            payload: ControlPayload::Inline { bytes, len },
+            payload: Arc::new(ControlPayload::Inline { bytes, len }),
         })
     }
 
@@ -589,7 +632,7 @@ impl ControlFrame {
     fn owned(kind: ControlKind, bytes: Vec<u8>) -> Self {
         Self {
             kind,
-            payload: ControlPayload::Owned(bytes),
+            payload: Arc::new(ControlPayload::Owned(bytes)),
         }
     }
 
@@ -597,8 +640,18 @@ impl ControlFrame {
         self.kind
     }
 
+    /// Returns `true` when both handles refer to the same queued frame.
+    ///
+    /// [`PeerExtension::pending_control`] hands out `Arc` clones, so a frame
+    /// pushed back after an aborted flush is pointer-identical to the queued
+    /// original. Value equality would mistake a new identical frame for that
+    /// requeue.
+    fn is_same_frame(&self, other: &Self) -> bool {
+        self.kind == other.kind && Arc::ptr_eq(&self.payload, &other.payload)
+    }
+
     pub(crate) fn bytes(&self) -> &[u8] {
-        match &self.payload {
+        match self.payload.as_ref() {
             ControlPayload::Inline { bytes, len } => &bytes[..usize::from(*len)],
             ControlPayload::Owned(bytes) => bytes.as_slice(),
         }
@@ -911,15 +964,13 @@ pub(crate) struct PeerExtension {
     adaptive_clean_since: Option<Instant>,
     fec_deadline: Option<Instant>,
     jitter: Jitter,
-    pending: VecDeque<ControlFrame>,
-    /// Frames handed to a control flush that have not been confirmed sent.
+    /// Single control queue, bounded by [`CONTROL_QUEUE_CAPACITY`].
     ///
-    /// [`Self::pending_control`] drains the queue so the caller can encrypt
-    /// every frame, but a flush can abort on a missing endpoint or keypair.
-    /// The drained copies are kept here until [`Self::note_frame_sent`]
-    /// confirms each one; whatever is left is restored to `pending` on the
-    /// next flush, so no frame is ever lost without being counted.
-    control_lease: VecDeque<ControlFrame>,
+    /// Frames are removed only when [`Self::note_frame_sent`] confirms them,
+    /// so an aborted flush needs no second copy and cannot double the limit.
+    pending: VecDeque<ControlFrame>,
+    /// Last time an unsupported peer FEC profile was logged.
+    caps_warn_last: Option<Instant>,
     bbr_queue: BbrQueue,
     last_ack_largest: Option<u64>,
 }
@@ -956,7 +1007,7 @@ impl PeerExtension {
             fec_deadline: None,
             jitter: Jitter::seeded(),
             pending: VecDeque::new(),
-            control_lease: VecDeque::new(),
+            caps_warn_last: None,
             bbr_queue: BbrQueue::new(),
             last_ack_largest: None,
         };
@@ -1000,7 +1051,7 @@ impl PeerExtension {
         // FEC just before our revocation.
         let caps_changed = self.local_caps != previous.local_caps()
             || config.fec_profile() != previous.fec_profile();
-        if caps_changed {
+        if caps_changed || self.local_caps.bits() == 0 {
             self.pending
                 .retain(|frame| frame.kind() != ControlKind::Caps);
         }
@@ -1126,15 +1177,23 @@ impl PeerExtension {
 
     /// Feeds one received counter to the adaptive loss estimator.
     ///
-    /// The estimator follows the kernel: a window closes after at least 256
-    /// counters, the loss ratio is an EWMA, parity is switched on above 1 %
-    /// once 1024 counters were observed and off below 0.2 % after five clean
-    /// seconds.
+    /// The estimator follows the kernel: a window stays open for one second
+    /// after it started so reordered counters still fill it, then closes after
+    /// at least 256 counters. The loss ratio is an EWMA; parity is switched on
+    /// above 1 % once 1024 counters were observed and off below 0.2 % after
+    /// five clean seconds.
     fn observe_adaptive(&mut self, counter: u64, now: Instant) {
         if self.config.fec != FecMode::Adaptive {
             return;
         }
-        if !self.loss.observe(counter) {
+        let epoch = self.loss.epoch;
+        if !self.loss.observe(counter, now) {
+            if self.loss.epoch != epoch {
+                // The kernel clears `adaptive_clean_since` on a window reset;
+                // otherwise a stale clean time could switch parity off right
+                // after a peer restart.
+                self.adaptive_clean_since = None;
+            }
             return;
         }
         if !self.fec_active {
@@ -1149,6 +1208,10 @@ impl PeerExtension {
             if now.saturating_duration_since(since) >= ADAPTIVE_CLEAN_TIME {
                 self.fec_active = false;
                 self.adaptive_clean_since = None;
+                // The kernel drops the stale estimate here, so switching on
+                // again later needs a fresh 1024-counter observation.
+                self.loss.observed = 0;
+                self.loss.loss_q16 = 0;
                 // Do not strand a partially filled block: emit it before
                 // parity generation stops.
                 self.flush_encoder_frames();
@@ -1302,6 +1365,38 @@ impl PeerExtension {
         }
     }
 
+    /// Releases a locally discarded datagram from the BBR accounting.
+    ///
+    /// The datagram was registered with [`PeerExtension::on_send`] but the
+    /// send path refused it. Its bytes leave the window without being counted
+    /// as a path loss.
+    pub(crate) fn on_drop_bytes(&mut self, bytes: usize) {
+        if let Some(bbr) = self.bbr.as_mut() {
+            bbr.on_drop_bytes(bytes);
+        }
+    }
+
+    /// Earliest deadline owned by the extension: a pending ACK timeout or a
+    /// partially filled FEC block that must be flushed.
+    ///
+    /// The daemon uses it to size its poll timeout, so feedback leaves within
+    /// the 0.5..=5 ms cadence instead of a 10 ms tick.
+    pub(crate) fn next_deadline(&self, now: Instant) -> Option<Instant> {
+        let ack = if self.ack.received_since > 0 {
+            self.ack
+                .last_sent
+                .map(|sent| sent + self.ack.timeout)
+                .or(Some(now))
+        } else {
+            None
+        };
+        match (ack, self.fec_deadline) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (Some(deadline), None) | (None, Some(deadline)) => Some(deadline),
+            (None, None) => None,
+        }
+    }
+
     pub(crate) fn bbr_stats(&self) -> Option<BbrStats> {
         self.bbr.as_ref().map(Bbr::stats)
     }
@@ -1398,12 +1493,47 @@ impl PeerExtension {
         self.caps_seen = None;
     }
 
+    /// Rejects a peer FEC profile the data plane cannot decode.
+    ///
+    /// Mirrors the kernel: a `k` or `m` beyond the implemented maximum is not
+    /// an error, the peer simply must never be matched. Dropping the FEC flags
+    /// keeps both sides from negotiating a profile one of them would discard.
+    /// The complaint is rate-limited like `net_dbg_ratelimited`, because a
+    /// peer repeating an unsupported CAPS would otherwise flood the log.
+    fn sanitize_peer_caps(&mut self, caps: &mut Caps, now: Instant) {
+        if !caps.flags.contains(CapsFlags::FEC) {
+            return;
+        }
+        if caps.fec_k >= 1
+            && caps.fec_k <= MAX_PEER_FEC_K
+            && caps.fec_m >= 1
+            && caps.fec_m <= MAX_PEER_FEC_M
+        {
+            return;
+        }
+        if self
+            .caps_warn_last
+            .is_none_or(|last| now.saturating_duration_since(last) >= CAPS_WARN_INTERVAL)
+        {
+            warn!(
+                "peer advertised unsupported FEC {}:{}; ignoring FEC",
+                caps.fec_k, caps.fec_m
+            );
+            self.caps_warn_last = Some(now);
+        }
+        caps.flags = CapsFlags::from_bits(
+            caps.flags.bits() & !(CapsFlags::FEC.bits() | CapsFlags::FEC_ADAPTIVE.bits()),
+        );
+        caps.fec_k = 0;
+        caps.fec_m = 0;
+    }
+
     pub(crate) fn handle_caps(&mut self, mut caps: Caps, now: Instant) {
         // Evidence is what the peer actually advertised, before our profile
         // sanitization: even an unsupported FEC shape still shows a stale
         // advertisement that a zero CAPS must retract.
         let peer_has_extensions = caps.flags.bits() != 0 || caps.fec_k != 0 || caps.fec_m != 0;
-        sanitize_peer_caps(&mut caps);
+        self.sanitize_peer_caps(&mut caps, now);
         let changed = self.caps_seen != Some(caps);
         self.caps_seen = Some(caps);
         self.peer_caps = caps.flags;
@@ -1474,7 +1604,7 @@ impl PeerExtension {
         if let Some(frame) =
             ControlFrame::inline(ControlKind::Caps, |output| caps.encode(output).ok())
         {
-            self.pending.push_back(frame);
+            self.enqueue_control_back(frame);
         }
     }
 
@@ -1509,18 +1639,24 @@ impl PeerExtension {
         if let Some(frame) =
             ControlFrame::inline(ControlKind::Caps, |output| caps.encode(output).ok())
         {
-            self.pending.push_back(frame);
+            // The retraction must leave before any stale shard or CAPS still
+            // queued from the previous profile.
+            self.enqueue_control_front(frame);
         }
     }
 
     /// Accounts for one transmitted control frame.
+    ///
+    /// The frame is removed from the queue only here. If the flush aborted
+    /// before sending it, [`Self::push_control`] finds it still at the front
+    /// and leaves it queued for the next flush.
     ///
     /// Only a CAPS frame spends an attempt: ACK frames share the control
     /// path but must never exhaust the CAPS budget. A zero CAPS is a
     /// revocation rather than a negotiation attempt, so it only advances the
     /// revocation rate limiter.
     pub(crate) fn note_frame_sent(&mut self, kind: ControlKind, now: Instant) {
-        if let Some(frame) = self.control_lease.pop_front() {
+        if let Some(frame) = self.pending.pop_front() {
             debug_assert_eq!(frame.kind(), kind);
         }
         if kind != ControlKind::Caps {
@@ -1544,8 +1680,6 @@ impl PeerExtension {
     }
 
     pub(crate) fn pending_control(&mut self, now: Instant) -> Vec<ControlFrame> {
-        // Frames from a flush that aborted before sending them are still ours.
-        self.restore_control_lease();
         // Producing new CAPS/ACK frames needs our advertised capabilities.
         // Frames that already sit in the queue, however, must always leave:
         // an encoder flushed right before FEC was turned off would otherwise
@@ -1556,58 +1690,66 @@ impl PeerExtension {
                 if let Some(frame) =
                     ControlFrame::inline(ControlKind::Ack, |output| ack.encode(output).ok())
                 {
-                    self.pending.push_back(frame);
+                    self.enqueue_control_back(frame);
                 }
             }
         } else {
             self.request_revocation(now);
         }
-        let frames: Vec<ControlFrame> = self.pending.drain(..).collect();
-        // Keep one copy until the caller confirms each send. `note_frame_sent`
-        // pops the matching front; a flush that aborts via `push_control`
-        // restores the rest instead of dropping it.
-        self.control_lease = frames.iter().cloned().collect();
-        frames
+        // The queue keeps ownership until `note_frame_sent` confirms a send.
+        // Cloning a frame only bumps an `Arc`; the bound stays
+        // `CONTROL_QUEUE_CAPACITY` instead of doubling with a lease copy.
+        self.pending.iter().cloned().collect()
     }
 
-    /// Puts frames from an unconfirmed flush back in front of the queue.
-    fn restore_control_lease(&mut self) {
-        if self.control_lease.is_empty() {
+    /// Appends a newly generated frame, enforcing the single explicit limit.
+    fn enqueue_control_back(&mut self, frame: ControlFrame) {
+        if self.pending.len() < CONTROL_QUEUE_CAPACITY {
+            self.pending.push_back(frame);
             return;
         }
-        let mut restored = std::mem::take(&mut self.control_lease);
-        restored.append(&mut self.pending);
-        self.pending = restored;
+        self.count_control_drop();
+        warn!(
+            "dropping {:?} control frame: the per-peer queue is full",
+            frame.kind()
+        );
+    }
+
+    /// Puts a revocation at the front, evicting the newest tail frame if full.
+    fn enqueue_control_front(&mut self, frame: ControlFrame) {
+        if self.pending.len() >= CONTROL_QUEUE_CAPACITY {
+            if let Some(dropped) = self.pending.pop_back() {
+                self.count_control_drop();
+                warn!(
+                    "dropping {:?} control frame: the revocation needs the queue",
+                    dropped.kind()
+                );
+            }
+        }
+        self.pending.push_front(frame);
     }
 
     pub(crate) fn push_control(&mut self, frame: ControlFrame) {
-        if self.control_lease.front() == Some(&frame) {
-            // The flush failed on this frame and stopped. Every remaining
-            // leased frame is still unsent; put all of them back in order
-            // ahead of anything queued in the meantime.
-            let mut restored = std::mem::take(&mut self.control_lease);
-            restored.append(&mut self.pending);
-            self.pending = restored;
+        if self
+            .pending
+            .front()
+            .is_some_and(|front| front.is_same_frame(&frame))
+        {
+            // The flush failed on this frame and stopped. Nothing was removed
+            // when it was handed out, so the frame and the whole tail stay
+            // queued in order for the next flush.
             return;
         }
-        if self.pending.len() < CONTROL_QUEUE_CAPACITY {
-            self.pending.push_back(frame);
-        } else {
-            self.count_control_drop();
-            warn!(
-                "dropping {:?} control frame: the per-peer queue is full",
-                frame.kind()
-            );
-        }
+        self.enqueue_control_back(frame);
     }
 
     /// Accounts for one control frame dropped before it reached the transport.
     ///
     /// Called on an encryption failure that is not recoverable (bad buffer
     /// shape, MTU mismatch, ...). The frame was handed out by
-    /// [`Self::pending_control`], so it is also removed from the lease.
+    /// [`Self::pending_control`] and is removed from the queue here.
     pub(crate) fn note_control_drop(&mut self) {
-        self.control_lease.pop_front();
+        self.pending.pop_front();
         self.count_control_drop();
     }
 
@@ -1691,33 +1833,6 @@ impl PeerExtension {
             }
         }
     }
-}
-
-/// Rejects a peer FEC profile the data plane cannot decode.
-///
-/// Mirrors the kernel: a `k` or `m` beyond the implemented maximum is not an
-/// error, the peer simply must never be matched. Dropping the FEC flags keeps
-/// both sides from negotiating a profile one of them would discard.
-fn sanitize_peer_caps(caps: &mut Caps) {
-    if !caps.flags.contains(CapsFlags::FEC) {
-        return;
-    }
-    if caps.fec_k >= 1
-        && caps.fec_k <= MAX_PEER_FEC_K
-        && caps.fec_m >= 1
-        && caps.fec_m <= MAX_PEER_FEC_M
-    {
-        return;
-    }
-    warn!(
-        "peer advertised unsupported FEC {}:{}; ignoring FEC",
-        caps.fec_k, caps.fec_m
-    );
-    caps.flags = CapsFlags::from_bits(
-        caps.flags.bits() & !(CapsFlags::FEC.bits() | CapsFlags::FEC_ADAPTIVE.bits()),
-    );
-    caps.fec_k = 0;
-    caps.fec_m = 0;
 }
 
 fn is_bounds_error(error: FecError) -> bool {
@@ -1837,7 +1952,10 @@ mod tests {
             umbrawg_proto::control::extension_kind(frames[0].bytes()),
             Some(ControlKind::Caps)
         );
-        assert!(matches!(&frames[0].payload, ControlPayload::Inline { .. }));
+        assert!(matches!(
+            frames[0].payload.as_ref(),
+            ControlPayload::Inline { .. }
+        ));
     }
 
     #[test]
@@ -1855,7 +1973,10 @@ mod tests {
             .iter()
             .find(|frame| frame.kind() == ControlKind::Ack)
             .expect("ACK is due after the first observation");
-        assert!(matches!(&frame.payload, ControlPayload::Inline { .. }));
+        assert!(matches!(
+            frame.payload.as_ref(),
+            ControlPayload::Inline { .. }
+        ));
         assert_eq!(frame.bytes().len(), 32);
 
         let ack = Ack::decode(frame.bytes()).expect("ACK decodes");
@@ -1890,7 +2011,7 @@ mod tests {
             16
         );
         assert!(matches!(
-            &frames[0].payload,
+            frames[0].payload.as_ref(),
             ControlPayload::Owned(bytes) if bytes == &[0u8; 8]
         ));
     }
@@ -2790,6 +2911,12 @@ mod tests {
                 .expect("caps frame fits"),
         );
 
+        // A flush can hand the frame to the transport caller and race a
+        // reconfiguration; the queue must still replace it before the next
+        // attempt. The old lease copy was restored first and won this race.
+        let handed = ext.pending_control(base);
+        assert_eq!(kinds(&handed), vec![ControlKind::Caps]);
+
         ext.configure(ExtConfig::default());
         let frames = ext.pending_control(base + Duration::from_millis(1));
         assert_eq!(kinds(&frames), vec![ControlKind::Caps]);
@@ -2871,6 +2998,40 @@ mod tests {
         ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
         assert!(ext.peer_caps.contains(CapsFlags::FEC));
         assert!(ext.fec_tx_active());
+    }
+
+    #[test]
+    fn unsupported_fec_warning_is_rate_limited() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 2,
+            max_shard_len: 1900,
+        });
+
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 9, 1), base);
+        assert_eq!(ext.caps_warn_last, Some(base));
+
+        ext.handle_caps(
+            caps(CapsFlags::FEC | CapsFlags::ACK, 9, 1),
+            base + Duration::from_secs(1),
+        );
+        assert_eq!(
+            ext.caps_warn_last,
+            Some(base),
+            "a repeated profile must not log again inside the interval"
+        );
+
+        ext.handle_caps(
+            caps(CapsFlags::FEC | CapsFlags::ACK, 9, 1),
+            base + CAPS_WARN_INTERVAL,
+        );
+        assert_eq!(
+            ext.caps_warn_last,
+            Some(base + CAPS_WARN_INTERVAL),
+            "the limiter must allow a fresh warning after the interval"
+        );
     }
 
     #[test]
@@ -3102,6 +3263,35 @@ mod tests {
         assert_eq!(ext.fec_stats.dropped_control, 2);
     }
 
+    #[test]
+    fn control_queue_stays_bounded_across_flushes() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::default();
+        for index in 0..CONTROL_QUEUE_CAPACITY {
+            ext.push_control(ControlFrame::owned(
+                ControlKind::FecShard,
+                vec![u8::try_from(index).unwrap(); 8],
+            ));
+        }
+
+        let handed = ext.pending_control(base);
+        assert_eq!(handed.len(), CONTROL_QUEUE_CAPACITY);
+        assert_eq!(
+            ext.pending.len(),
+            CONTROL_QUEUE_CAPACITY,
+            "handing frames out must not duplicate or extend the queue"
+        );
+
+        ext.push_control(ControlFrame::owned(ControlKind::FecShard, vec![0xff; 8]));
+        assert_eq!(ext.pending.len(), CONTROL_QUEUE_CAPACITY);
+        assert_eq!(ext.fec_stats.dropped_control, 1);
+
+        for frame in &handed {
+            ext.note_frame_sent(frame.kind(), base);
+        }
+        assert!(ext.pending.is_empty());
+    }
+
     fn fec_block_fixture() -> (u16, Vec<Vec<u8>>) {
         let mut encoder = FecEncoder::new(FecConfig::new(2, 1).unwrap(), 1900);
         let mut block = None;
@@ -3255,90 +3445,173 @@ mod tests {
     #[test]
     fn loss_window_uses_the_kernel_ewma() {
         let mut window = LossWindow::default();
-        window.observe(0);
-        for counter in 1..=255u64 {
-            window.observe(counter);
+        let base = Instant::now();
+
+        // First window: 0..=255, then counter 256 one second later closes it.
+        for counter in 0..=255u64 {
+            window.observe(counter, base);
         }
         assert_eq!(window.loss_q16, 0);
-        assert_eq!(window.observed, 256);
+        assert!(window.observe(256, base + ADAPTIVE_SETTLE_TIME));
+        assert_eq!(window.loss_q16, 0);
+        assert_eq!(window.observed, 257);
 
-        // One missing counter in the next window: 1/256 == 256 in q16 units,
-        // smoothed as (old * 3 + new) / 4.
-        for counter in 257..=511u64 {
-            window.observe(counter);
+        // One missing counter: 1/256 == 256 in q16 units. The kernel seeds
+        // the estimate with the first non-zero sample.
+        let now = base + Duration::from_secs(2);
+        for counter in 258..=511u64 {
+            window.observe(counter, now);
         }
-        assert_eq!(window.loss_q16, 64);
-        assert_eq!(window.observed, 512);
+        assert!(window.observe(512, now + ADAPTIVE_SETTLE_TIME));
+        assert_eq!(window.loss_q16, 256);
+        assert_eq!(window.observed, 513);
 
-        for counter in 513..=767u64 {
-            window.observe(counter);
+        // Two missing counters: sample 512, smoothed as (256 * 3 + 512) / 4.
+        let now = now + Duration::from_secs(2);
+        for counter in 515..=767u64 {
+            window.observe(counter, now);
         }
-        assert_eq!(window.loss_q16, 112);
-        assert_eq!(window.observed, 768);
+        assert!(window.observe(768, now + ADAPTIVE_SETTLE_TIME));
+        assert_eq!(window.loss_q16, 320);
+        assert_eq!(window.observed, 769);
     }
 
     #[test]
     fn loss_window_restarts_on_implausible_gaps() {
+        let base = Instant::now();
         let mut window = LossWindow::default();
-        window.observe(10);
-        let forward = 10 + ADAPTIVE_GAP_MAX + 1;
-        assert!(!window.observe(forward));
+        window.observe(10, base);
+        let forward = 10 + ADAPTIVE_WINDOW_MAX + 1;
+        assert!(!window.observe(forward, base + ADAPTIVE_SETTLE_TIME));
         assert_eq!(window.observed, 0);
         assert_eq!(window.base, forward + 1);
 
         let mut window = LossWindow::default();
-        window.observe(2 * ADAPTIVE_GAP_MAX);
-        window.observe(2 * ADAPTIVE_GAP_MAX);
-        assert!(!window.observe(1));
+        window.observe(2 * ADAPTIVE_GAP_MAX, base);
+        window.observe(2 * ADAPTIVE_GAP_MAX, base);
+        assert!(!window.observe(1, base + ADAPTIVE_SETTLE_TIME));
         assert_eq!(window.observed, 0);
         assert!(window.valid);
         assert_eq!(window.largest, 1);
     }
 
     #[test]
-    fn adaptive_parity_follows_loss_with_hysteresis() {
+    fn loss_window_waits_for_the_settle_interval() {
+        let mut window = LossWindow::default();
         let base = Instant::now();
-        let mut ext = PeerExtension::new(ExtConfig {
+        // 192 counters plus the window maximum: the old fixed-count observer
+        // closed here and counted the 63 late counters as loss.
+        for counter in 0..=191u64 {
+            window.observe(counter, base);
+        }
+        assert!(!window.observe(255, base));
+        assert_eq!(window.observed, 0, "the window must stay open");
+
+        // The reordered tail arrives 200 ms later, still inside the settle
+        // interval, and fills the window.
+        for counter in 192..=254u64 {
+            window.observe(counter, base + Duration::from_millis(200));
+        }
+        assert!(window.observe(256, base + ADAPTIVE_SETTLE_TIME));
+        assert_eq!(window.loss_q16, 0, "reordering is not loss");
+    }
+
+    fn adaptive_ext() -> PeerExtension {
+        PeerExtension::new(ExtConfig {
             bbr: BbrMode::Off,
             fec: FecMode::Adaptive,
             ack_interval: 2,
             max_shard_len: 1900,
-        });
+        })
+    }
 
-        let mut counter = 0u64;
-        for _ in 0..4 {
-            let start = counter;
-            while counter < start + 256 {
-                if !(10..15).contains(&(counter - start)) {
-                    ext.observe_received(counter, base);
+    /// Feeds `windows` segments of 256 counters, closing each segment with
+    /// the first counter of the next one after `step` (longer than the settle
+    /// interval). `missing` counters never arrive.
+    fn feed_adaptive_windows(
+        ext: &mut PeerExtension,
+        first: u64,
+        windows: u64,
+        start: Instant,
+        step: Duration,
+        missing: impl Fn(u64) -> bool,
+    ) -> u64 {
+        let mut counter = first;
+        let mut now = start;
+        for _ in 0..windows {
+            for value in counter..counter + 256 {
+                if !missing(value) {
+                    ext.observe_received(value, now);
                 }
-                counter += 1;
             }
+            counter += 256;
+            now += step;
+            ext.observe_received(counter, now);
+            counter += 1;
         }
-        assert!(ext.fec_active, "1.95% loss must enable parity");
+        counter
+    }
 
-        // A couple of clean windows are not enough: the switch-off has to
-        // survive five seconds below 0.2%.
-        let mut now = base;
-        for _ in 0..2 {
-            let start = counter;
-            now += Duration::from_secs(1);
-            while counter < start + 256 {
-                ext.observe_received(counter, now);
-                counter += 1;
+    #[test]
+    fn adaptive_ignores_reordering_on_a_fast_link() {
+        let base = Instant::now();
+        let mut ext = adaptive_ext();
+        let mut counter = 0u64;
+
+        // 25 % of every window arrives late, but well inside the one-second
+        // settle interval. The old fixed-count observer closed the window at
+        // the largest counter and counted all of them as loss.
+        for block in 0..6u64 {
+            let at = base + Duration::from_millis(1500 * block);
+            let end = (block + 1) * 256;
+            let mut delayed = Vec::new();
+            for value in counter..end {
+                if value + 1 != end && value % 4 == 3 {
+                    delayed.push(value);
+                } else {
+                    ext.observe_received(value, at);
+                }
             }
+            for value in delayed {
+                ext.observe_received(value, at + Duration::from_millis(200));
+            }
+            counter = end;
         }
+        ext.observe_received(counter, base + Duration::from_millis(1500 * 6));
+
+        assert!(ext.loss.observed >= ADAPTIVE_OBSERVE_MIN);
+        assert_eq!(ext.loss.loss_q16, 0, "reordering must not look like loss");
+        assert!(
+            !ext.fec_active,
+            "25 % reordering must not enable adaptive parity"
+        );
+    }
+
+    #[test]
+    fn adaptive_enables_on_real_loss_and_switches_off_after_hysteresis() {
+        let base = Instant::now();
+        let mut ext = adaptive_ext();
+        let step = Duration::from_millis(1500);
+
+        // ~2 % of every window is genuinely lost.
+        let next = feed_adaptive_windows(&mut ext, 0, 6, base, step, |counter| counter % 52 == 0);
+        assert!(
+            ext.fec_active,
+            "1.9 % real loss must enable adaptive parity"
+        );
+
+        // A couple of clean windows are not enough to switch off.
+        let clean_at = base + Duration::from_millis(1500 * 6);
+        let next = feed_adaptive_windows(&mut ext, next, 2, clean_at, step, |_| false);
         assert!(ext.fec_active);
 
-        for _ in 0..16 {
-            let start = counter;
-            now += Duration::from_secs(1);
-            while counter < start + 256 {
-                ext.observe_received(counter, now);
-                counter += 1;
-            }
-        }
-        assert!(!ext.fec_active, "parity must switch off after clean time");
+        let clean_at = clean_at + Duration::from_millis(1500 * 2);
+        feed_adaptive_windows(&mut ext, next, 16, clean_at, step, |_| false);
+        assert!(
+            !ext.fec_active,
+            "parity must switch off after the five-second clean window"
+        );
+        assert_eq!(ext.loss.loss_q16, 0);
     }
 
     #[test]
