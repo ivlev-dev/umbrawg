@@ -114,6 +114,19 @@ jobs:
           bash bench/tests/test-bench-lib.sh
           python3 -m unittest discover -s bench/tests -p 'test_*.py'
 
+      # Корневой bench/ — каноническое дерево (его описывает bench/README.md).
+      # Копия в umbrawg-tools/bench должна оставаться рабочей, но проверяем
+      # именно корневые тесты: lib, report и detect.
+      - name: Check root bench scripts
+        working-directory: .
+        run: |
+          set -euo pipefail
+          bash -n bench/bench.sh bench/bench-lib.sh bench/tests/test-bench-lib.sh
+          bash bench/tests/test-bench-lib.sh
+          python3 bench/tests/test_bench_report.py
+          python3 bench/tests/test-detect.py
+          python3 bench/tests/test-golden-pcap.py
+
   e2e-daemon:
     name: e2e daemon (UAPI)
     runs-on: ubuntu-latest

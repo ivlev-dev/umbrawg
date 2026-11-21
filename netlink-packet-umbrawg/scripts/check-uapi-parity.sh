@@ -7,8 +7,8 @@
 # Usage: scripts/check-uapi-parity.sh [path/to/umbrawg.h]
 #
 # The header path can also be given with the UMBRAWG_UAPI environment
-# variable. Without either, the default locations are tried: the kernel
-# module source tree on the build server and the local host mirror.
+# variable. Without either, the repo-relative UAPI header is used, with a
+# build-server mirror as a fallback.
 
 set -euo pipefail
 
@@ -28,12 +28,13 @@ fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 crate_root=$(dirname "$script_dir")
+repo_root=$(dirname "$crate_root")
 constants_file="$crate_root/src/constants.rs"
 
 header=${1:-${UMBRAWG_UAPI:-}}
 if [[ -z $header ]]; then
     for candidate in \
-        /root/umbrawg/module/src/uapi/umbrawg.h \
+        "$repo_root/umbrawg-linux-kernel-module/src/uapi/umbrawg.h" \
         /var/tmp/umbrawg-src/umbrawg-linux-kernel-module/src/uapi/umbrawg.h
     do
         if [[ -f $candidate ]]; then

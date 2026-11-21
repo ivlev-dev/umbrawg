@@ -104,9 +104,13 @@ jobs:
 
       - name: PLAN_ONLY для interop-кейсов
         env:
-          CASES: mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec
+          CASES: mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec profile-mismatch adaptive-clean bbr-fec-clean clean-fec21
         run: PLAN_ONLY=1 bash bench/ext-tests.sh
 
+      # На раннере модуль собран в Arch-контейнере под другое ядро и не
+      # загружается, поэтому реальный interop здесь — только rust2 (Rust↔Rust
+      # без модуля). Кейсы mixed/kernel/profile-mismatch/clean гоняются на
+      # стенде; в CI они проверяются лишь через PLAN_ONLY выше.
       - name: Полный interop (root)
         if: >-
           github.event_name == 'workflow_dispatch' ||

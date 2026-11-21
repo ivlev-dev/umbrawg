@@ -280,3 +280,118 @@ jobs:
         run: |
           rmmod umbrawg || true
 
+  fec-profile-change:
+    name: FEC profile change
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Checkout репозитория
+        uses: actions/checkout@v4
+
+      - name: Установить зависимости
+        run: |
+          set -euo pipefail
+          pacman -Syu --noconfirm --needed base-devel git clang llvm lld bc \
+            linux-headers kmod iproute2 iputils iperf3 python rust
+
+      - name: Определить заголовки ядра и компилятор
+        id: kernel
+        run: |
+          set -euo pipefail
+          kdirs=(/usr/lib/modules/*/build)
+          if [ "${#kdirs[@]}" -eq 0 ]; then
+            echo "error: linux-headers не установил /usr/lib/modules/*/build" >&2
+            exit 1
+          fi
+          kdir="${kdirs[0]}"
+          krelease="$(basename "$(dirname "$kdir")")"
+          cc=gcc
+          if grep -qx 'CONFIG_CC_IS_CLANG=y' "$kdir/.config" 2>/dev/null \
+            || grep -qx 'CONFIG_CC_IS_CLANG=y' "$kdir/include/config/auto.conf" 2>/dev/null; then
+            cc=clang
+          fi
+          version="$(sed -n 's/^#define UMBRAWG_VERSION "\([^"]*\)".*/\1/p' src/version.h | head -n1)"
+          {
+            echo "kdir=$kdir"
+            echo "krelease=$krelease"
+            echo "cc=$cc"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Собрать модуль
+        env:
+          KDIR: ${{ steps.kernel.outputs.kdir }}
+          MODULE_VERSION: ${{ steps.kernel.outputs.version }}
+          CC_KIND: ${{ steps.kernel.outputs.cc }}
+        run: |
+          set -euo pipefail
+          args=(-C src -j"$(nproc)" "KERNELDIR=$KDIR" "UMBRAWG_VERSION=$MODULE_VERSION")
+          if [ "$CC_KIND" = clang ]; then
+            args+=(LLVM=1)
+          fi
+          make "${args[@]}"
+          test -f src/umbrawg.ko
+
+      - name: Собрать uwg
+        working-directory: umbrawg-tools
+        run: |
+          set -euo pipefail
+          cargo build --release -p uwg
+          test -x target/release/uwg
+
+      # Тест создаёт netns/veth, insmod'ит модуль и требует root. На раннере
+      # заголовки ядра почти всегда не совпадают с uname -r, а контейнер не
+      # даёт SYS_MODULE — тогда шаг честно пропускается с предупреждением,
+      # остальные джобы от этого не зависят.
+      - name: Проверить возможность загрузить модуль
+        id: loadable
+        env:
+          KRELEASE: ${{ steps.kernel.outputs.krelease }}
+        run: |
+          set -euo pipefail
+          mkdir -p build
+          running="$(uname -r)"
+          reason=""
+          if [ "$KRELEASE" != "$running" ]; then
+            reason="заголовки ядра $KRELEASE не совпадают с ядром раннера $running: модуль собран для другого ядра"
+          elif ! insmod src/umbrawg.ko 2> build/insmod-fec.log; then
+            reason="insmod не удался: $(tr '\n' ' ' < build/insmod-fec.log)"
+          else
+            rmmod umbrawg
+          fi
+          if [ -n "$reason" ]; then
+            echo "loaded=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::FEC profile change пропущен: $reason"
+            {
+              echo "### FEC profile change: пропущено"
+              echo ""
+              echo "$reason"
+              echo ""
+              echo "Скрипт требует загруженный модуль umbrawg, root и netns, проверка не выполнялась."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "loaded=true" >> "$GITHUB_OUTPUT"
+            echo "модуль загружается, регрессия смены FEC-профиля будет выполнена"
+          fi
+
+      - name: Прогнать fec-profile-change.sh
+        if: steps.loadable.outputs.loaded == 'true'
+        env:
+          UWG: ${{ github.workspace }}/umbrawg-tools/target/release/uwg
+          WORK: ${{ github.workspace }}/umbrawg-linux-kernel-module/build/fec-profile-change
+        run: |
+          set -euo pipefail
+          bash -n src/tests/fec-profile-change.sh
+          bash src/tests/fec-profile-change.sh
+
+      - name: Загрузить лог FEC-проверки
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: umbrawg-fec-profile-change
+          path: umbrawg-linux-kernel-module/build/fec-profile-change/
+          if-no-files-found: ignore
+          retention-days: 14
+
