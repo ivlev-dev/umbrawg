@@ -75,6 +75,8 @@ int uwg_fec_mtu_selftest(void);
  * 10 ms at HZ=100) plus the workqueue hop, i.e. the classic 4-5 ms FEC RTT
  * penalty. The flush is a hrtimer now, so the window below is the real cost.
  * 0.15..0.45 ms keeps a burst together and leaves the round trip near 1 ms.
+ * The emit tail disarms the flush as soon as the block leaves the queue, so
+ * a full block neither waits for the window nor leaves a late softirq.
  */
 #define UWG_FEC_DATA_TX_DELAY_MIN_US 150
 #define UWG_FEC_DATA_TX_DELAY_MAX_US 450

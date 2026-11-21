@@ -390,6 +390,29 @@ static bool uwg_fec_peer_partial(const struct uwg_peer *peer)
 	       (UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_PARTIAL);
 }
 
+/* The partial flush is armed by the first packet of a block and is only
+ * needed while that block is still being collected. As soon as the block
+ * leaves the queue the emit tail disarms it, so a full block (the steady
+ * state of any bulk flow) pays neither the flush nor a late softirq.
+ *
+ * hrtimer_try_to_cancel() never sleeps and may be called from the flush
+ * callback itself. If a callback is already running it takes tx->lock
+ * after the emitter and finds count == 0, which is a harmless no-op.
+ */
+static void uwg_fec_tx_timer_arm(struct uwg_fec_tx *tx)
+{
+	u32 delay_us = get_random_u32_inclusive(UWG_FEC_DATA_TX_DELAY_MIN_US,
+						UWG_FEC_DATA_TX_DELAY_MAX_US);
+
+	hrtimer_start(&tx->timer, ns_to_ktime((u64)delay_us * NSEC_PER_USEC),
+		      HRTIMER_MODE_REL_SOFT);
+}
+
+static void uwg_fec_tx_timer_disarm(struct uwg_fec_tx *tx)
+{
+	hrtimer_try_to_cancel(&tx->timer);
+}
+
 static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 			    struct sk_buff_head *out)
 {
@@ -535,6 +558,12 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 
 out:
 	tx->count = 0;
+	/* A full block, a size-triggered partial block and a dropped block
+	 * all leave nothing behind to flush: stop the timer that the first
+	 * packet of this block armed. This is what keeps a full block off
+	 * the partial-flush path entirely.
+	 */
+	uwg_fec_tx_timer_disarm(tx);
 }
 
 static bool uwg_fec_tx_push_locked(struct uwg_fec_tx *tx,
@@ -563,15 +592,8 @@ static bool uwg_fec_tx_push_locked(struct uwg_fec_tx *tx,
 	put_unaligned_le16((u16)plen, slot);
 	tx->lens[tx->count] = (u16)plen;
 	tx->count++;
-	if (tx->count == 1) {
-		u32 delay_us = get_random_u32_inclusive(
-			UWG_FEC_DATA_TX_DELAY_MIN_US,
-			UWG_FEC_DATA_TX_DELAY_MAX_US);
-
-		hrtimer_start(&tx->timer,
-			      ns_to_ktime((u64)delay_us * NSEC_PER_USEC),
-			      HRTIMER_MODE_REL_SOFT);
-	}
+	if (tx->count == 1)
+		uwg_fec_tx_timer_arm(tx);
 	if (tx->count == tx->k)
 		uwg_fec_tx_emit(tx, true, out);
 	return true;
@@ -1470,6 +1492,50 @@ static bool uwg_fec_adaptive_selftest(void)
 	return ok;
 }
 
+/* The flush timer must be disarmed as soon as the block it was armed for
+ * has left the queue: a full block goes out through uwg_fec_tx_emit(),
+ * whose tail calls uwg_fec_tx_timer_disarm(). Exercise exactly that
+ * arm/disarm pair, with the local softirq held off so the 150..450 us
+ * flush cannot fire between the two assertions.
+ */
+static enum hrtimer_restart uwg_fec_tx_timer_test_cb(struct hrtimer *timer)
+{
+	return HRTIMER_NORESTART;
+}
+
+static bool uwg_fec_tx_timer_selftest(void)
+{
+	struct uwg_fec_tx tx;
+	bool ok = true;
+
+	memset(&tx, 0, sizeof(tx));
+	hrtimer_setup(&tx.timer, uwg_fec_tx_timer_test_cb, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL_SOFT);
+
+	local_bh_disable();
+	uwg_fec_tx_timer_arm(&tx);
+	if (!hrtimer_active(&tx.timer)) {
+		pr_err("FEC timer self-test: arm did not queue the flush\n");
+		ok = false;
+	}
+	uwg_fec_tx_timer_disarm(&tx);
+	if (hrtimer_active(&tx.timer)) {
+		pr_err("FEC timer self-test: disarm left the flush queued\n");
+		ok = false;
+	}
+	/* The emit tail also disarms dropped and size-triggered blocks:
+	 * a second cancel on an inactive timer must stay harmless.
+	 */
+	uwg_fec_tx_timer_disarm(&tx);
+	if (hrtimer_active(&tx.timer)) {
+		pr_err("FEC timer self-test: repeated disarm re-armed\n");
+		ok = false;
+	}
+	local_bh_enable();
+
+	return ok;
+}
+
 int uwg_fec_mtu_selftest(void)
 {
 	static const unsigned int underlays[] = { 576, 1280, 1500, 9000 };
@@ -1484,6 +1550,13 @@ int uwg_fec_mtu_selftest(void)
 			ok = false;					\
 		}							\
 	} while (0)
+
+	/* Guards the partial-flush timer rather than the wire budget, so it
+	 * stays outside the numbered MTU checks. A failure still aborts the
+	 * load: a timer that outlives its block is exactly the P2 bug.
+	 */
+	if (!uwg_fec_tx_timer_selftest())
+		return -EINVAL;
 
 	/* The wire overhead has to cover the exact builder in
 	 * uwg_fec_tx_emit(): two length bytes, both extension headers, the
