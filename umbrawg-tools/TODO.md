@@ -36,6 +36,9 @@
   `bench/README.md`.
 - Итоговые результаты замеров final5 (2026-11-17) зафиксированы в
   `docs/RESULTS.md`.
+- Бенчмарк-матрица 2026-11-21 (baseline AmneziaWG, потери, FEC/BBR, UDP, RTT)
+  — [`../docs/BENCHMARKS-2026-11-21.md`](../docs/BENCHMARKS-2026-11-21.md);
+  сырые артефакты — `/root/bench-matrix/v2` и `/root/bench-matrix/v3`.
 - BBR/FEC: `uwg set/show bbr|fec|underlay-mtu`, `uwg show <if>
   bbr-stats|fec-stats` для обоих бэкендов; fixed-профили `K=1..8, M=1..2`.
 - Env: `WG_COLOR_MODE`/`WG_HIDE_KEYS` — основные, `UWG_COLOR_MODE`/
@@ -113,8 +116,11 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отч
   `--locked` в CI не используется.
 - Стенд (netns/insmod/iperf3) в CI не запускается: только `bash -n` и юнит-тесты
   хелперов; реальные замеры — на выделенной машине.
-- Go-эталон с обфускацией несравним: в нём обфускация данных — заглушка
-  (`device/obf_data.go`), а S4=28 на MTU 1500 вызывает фрагментацию.
+- Go-эталон удалён из монорепо (`96dc33d8`) и в матрице 2026-11-21 не
+  участвует; сравнение — только с внешними `amneziawg`/`amneziawg-go`.
+  При этом дефолт `IMPL_LIST` в `bench.sh` всё ещё содержит `go`, поэтому
+  прогон после удаления форка требует явного `IMPL_LIST`. Прежняя оговорка
+  про заглушку обфускации в Go остаётся в истории final5.
 
 ## Что делать дальше (по приоритету)
 
@@ -124,6 +130,18 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отч
    netlink из `Cargo.lock` в ветке `main`) и ARM-рантайм.
 4. Поставить компонентные теги `tools-v0.4.1` и `netlink-v0.4.1`;
    до публикации — `updpkgsums` для стабильных Arch-пакетов.
+5. Матрица cipher: `AES-256-GCM` и mixed ChaCha/AES. `CIPHER` уже
+   подставляется в конфиг, но не является осью матрицы; добавить ось и
+   прогнать на стенде.
+6. Multi-peer 5/10/50/100 в `bench.sh` (сейчас дефолт и проверенные
+   значения — 1 и 4).
+7. Зафиксировать методику v2/v3 и артефакты `/root/bench-matrix/{v2,v3}`;
+   сослаться на них из `docs/BENCHMARKS-2026-11-21.md`.
+8. Диагностика UDP на чистом канале: отличать `RcvbufErrors` iperf3 от
+   дропов туннеля и объяснить 0.08–0.1% потерь у Rust при 400 Мбит/с.
+9. Убрать `go` из дефолта `IMPL_LIST` или явно помечать его как
+   отсутствующий: после удаления Go-форка прогон без явного `IMPL_LIST`
+   пытается запустить несуществующий бинарник.
 
 Сделано в 0.2.0–0.4.1: упаковка Debian/RPM из `cargo build --release`,
 man-страницы, completions, systemd-юниты, CI fmt/clippy/test, релизные сборки

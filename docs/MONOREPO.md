@@ -39,6 +39,14 @@
 6. **Секреты не коммитим.** `bench/keys.env` в `.gitignore`, в репозитории
    только `bench/keys.env.example`.
 
+## Где лежат результаты замеров
+
+Актуальная сводка матрицы 2026-11-21 (AmneziaWG baseline, потери, FEC/BBR,
+UDP, RTT) — [`BENCHMARKS-2026-11-21.md`](BENCHMARKS-2026-11-21.md). Сырые CSV
+и pcap остаются на стенде: `/root/bench-matrix/v2` и `/root/bench-matrix/v3`.
+В репозитории, по правилу 5, только методика, скрипты и небольшие эталонные
+CSV.
+
 ## Как выпустить релиз
 
 1. Обновить версию в манифесте компонента (`src/version.h`, `Cargo.toml`,
