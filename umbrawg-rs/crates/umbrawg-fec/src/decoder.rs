@@ -54,7 +54,7 @@ pub struct FecDecoder {
 }
 
 impl FecDecoder {
-    /// Creates a decoder for `config` with the default 5 ms block timeout.
+    /// Creates a decoder for `config` with the default 2 ms block timeout.
     #[must_use]
     pub fn new(config: FecConfig) -> Self {
         Self::with_timeout(config, DEFAULT_BLOCK_TIMEOUT)

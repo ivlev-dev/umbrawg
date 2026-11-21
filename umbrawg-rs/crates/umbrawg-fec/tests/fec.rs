@@ -5,7 +5,7 @@ use umbrawg_fec::{
     MAX_PENDING_BLOCKS, MAX_SHARD_LEN,
 };
 
-const BLOCK_TIMEOUT: Duration = Duration::from_millis(5);
+const BLOCK_TIMEOUT: Duration = umbrawg_fec::DEFAULT_BLOCK_TIMEOUT;
 
 struct Rng(u64);
 
@@ -189,6 +189,59 @@ fn recovers_single_data_shard_for_k1_m1() {
     assert_eq!(decoded.len(), 1);
     assert_eq!(decoded[0].recovered, 1);
     assert_eq!(decoded[0].packets, packets);
+}
+
+#[test]
+fn partial_two_to_one_block_recovers_without_the_block_timeout() {
+    // A sparse flow sends `k' = 1` with `m' = 1`. Losing the only data shard
+    // must be repaired from the parity shard as soon as it arrives, with no
+    // timer involved: the two-way RTT of a ping-sized flow must not include
+    // (or wait for) the block timeout.
+    let config = config(2, 1);
+    let mut encoder = FecEncoder::new(config, 1500);
+    assert!(encoder.push(&[0xab; 64]).unwrap().is_none());
+    let block = encoder
+        .flush_with_parity(1)
+        .expect("partial block with parity");
+    assert_eq!((block.k, block.m), (1, 1));
+
+    let mut decoder = FecDecoder::new(config);
+    let now = Instant::now();
+    let shard = FecShard {
+        block_id: block.block_id,
+        index: 1,
+        k: block.k,
+        m: block.m,
+        shard_len: block.shard_len,
+        payload: &block.shards[1],
+    };
+    let decoded = decoder.push_at(shard, now).expect("valid shard");
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].recovered, 1);
+    assert_eq!(decoded[0].packets, vec![vec![0xab; 64]]);
+    assert_eq!(decoder.pending_blocks(), 0);
+}
+
+#[test]
+fn default_block_timeout_stays_inside_the_latency_budget() {
+    let expected = Duration::from_millis(2);
+    assert_eq!(umbrawg_fec::DEFAULT_BLOCK_TIMEOUT, expected);
+    assert_eq!(FecDecoder::new(config(2, 1)).timeout(), expected);
+    // Release of a block that cannot be completed must not wait longer than
+    // the timeout, and must not happen before it either.
+    let config = config(2, 1);
+    let packets = full_block_packets(2, 16);
+    let blocks = encode(config, 1500, &packets);
+    let shards = shards_of(&blocks[0]);
+    let mut decoder = FecDecoder::new(config);
+    let now = Instant::now();
+    assert!(decoder.push_at(shards[0], now).expect("valid").is_empty());
+    assert!(decoder
+        .poll(now + expected - Duration::from_micros(1))
+        .is_empty());
+    let released = decoder.poll(now + expected);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].packets, vec![packets[0].clone()]);
 }
 
 #[test]

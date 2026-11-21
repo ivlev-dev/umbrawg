@@ -1770,12 +1770,26 @@ fn rekey_keeps_fec_caps_and_flushes_full_size_shards() {
     );
 
     // A partial block in the encoder at the moment of the rekey. Its shard is
-    // bigger than the old 1 KiB control buffer.
+    // bigger than the old 1 KiB control buffer. A lone packet starts a block
+    // and is flushed at once, so the block is opened by a pair of packets
+    // inside the batching window: the second one stays queued.
     let third = full_size_packet(0x33);
+    let queued = full_size_packet(0x34);
+    let burst = now + Duration::from_millis(6);
     assert_eq!(
-        send_fec_batch(&mut pair, true, &[&third], now + Duration::from_millis(6)),
+        send_fec_batch(&mut pair, true, &[&third], burst),
+        1,
+        "a lone packet is flushed at once without waiting for the deadline"
+    );
+    assert_eq!(
+        send_fec_batch(
+            &mut pair,
+            true,
+            &[&queued],
+            burst + Duration::from_micros(100)
+        ),
         0,
-        "a partial block is not emitted before the flush"
+        "a packet inside the batching window stays queued"
     );
     let encoded_before = pair
         .a

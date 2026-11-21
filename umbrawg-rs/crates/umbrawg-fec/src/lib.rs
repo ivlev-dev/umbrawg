@@ -67,7 +67,14 @@ pub use error::FecError;
 pub const MAX_TOTAL_SHARDS: usize = 255;
 
 /// Default time the decoder waits for missing shards before releasing a block.
-pub const DEFAULT_BLOCK_TIMEOUT: Duration = Duration::from_millis(5);
+///
+/// Recovery never waits for this timer: as soon as any `k` shards of a block
+/// are present the block is decoded (and a lost data shard restored from
+/// parity) immediately. The timeout only bounds how long a block that can no
+/// longer be completed is held, and how long a later block waits behind a
+/// missing one in the in-order release, so it is kept short: 2 ms is already
+/// an order of magnitude above the shard spacing of one block.
+pub const DEFAULT_BLOCK_TIMEOUT: Duration = Duration::from_millis(2);
 
 /// Largest shard length accepted by [`FecDecoder`], in bytes.
 ///

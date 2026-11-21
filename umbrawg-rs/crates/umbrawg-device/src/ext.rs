@@ -65,9 +65,23 @@ const ACK_TIMEOUT_MIN_US: u64 = 2_000;
 /// Upper bound of the randomized ACK timeout.
 const ACK_TIMEOUT_MAX_US: u64 = 5_000;
 /// Lower bound of the randomized partial FEC block deadline.
-const FEC_DEADLINE_MIN_US: u64 = 500;
+///
+/// This is only the batching window for packets of one burst: a block that
+/// stops filling is flushed well below one poll timeout, so the extra RTT of
+/// an FEC-protected flow stays under 0.5 ms per direction.
+const FEC_DEADLINE_MIN_US: u64 = 100;
 /// Upper bound of the randomized partial FEC block deadline.
-const FEC_DEADLINE_MAX_US: u64 = 2_000;
+const FEC_DEADLINE_MAX_US: u64 = 300;
+/// Idle gap after which the next packet opens a block and is flushed at once.
+///
+/// A sparse flow (ping, a lone ACK, one TCP segment per RTT) otherwise waits
+/// for [`FEC_DEADLINE_MIN_US`..`FEC_DEADLINE_MAX_US`] plus the poll timeout,
+/// which is what turned a 0.3 ms RTT into 3.7–4.3 ms with FEC 2:1. Packets
+/// that arrive closer together than this still share one block, so bulk
+/// traffic keeps the full `k`-packet batching and its parity efficiency: a
+/// saturated flow is read from the TUN in batches, and the few hundred
+/// microseconds between two batches must not turn into a one-packet block.
+const FEC_SOLO_GAP: Duration = Duration::from_millis(2);
 /// Scratch size for one FEC shard header: 8-byte prefix plus a 12-byte body.
 const FEC_SHARD_HEADER_LEN: usize = 20;
 
@@ -963,6 +977,11 @@ pub(crate) struct PeerExtension {
     loss: LossWindow,
     adaptive_clean_since: Option<Instant>,
     fec_deadline: Option<Instant>,
+    /// Arrival time of the last packet handed to the FEC encoder.
+    ///
+    /// Used to tell a lone packet after an idle gap (flushed at once) from a
+    /// packet inside a burst (batched into a full block).
+    last_fec_push: Option<Instant>,
     jitter: Jitter,
     /// Single control queue, bounded by [`CONTROL_QUEUE_CAPACITY`].
     ///
@@ -1013,6 +1032,7 @@ impl PeerExtension {
             loss: LossWindow::default(),
             adaptive_clean_since: None,
             fec_deadline: None,
+            last_fec_push: None,
             jitter: Jitter::seeded(),
             pending: VecDeque::new(),
             caps_warn_last: None,
@@ -1082,6 +1102,7 @@ impl PeerExtension {
             self.loss = LossWindow::default();
             self.adaptive_clean_since = None;
             self.fec_deadline = None;
+            self.last_fec_push = None;
         }
 
         let bbr_changed = config.bbr != previous.bbr
@@ -1252,25 +1273,43 @@ impl PeerExtension {
         if !self.fec_tx_active() {
             return Ok(None);
         }
+        // A packet that opens a block after an idle gap is not worth batching:
+        // sending it now (with partial parity) removes the deadline from the
+        // RTT of a sparse flow, while a burst still fills a whole block.
+        let solo = self
+            .last_fec_push
+            .is_some_and(|last| now.saturating_duration_since(last) >= FEC_SOLO_GAP)
+            && self
+                .fec_tx
+                .as_ref()
+                .is_some_and(|encoder| encoder.pending() == 0);
         let jitter = &mut self.jitter;
         let result = self
             .fec_tx
             .as_mut()
             .map_or(Ok(None), |encoder| encoder.push_with_rng(packet, jitter));
-        match &result {
+        match result {
             Ok(Some(_)) => {
+                self.last_fec_push = Some(now);
                 self.fec_deadline = None;
                 self.fec_stats.blocks_encoded = self.fec_stats.blocks_encoded.saturating_add(1);
+                result
             }
-            Ok(None) if self.fec_deadline.is_none() => {
-                let delay = self
-                    .jitter
-                    .range_inclusive(FEC_DEADLINE_MIN_US, FEC_DEADLINE_MAX_US);
-                self.fec_deadline = Some(now + Duration::from_micros(delay));
+            Ok(None) => {
+                self.last_fec_push = Some(now);
+                if solo {
+                    return Ok(self.flush_partial_block());
+                }
+                if self.fec_deadline.is_none() {
+                    let delay = self
+                        .jitter
+                        .range_inclusive(FEC_DEADLINE_MIN_US, FEC_DEADLINE_MAX_US);
+                    self.fec_deadline = Some(now + Duration::from_micros(delay));
+                }
+                result
             }
-            _ => {}
+            Err(_) => result,
         }
-        result
     }
 
     pub(crate) fn fec_flush_due(&mut self, now: Instant) -> Option<umbrawg_fec::EncodedBlock> {
@@ -1280,6 +1319,15 @@ impl PeerExtension {
         if !self.fec_deadline.is_some_and(|deadline| now >= deadline) {
             return None;
         }
+        self.flush_partial_block()
+    }
+
+    /// Emits the packets held by the encoder as a partial block with parity.
+    ///
+    /// Both the solo flush of an idle flow and the deadline flush go through
+    /// here, so the wire form (including the negotiated partial parity) is
+    /// identical and neither path can drop a queued packet.
+    fn flush_partial_block(&mut self) -> Option<umbrawg_fec::EncodedBlock> {
         self.fec_deadline = None;
         let parity = self.partial_parity();
         let jitter = &mut self.jitter;
@@ -1404,7 +1452,7 @@ impl PeerExtension {
     /// partially filled FEC block that must be flushed.
     ///
     /// The daemon uses it to size its poll timeout, so feedback leaves within
-    /// the 0.5..=5 ms cadence instead of a 10 ms tick.
+    /// the 2..=5 ms ACK cadence instead of a 10 ms tick.
     pub(crate) fn next_deadline(&self, now: Instant) -> Option<Instant> {
         let ack = if self.ack.received_since > 0 {
             self.ack
@@ -2749,21 +2797,39 @@ mod tests {
         let base = Instant::now();
         let mut ext = PeerExtension::new(ExtConfig {
             bbr: BbrMode::Off,
-            fec: FecMode::Fixed { k: 2, m: 1 },
+            fec: FecMode::Fixed { k: 4, m: 2 },
             ack_interval: 12,
             max_shard_len: 1900,
         });
-        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+        ext.handle_caps(
+            caps(
+                CapsFlags::FEC | CapsFlags::FEC_PARTIAL | CapsFlags::ACK,
+                4,
+                2,
+            ),
+            base,
+        );
         let mut delays = Vec::new();
+        // Two packets inside one burst: the first one arms the deadline, the
+        // second one is still batched because the gap stays below the solo
+        // threshold, so neither is flushed early.
         let mut now = base;
         for _ in 0..64 {
             assert!(ext.fec_push(&[9u8; 20], now).unwrap().is_none());
             let deadline = ext.fec_deadline.expect("deadline is armed");
             delays.push(deadline.saturating_duration_since(now));
-            now += Duration::from_millis(3);
-            let block = ext.fec_flush_due(now).expect("partial block is due");
-            assert_eq!(block.m, 0);
+            let second = now + FEC_SOLO_GAP / 100;
+            assert!(ext.fec_push(&[8u8; 20], second).unwrap().is_none());
+            assert_eq!(ext.fec_tx.as_ref().unwrap().pending(), 2);
+            assert!(ext.fec_flush_due(second).is_none(), "not due yet");
+            let block = ext
+                .fec_flush_due(deadline + Duration::from_micros(1))
+                .expect("partial block is due");
+            assert_eq!(block.m, 2, "partial parity is preserved");
+            assert_eq!(block.k, 2);
             assert!(usize::from(block.shard_len) >= 22);
+            assert!(ext.fec_deadline.is_none());
+            now = deadline + FEC_SOLO_GAP / 100;
         }
         for delay in &delays {
             assert!(*delay >= Duration::from_micros(FEC_DEADLINE_MIN_US));
@@ -2772,6 +2838,133 @@ mod tests {
         delays.sort_unstable();
         delays.dedup();
         assert!(delays.len() > 1, "partial block deadline must vary");
+    }
+
+    #[test]
+    fn fec_deadline_budget_stays_sub_millisecond() {
+        // The partial deadline is the extra RTT of a batched flow, so it must
+        // stay well below one poll timeout (which rounds up to a whole ms).
+        assert!(Duration::from_micros(FEC_DEADLINE_MAX_US) < Duration::from_millis(1));
+        assert!(
+            Duration::from_micros(FEC_DEADLINE_MIN_US) < Duration::from_micros(FEC_DEADLINE_MAX_US)
+        );
+        assert!(FEC_SOLO_GAP <= Duration::from_millis(2));
+    }
+
+    fn fixed_two_to_one(caps_flags: CapsFlags) -> PeerExtension {
+        let now = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 12,
+            max_shard_len: 1900,
+        });
+        ext.handle_caps(caps(caps_flags, 2, 1), now);
+        assert!(ext.fec_tx_active());
+        ext
+    }
+
+    #[test]
+    fn fec_lone_packet_after_an_idle_gap_is_flushed_immediately() {
+        let base = Instant::now();
+        let mut ext = fixed_two_to_one(CapsFlags::FEC | CapsFlags::FEC_PARTIAL);
+        // First packet ever: there is no spacing history yet, so it is batched
+        // and the deadline is armed instead of being sent half-empty.
+        assert!(ext.fec_push(&[1u8; 20], base).unwrap().is_none());
+        assert!(ext.fec_deadline.is_some());
+        let flushed = ext
+            .fec_flush_due(base + Duration::from_micros(FEC_DEADLINE_MAX_US))
+            .expect("deadline flush");
+        assert_eq!((flushed.k, flushed.m), (1, 1));
+
+        // Traffic stops for longer than the solo gap: the next packet must not
+        // wait for any timer, and it keeps its partial parity.
+        let idle = base + FEC_SOLO_GAP + Duration::from_millis(5);
+        let block = ext
+            .fec_push(&[2u8; 30], idle)
+            .unwrap()
+            .expect("a lone packet is sent at once");
+        assert_eq!((block.k, block.m), (1, 1));
+        assert_eq!(block.shards.len(), 2);
+        assert!(ext.fec_deadline.is_none(), "no timer may stay armed");
+        assert_eq!(ext.fec_tx.as_ref().unwrap().pending(), 0);
+    }
+
+    #[test]
+    fn fec_burst_still_batches_packets_into_a_full_block() {
+        let base = Instant::now();
+        let mut ext = fixed_two_to_one(CapsFlags::FEC | CapsFlags::FEC_PARTIAL);
+        // The first packet of a burst is batched (its deadline is armed) ...
+        assert!(ext.fec_push(&[1u8; 20], base).unwrap().is_none());
+        assert!(ext.fec_deadline.is_some(), "the deadline is armed");
+        // ... and a packet arriving well inside the solo gap completes the
+        // block, which is sent at once without any timer.
+        let block = ext
+            .fec_push(&[2u8; 20], base + FEC_SOLO_GAP / 2)
+            .unwrap()
+            .expect("full block");
+        assert_eq!((block.k, block.m), (2, 1));
+        assert_eq!(block.shards.len(), 3);
+        assert!(ext.fec_deadline.is_none(), "a full block needs no timer");
+    }
+
+    #[test]
+    fn fec_solo_flush_keeps_the_legacy_shape_without_partial_parity() {
+        let base = Instant::now();
+        let mut ext = fixed_two_to_one(CapsFlags::FEC);
+        assert!(ext.fec_push(&[1u8; 20], base).unwrap().is_none());
+        let _ = ext
+            .fec_flush_due(base + Duration::from_micros(FEC_DEADLINE_MAX_US))
+            .expect("deadline flush");
+        let block = ext
+            .fec_push(&[2u8; 20], base + FEC_SOLO_GAP + Duration::from_millis(1))
+            .unwrap()
+            .expect("solo block");
+        assert_eq!((block.k, block.m), (1, 0));
+        assert_eq!(block.shards.len(), 1, "legacy peers get no parity");
+    }
+
+    #[test]
+    fn fec_lone_packet_is_delivered_without_waiting_for_the_rx_timeout() {
+        let base = Instant::now();
+        let mut ext = fixed_two_to_one(CapsFlags::FEC | CapsFlags::FEC_PARTIAL);
+        assert!(ext.fec_push(&[1u8; 20], base).unwrap().is_none());
+        let _ = ext
+            .fec_flush_due(base + Duration::from_micros(FEC_DEADLINE_MAX_US))
+            .expect("deadline flush");
+        let block = ext
+            .fec_push(
+                &[0x11u8; 24],
+                base + FEC_SOLO_GAP + Duration::from_millis(1),
+            )
+            .unwrap()
+            .expect("solo block");
+
+        let mut rx = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 12,
+            max_shard_len: 1900,
+        });
+        rx.fec_active = true;
+        let mut delivered = Vec::new();
+        // Lose the data shard: the parity shard alone must restore it at once,
+        // long before the block timeout would release anything.
+        for index in 1..block.shards.len() {
+            delivered.extend(rx.fec_decode(
+                FecShard {
+                    block_id: block.block_id,
+                    index: u8::try_from(index).unwrap(),
+                    k: block.k,
+                    m: block.m,
+                    shard_len: block.shard_len,
+                    payload: &block.shards[index],
+                },
+                base,
+            ));
+        }
+        assert_eq!(delivered, vec![vec![0x11u8; 24]]);
+        assert_eq!(rx.fec_stats().unwrap().packets_recovered, 1);
     }
 
     #[test]
