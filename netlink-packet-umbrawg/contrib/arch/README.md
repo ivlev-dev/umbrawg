@@ -6,7 +6,7 @@ AUR-совместимые заготовки пакета Rust-крейта `ne
 
 | Пакет | Каталог | Тип |
 |---|---|---|
-| `rust-netlink-packet-umbrawg` | `rust-netlink-packet-umbrawg/` | стабильный, source — архив тега `v0.4.0` |
+| `rust-netlink-packet-umbrawg` | `rust-netlink-packet-umbrawg/` | стабильный, source — архив тега `netlink-v0.4.0` |
 | `rust-netlink-packet-umbrawg-git` | `rust-netlink-packet-umbrawg-git/` | VCS, `#branch=main` |
 
 ## Зачем пакет
@@ -32,7 +32,7 @@ AUR-совместимые заготовки пакета Rust-крейта `ne
 этого файла не читает.
 
 Версия каталога — версия из `Cargo.toml` крейта, а не `pkgver` пакета: у
-`-git`-пакета `pkgver` выглядит как `0.3.0.r12.g1a2b3c4`, и такой суффикс не
+`-git`-пакета `pkgver` выглядит как `0.4.0.r12.g1a2b3c4`, и такой суффикс не
 является корректной semver-версией, с которой cargo умеет сопоставлять
 зависимость `netlink-packet-umbrawg = "0.3"`. Поэтому для `-git` каталог
 называется по версии из `Cargo.toml` (сейчас `0.4.0`).
@@ -80,7 +80,7 @@ ls /tmp/pkg/usr/share/cargo/registry/netlink-packet-umbrawg-*/
 
 ## Публикация в AUR
 
-1. Поставить тег `v0.4.0`.
+1. Поставить тег `netlink-v0.4.0`.
 2. В `rust-netlink-packet-umbrawg/` обновить `pkgver`/`pkgrel`, затем:
 
    ```sh
@@ -93,7 +93,7 @@ ls /tmp/pkg/usr/share/cargo/registry/netlink-packet-umbrawg-*/
 
    ```sh
    cp contrib/arch/rust-netlink-packet-umbrawg/{PKGBUILD,.SRCINFO} .
-   git add -A && git commit -m "upgpkg: rust-netlink-packet-umbrawg 0.3.0-1" && git push
+   git add -A && git commit -m "upgpkg: rust-netlink-packet-umbrawg 0.4.0-1" && git push
    ```
 
 4. Для `rust-netlink-packet-umbrawg-git` — отдельный AUR-репозиторий,
@@ -101,7 +101,8 @@ ls /tmp/pkg/usr/share/cargo/registry/netlink-packet-umbrawg-*/
 
 ## Допущения и ограничения
 
-- Стабильный `PKGBUILD` — шаблон: тегов пока нет, `sha256sums` содержит явную
+- Стабильный `PKGBUILD` — шаблон: версия `0.4.0` уже в `Cargo.toml`, а тег
+  `netlink-v0.4.0` появится при релизе; `sha256sums` содержит явную
   заглушку `TODO_UPDPKGSUMS_AFTER_FIRST_TAG`, суммы пересчитываются
   `updpkgsums` после публикации тега.
 - В пакет попадают только `Cargo.toml`, `src/`, `README.md`, `CHANGELOG`,

@@ -5,7 +5,7 @@ AUR-совместимые заготовки пакета userspace-демон�
 
 | Пакет | Каталог | Тип |
 |---|---|---|
-| `umbrawg-daemon` | `umbrawg-daemon/` | стабильный, source — архив тега `v0.1.0` |
+| `umbrawg-daemon` | `umbrawg-daemon/` | стабильный, source — архив тега `rs-v0.4.0` |
 | `umbrawg-daemon-git` | `umbrawg-daemon-git/` | VCS, `#branch=master` |
 
 ## Состав пакета
@@ -56,15 +56,15 @@ systemd-analyze verify /tmp/pkg/usr/lib/systemd/system/umbrawg@.service
 
 Проверено на хосте: `umbrawg-daemon-git` собирается из ветки с параллельным RX
 (`makepkg -f --nodeps --skipinteg`), `check()` проходит 407 тестов в 23
-наборах, `umbrawg 0.1.0` из распакованного пакета печатает версию и справку,
+наборах, `umbrawg 0.4.0` из распакованного пакета печатает версию и справку,
 юнит и tmpfiles на месте, `systemd-analyze verify` для `umbrawg@.service`
 ошибок не находит (только предупреждение об отсутствии `/usr/bin/umbrawg` в
 распакованном дереве), `/etc/umbrawg` — `0700`. Стабильный `umbrawg-daemon` —
-шаблон до появления тега, в этой проверке не собирался.
+шаблон до появления тега `rs-v0.4.0`, в этой проверке не собирался.
 
 ## Публикация в AUR
 
-1. Поставить тег `v0.1.0` в `umbrawg-rs`.
+1. Поставить тег `rs-v0.4.0` в `umbrawg-rs`.
 2. В `umbrawg-daemon/` обновить `pkgver`/`pkgrel`, затем:
 
    ```sh
@@ -77,7 +77,7 @@ systemd-analyze verify /tmp/pkg/usr/lib/systemd/system/umbrawg@.service
 
    ```sh
    cp contrib/arch/umbrawg-daemon/{PKGBUILD,.SRCINFO} .
-   git add -A && git commit -m "upgpkg: umbrawg-daemon 0.1.0-1" && git push
+   git add -A && git commit -m "upgpkg: umbrawg-daemon 0.4.0-1" && git push
    ```
 
 4. Для `umbrawg-daemon-git` — отдельный AUR-репозиторий, копируются `PKGBUILD`
@@ -85,10 +85,11 @@ systemd-analyze verify /tmp/pkg/usr/lib/systemd/system/umbrawg@.service
 
 ## Допущения и ограничения
 
-- Стабильный `PKGBUILD` — шаблон: тегов пока нет, `sha256sums` содержит явную
+- Стабильный `PKGBUILD` — шаблон: версия `0.4.0` уже в `Cargo.toml`, а тег
+  `rs-v0.4.0` появится при релизе; `sha256sums` содержит явную
   заглушку `TODO_UPDPKGSUMS_AFTER_FIRST_TAG`; после публикации тега суммы
   пересчитываются `updpkgsums`.
-- Git-пакет отслеживает `master`; `pkgver` = `0.1.0.r<число коммитов>.g<хэш>`.
+- Git-пакет отслеживает `master`; `pkgver` = `0.4.0.r<число коммитов>.g<хэш>`.
 - Демону нужны `CAP_NET_ADMIN`, `CAP_NET_RAW` (создание TUN-устройства и
   сокетов); юнит выдаёт их через `AmbientCapabilities`, отдельный пользователь
   не создаётся.

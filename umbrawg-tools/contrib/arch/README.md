@@ -5,8 +5,8 @@ AUR-совместимые заготовки пакетов CLI UmbraWG. Каж
 
 | Пакет | Каталог | Тип |
 |---|---|---|
-| `umbrawg-tools` | `umbrawg-tools/` | стабильный, source — архивы тегов `v0.2.0` (tools) и `v0.3.0` (netlink) |
-| `umbrawg-tools-git` | `umbrawg-tools-git/` | VCS, `#branch=master` (tools) + `#branch=main` (netlink) |
+| `umbrawg-tools` | `umbrawg-tools/` | стабильный, source — архивы тегов `tools-v0.4.0` (tools) и `netlink-v0.4.0` (netlink) |
+| `umbrawg-tools-git` | `umbrawg-tools-git/` | VCS, `#branch=master` |
 
 ## Состав пакета
 
@@ -42,7 +42,7 @@ AUR-совместимые заготовки пакетов CLI UmbraWG. Каж
   префиксом `netlink-packet-umbrawg::git+...`, поэтому path-зависимость
   работает без правок.
 - `umbrawg-tools`: архивы распаковываются в
-  `umbrawg-tools-0.2.0/` и `netlink-packet-umbrawg-0.3.0/`; в `prepare()`
+  `umbrawg-tools-0.4.0/` и `netlink-packet-umbrawg-0.4.0/`; в `prepare()`
   создаётся симлинк `$srcdir/netlink-packet-umbrawg` на распакованный каталог
   netlink. Исходники и `Cargo.toml` при этом не правятся.
 
@@ -71,21 +71,22 @@ bsdtar -xpf umbrawg-tools-git-*.pkg.tar.zst -C /tmp/pkg
 ldd /tmp/pkg/usr/bin/uwg
 ```
 
-Проверено на хосте: `umbrawg-tools-git` собирается из деревьев tools `0.2.0`
-и netlink `0.3.0` (`makepkg -f --nodeps --skipinteg`), `check()` проходит
-212 тестов в 12 наборах, `uwg v0.2.0` и `uwg-quick --help` запускаются из
+Проверено на хосте: `umbrawg-tools-git` собирается из деревьев tools `0.4.0`
+и netlink `0.4.0` (`makepkg -f --nodeps --skipinteg`), `check()` проходит
+212 тестов в 12 наборах, `uwg v0.4.0` и `uwg-quick --help` запускаются из
 распакованного пакета, man-страницы проходят `gzip -t` и `groff -man`,
 автодополнения — `bash -n` и `fish -n`, `systemd-analyze verify` для
 `uwg-quick@.service` и `uwg-quick.target` ошибок не находит (только
 предупреждение об отсутствии `/usr/bin/uwg-quick` в распакованном дереве),
 права на `/etc/umbrawg` — `0700`. `makepkg` предупреждает, что `usr/bin/uwg`
 содержит строки с `$srcdir` (panic-локации Rust); на работу пакета это не
-влияет. Стабильный `umbrawg-tools` — шаблон до появления тегов, в этой
+влияет. Стабильный `umbrawg-tools` — шаблон до появления тегов `tools-v0.4.0`
+и `netlink-v0.4.0`, в этой
 проверке не собирался.
 
 ## Публикация в AUR
 
-1. Поставить теги: `v0.2.0` в `umbrawg-tools`, `v0.3.0` в
+1. Поставить теги: `tools-v0.4.0` в `umbrawg-tools` и `netlink-v0.4.0` в
    `netlink-packet-umbrawg` (без тега netlink не соберётся стабильный пакет).
 2. В `umbrawg-tools/` при необходимости обновить `pkgver`, `_netlink_ver`,
    `pkgrel`, затем:
@@ -112,11 +113,12 @@ ldd /tmp/pkg/usr/bin/uwg
 
 ## Допущения и ограничения
 
-- Стабильный `PKGBUILD` — шаблон: тегов пока нет, `sha256sums` содержит явную
+- Стабильный `PKGBUILD` — шаблон: версия `0.4.0` уже в `Cargo.toml`, а теги
+  `tools-v0.4.0`/`netlink-v0.4.0` появятся при релизе; `sha256sums` содержит явную
   заглушку `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` (не выдуманный хэш). После
   публикации тегов суммы пересчитываются `updpkgsums`.
 - `-git`-пакет собирается из `master` tools и `main` netlink; `pkgver` =
-  `0.2.0.r<число коммитов>.g<хэш>`.
+  `0.4.0.r<число коммитов>.g<хэш>`.
 - Каталог `contrib/arch` — место хранения в исходном репозитории; AUR требует
   `PKGBUILD` в корне своего репозитория, поэтому файлы копируются.
 - `check()` прогоняет тесты воркспейса без root; интеграционные тесты, которым

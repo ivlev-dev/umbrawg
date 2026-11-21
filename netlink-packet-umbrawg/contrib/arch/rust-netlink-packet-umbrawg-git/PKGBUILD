@@ -1,6 +1,6 @@
 # Maintainer: Yuri Egorov <ye@umbra.org>
 pkgname=rust-netlink-packet-umbrawg-git
-pkgver=0.3.0.r0.g0000000
+pkgver=0.4.0.r0.g0000000
 pkgrel=1
 _crate=netlink-packet-umbrawg
 pkgdesc="UmbraWG generic netlink packet definitions (Rust crate sources, git main)"

@@ -1,6 +1,6 @@
 pkgbase = umbrawg-tools-git
 	pkgdesc = UmbraWG command line tools: uwg and uwg-quick (git master)
-	pkgver = 0.2.0.r0.g0000000
+	pkgver = 0.4.0.r0.g0000000
 	pkgrel = 1
 	url = https://github.com/ivlev-dev/umbrawg
 	arch = x86_64

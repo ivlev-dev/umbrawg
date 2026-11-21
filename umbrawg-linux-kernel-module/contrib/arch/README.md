@@ -7,7 +7,7 @@
 
 | Пакет | Каталог | Тип |
 |---|---|---|
-| `umbrawg-dkms` | `umbrawg-dkms/` | стабильный, source — архив тега `v3.1.20261113-02` |
+| `umbrawg-dkms` | `umbrawg-dkms/` | стабильный, source — архив тега `kernel-v0.4.0` |
 | `umbrawg-dkms-git` | `umbrawg-dkms-git/` | VCS, `git+https://github.com/ivlev-dev/umbrawg.git#branch=master` |
 
 Оба пакета ставят только исходники в `/usr/src/umbrawg-<pkgver>`, сборку
@@ -17,15 +17,15 @@
 ## Версия
 
 Upstream-версия модуля берётся из `src/version.h` (`UMBRAWG_VERSION`).
-В текущем дереве это `3.1.20261113-02`. Дефис в `pkgver` запрещён, поэтому в
-`pkgver` он заменён подчёркиванием:
+В текущем дереве это `0.4.0`, тег — `kernel-v0.4.0`. Версия модуля
+одновременно является `pkgver` стабильного пакета:
 
 ```
-UMBRAWG_VERSION 3.1.20261113-02  ->  pkgver 3.1.20261113_02
+UMBRAWG_VERSION 0.4.0  ->  pkgver 0.4.0
 ```
 
 В `umbrawg-dkms-git` к версии из `version.h` добавляется счётчик коммитов и
-хэш: `3.1.20261113_02.r12.g1a2b3c4`.
+хэш: `0.4.0.r12.g1a2b3c4`.
 
 ## Что делает `package()`
 
@@ -69,14 +69,14 @@ cat /tmp/pkg/usr/src/umbrawg-*/dkms.conf
 ```sh
 cp -a /tmp/pkg/usr/src/umbrawg-* /tmp/modbuild
 cd /tmp/modbuild
-make LLVM=1 UMBRAWG_VERSION=3.1.20261113-02 KERNELRELEASE="$(uname -r)"
+make LLVM=1 UMBRAWG_VERSION=0.4.0 KERNELRELEASE="$(uname -r)"
 modinfo umbrawg.ko
 ```
 
 Проверено на хосте: пакет собирается из дерева, `dkms.conf` содержит
 `PACKAGE_VERSION` = `pkgver`, модуль компилируется `make LLVM=1` с
 заголовками `7.3.4-1-cachyos-bore-lto`, `modinfo` показывает
-`version: 3.1.20261113-02`. Повторная проверка на текущем `master` подтвердила
+`version: 0.4.0`. Повторная проверка на текущем `master` подтвердила
 тот же результат: правок в `PKGBUILD` не потребовалось. Дополнительно проверен
 полный цикл DKMS без установки пакета в систему:
 
@@ -94,8 +94,8 @@ MOK-ключом). dkms 3.4.5 при этом предупреждает
 
 ## Публикация в AUR
 
-1. Создать у upstream тег на релизный коммит: `git tag -a v3.1.20261113-02`
-   (имя тега = upstream-версия с префиксом `v`, дефис внутри сохраняется).
+1. Создать у upstream тег на релизный коммит: `git tag -a kernel-v0.4.0`
+   (имя тега = префикс компонента `kernel-v` + версия из `src/version.h`).
 2. В `umbrawg-dkms/` обновить `pkgver`, `_upstream_version`, `pkgrel`.
 3. Пересчитать контрольные суммы стабильного пакета:
 
@@ -111,7 +111,7 @@ MOK-ключом). dkms 3.4.5 при этом предупреждает
    git clone ssh://aur@aur.archlinux.org/umbrawg-dkms.git
    cp contrib/arch/umbrawg-dkms/{PKGBUILD,umbrawg-dkms.install,.SRCINFO} umbrawg-dkms/
    cd umbrawg-dkms && makepkg --printsrcinfo > .SRCINFO && git add -A
-   git commit -m "upgpkg: umbrawg-dkms 3.1.20261113_02-1" && git push
+   git commit -m "upgpkg: umbrawg-dkms 0.4.0-1" && git push
    ```
 
    Для `umbrawg-dkms-git` копируются `PKGBUILD`, `umbrawg-dkms-git.install`,
@@ -119,11 +119,11 @@ MOK-ключом). dkms 3.4.5 при этом предупреждает
 
 ## Допущения и ограничения
 
-- Тегов в репозитории пока нет. Стабильный `PKGBUILD` — корректный шаблон:
-  URL архива и каталог распаковки соответствуют тегу
-  `v3.1.20261113-02`, но `sha256sums` содержит явную заглушку
-  `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` вместо выдуманного хэша. До публикации
-  тега пакет намеренно не собирается: запустите `updpkgsums`.
+- Версия `0.4.0` уже в манифестах, но тег `kernel-v0.4.0` появляется только
+  при релизе. Стабильный `PKGBUILD` — корректный шаблон: URL архива и каталог
+  распаковки соответствуют этому тегу, а `sha256sums` содержит явную заглушку
+  `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` вместо выдуманного хэша. После публикации
+  тега запустите `updpkgsums`.
 - `arch=('any')` — пакет содержит только исходники, компиляция идёт на
   машине пользователя через DKMS.
 - DKMS-сборка требует установленных заголовков ядра (`linux-headers` и

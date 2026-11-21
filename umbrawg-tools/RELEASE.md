@@ -1,66 +1,88 @@
 # Выпуск UmbraWG
 
-Единый чек-лист для четырёх репозиториев. Часть шагов зависит от тегов и
-публикации; до первого релиза проверь раздел «Блокеры».
+Единый чек-лист для монорепозитория `ivlev-dev/umbrawg`. Версия `0.4.0` уже
+внесена в манифесты коммитом; теги `*-v0.4.0` ставятся отдельно и строго по
+порядку из раздела «Порядок тегов».
 
-## Компоненты и версии
+## Компоненты, версии и теги
 
-| Репозиторий | Пакет(ы) | Версия | Тег |
-|---|---|---|---|
-| `netlink-packet-umbrawg` | крейт, `rust-netlink-packet-umbrawg` | `0.4.0` | `v0.4.0` |
-| `umbrawg-tools` | `uwg`, `uwg-quick`, `umbrawg-tools` | `0.4.0` | `v0.4.0` |
-| `umbrawg-rs` | демон `umbrawg`, `umbrawg-daemon` | `0.4.0` | `v0.4.0` |
-| `umbrawg-linux-kernel-module` | DKMS-модуль | `0.4.0` | `v0.4.0` |
+| Компонент | Каталог | Манифест версии | Пакеты | Тег |
+|---|---|---|---|---|
+| netlink | `netlink-packet-umbrawg/` | `Cargo.toml` | `netlink-packet-umbrawg`, `rust-netlink-packet-umbrawg` | `netlink-v0.4.0` |
+| tools | `umbrawg-tools/` | `Cargo.toml` | `uwg`, `uwg-quick`, `umbrawg-tools` | `tools-v0.4.0` |
+| daemon | `umbrawg-rs/` | `Cargo.toml` | `umbrawg`, `umbrawg-daemon` | `rs-v0.4.0` |
+| kernel | `umbrawg-linux-kernel-module/` | `src/version.h` | DKMS-модуль `umbrawg` | `kernel-v0.4.0` |
 
-Каноническая строка версии модуля — `0.4.0`. Пакетные менеджеры
-нормализуют её: Arch и RPM используют `0.4.0`, Debian — upstream `0.4.0`
-без revision. `modinfo` показывает `0.4.0`.
+Теги **всегда** с префиксом компонента (`kernel-v*`, `netlink-v*`,
+`tools-v*`, `rs-v*`) — так устроены `paths`/`tags`-фильтры CI и
+`*-packaging.yml`. Голый `v0.4.0` больше не используется: он остался только
+у исторического `v0.1.0`.
+
+Каноническая строка версии модуля — `0.4.0`. Пакетные менеджеры нормализуют
+её: Arch и RPM используют `0.4.0`, Debian — upstream `0.4.0` с epoch
+(`1:0.4.0-1`). `modinfo` показывает `0.4.0`.
 
 ## Порядок тегов
 
 Теги ставятся и пушатся строго по порядку:
 
-1. `netlink-packet-umbrawg` — `v0.4.0`.
-2. `umbrawg-tools` — `v0.4.0` (зависит от netlink 0.4.0 и его lock).
-3. `umbrawg-rs` — `v0.4.0`.
-4. `umbrawg-linux-kernel-module` — `v0.4.0`.
+1. `netlink-v0.4.0` — `netlink-packet-umbrawg/`.
+2. `tools-v0.4.0` — `umbrawg-tools/` (зависит от netlink 0.4.0 и его lock).
+3. `rs-v0.4.0` — `umbrawg-rs/`.
+4. `kernel-v0.4.0` — `umbrawg-linux-kernel-module/`.
 
 Причина: `umbrawg-tools/Cargo.lock` собран против `netlink-packet-umbrawg`
-0.4.0. Если сначала выпустить tools, CI возьмёт netlink из `main` со старой
-версией и `cargo fetch --locked` упадёт.
-
-## Перед тегом (в каждом репозитории)
+0.4.0. Если сначала выпустить tools, CI возьмёт netlink из `master` со старой
+версией и `cargo fetch --locked` упадёт. Стабильные PKGBUILD ссылаются на
+архивы тегов, поэтому `updpkgsums` и публикация в AUR — только после того,
+как все четыре тега запушены.
 
 ```sh
-cargo test --workspace            # netlink: cargo test --all-targets
-cargo clippy --workspace --all-targets -- -D warnings
+git tag netlink-v0.4.0 && git push origin netlink-v0.4.0
+git tag tools-v0.4.0   && git push origin tools-v0.4.0
+git tag rs-v0.4.0      && git push origin rs-v0.4.0
+git tag kernel-v0.4.0  && git push origin kernel-v0.4.0
+```
+
+Тег модуля обязан совпадать с `UMBRAWG_VERSION` в `src/version.h`: job
+`meta` в `kernel-packaging.yml` падает, если `kernel-v*` не равен версии из
+манифеста. То же для `netlink-v*`, `tools-v*`, `rs-v*` и их `Cargo.toml`.
+
+## Перед тегом
+
+```sh
+# netlink
+cd netlink-packet-umbrawg
+cargo test --all-targets
+cargo clippy --all-targets -- -D warnings
 cargo +nightly fmt --all -- --check
-cargo deny check
-```
+bash scripts/check-uapi-parity.sh          # сверка с UAPI-заголовком модуля
 
-Для tools дополнительно:
-
-```sh
+# tools
+cd umbrawg-tools
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cargo fmt --all -- --check
 bash scripts/check-packaging.sh
-bash scripts/check-docs.sh        # нужен собранный target/release/uwg
-bash scripts/test-daemon-e2e.sh   # UAPI, автоскип без TUN
-```
+bash scripts/check-docs.sh                 # нужен собранный target/release/uwg
+bash scripts/test-daemon-e2e.sh            # UAPI, автоскип без TUN
 
-Для демона:
+# daemon
+cd umbrawg-rs
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+bash scripts/test-dataplane-e2e.sh         # два демона, автоскип без TUN
 
-```sh
-bash scripts/test-dataplane-e2e.sh  # два демона, автоскип без TUN
-```
-
-Для модуля:
-
-```sh
-cd src && make LLVM=1
+# kernel
+cd umbrawg-linux-kernel-module/src
+make LLVM=1
 make module-debug LLVM=1
-src/tests/netlink-parity.sh
+src/tests/netlink-parity.sh                # нужен загруженный модуль и root
+sudo UWG=../../umbrawg-tools/target/release/uwg src/tests/fec-profile-change.sh
 ```
 
-Убедись, что `master`/`main` чистые и все feature-ветки слиты.
+`cargo deny check` прогоняется во всех Rust-компонентах (в CI — отдельные
+джобы). Убедись, что `master` чистый и все feature-ветки слиты.
 
 ## crates.io
 
@@ -76,28 +98,56 @@ src/tests/netlink-parity.sh
 
 ## Arch / AUR
 
-PKGBUILD лежат в `contrib/arch/<pkgname>/` каждого репозитория.
+PKGBUILD лежат в `contrib/arch/<pkgname>/` каждого компонента. Стабильные
+PKGBUILD уже указывают на теги `0.4.0`:
 
-1. После тегов обнови `sha256sums` в стабильных PKGBUILD через `updpkgsums`
-   (сейчас там заглушки `TODO_UPDPKGSUMS_AFTER_FIRST_TAG`).
-2. Перегенерируй `.SRCINFO`: `makepkg --printsrcinfo > .SRCINFO`.
-3. Скопируй `PKGBUILD`, `*.install`, `.SRCINFO` в корень соответствующего
-   AUR-репозитория и запушь:
+- `netlink-packet-umbrawg/contrib/arch/rust-netlink-packet-umbrawg/` —
+  `netlink-v0.4.0`;
+- `umbrawg-tools/contrib/arch/umbrawg-tools/` — `tools-v0.4.0` +
+  `netlink-v0.4.0`;
+- `umbrawg-rs/contrib/arch/umbrawg-daemon/` — `rs-v0.4.0`;
+- `umbrawg-linux-kernel-module/contrib/arch/umbrawg-dkms/` — `kernel-v0.4.0`.
+
+Пока теги не запушены, `sha256sums` намеренно содержит заглушку
+`TODO_UPDPKGSUMS_AFTER_FIRST_TAG` — выдуманный хэш хуже явной заглушки.
+
+1. Дождись, что все четыре тега из раздела «Порядок тегов» запушены.
+2. Для каждого стабильного PKGBUILD пересчитай суммы и `.SRCINFO`:
+
+   ```sh
+   cd contrib/arch/<pkgname>
+   updpkgsums
+   makepkg --printsrcinfo > .SRCINFO
+   ```
+
+3. Проверь, что в `source`/`.SRCINFO` нет заглушки и версия совпадает с
+   тегом (`0.4.0`).
+4. Скопируй `PKGBUILD`, `*.install` (если есть) и `.SRCINFO` в корень
+   соответствующего AUR-репозитория и запушь:
    - `umbrawg-dkms`, `umbrawg-dkms-git`
    - `umbrawg-tools`, `umbrawg-tools-git`
    - `umbrawg-daemon`, `umbrawg-daemon-git`
    - `rust-netlink-packet-umbrawg`, `rust-netlink-packet-umbrawg-git`
-4. `-git`-пакеты работают без тегов; стабильные — только после публикации
+5. `-git`-пакеты работают без тегов; стабильные — только после публикации
    тегов и `updpkgsums`.
 
 ## Debian / RPM
 
-CI собирает пакеты на тег `v*`:
+CI собирает пакеты на тег **своего** компонента:
 
-- tools: `.deb`, `.rpm`, Arch;
-- module: `.deb`, `.rpm`, Arch;
-- rust: Arch;
-- netlink: Arch + `cargo package`/`--dry-run`.
+- `kernel-v*` → `kernel-packaging.yml`: `.deb`, `.rpm`, Arch/DKMS;
+- `netlink-v*` → `netlink-packaging.yml`: `.crate`, Arch;
+- `tools-v*` → `tools-packaging.yml`: `.deb`, `.rpm`, Arch, tarball'ы;
+- `rs-v*` → `rs-packaging.yml`: `.deb`, `.rpm`, Arch, tarball'ы.
+
+Ручной прогон без публикации (релиз пропускается):
+
+```sh
+gh workflow run kernel-packaging.yml -f version=0.4.0
+gh workflow run netlink-packaging.yml -f version=0.4.0
+gh workflow run tools-packaging.yml -f version=0.4.0
+gh workflow run rs-packaging.yml -f version=0.4.0
+```
 
 Локально:
 
@@ -116,8 +166,8 @@ scripts/package/build-rpm.sh
 - Interop: демон ↔ модуль, демон ↔ `amneziawg-go`, с обфускацией и без.
 - Замеры: `bench/bench.sh` с `REPEATS=3`, `CONNS_LIST="1 10"`,
   `OBF_LIST="0 1"`, MTU underlay 9000.
-- `cargo deny check` во всех Rust-репозиториях.
-- `pkgs` из CI скачаны и проверены (`dpkg-deb -c`, `rpm -qlp`,
+- `cargo deny check` во всех Rust-компонентах.
+- Пакеты из CI скачаны и проверены (`dpkg-deb -c`, `rpm -qlp`,
   `bsdtar -tf`).
 
 ## Блокеры и открытые решения
@@ -136,8 +186,7 @@ scripts/package/build-rpm.sh
   (TCP падает в ~2.4 раза). Демон предупреждает; для таких профилей нужен
   TUN MTU ≤1380 или underlay 9000. Oversized-кадров GSO не даёт (≤1514).
 - **Версия модуля**: каноническая `0.4.0`; `Makefile`/`dkms.conf`
-  по умолчанию содержат `0.4.0` и переопределяются упаковкой. Реши, нужно ли
-  синхронизировать исходники.
+  по умолчанию содержат `0.4.0` и переопределяются упаковкой.
 - **AUR**: нужен аккаунт и SSH-ключ; публикация через `scripts/aur-publish.sh`
   после тегов и `updpkgsums`.
 - **crates.io**: нужен токен; порядок публикации — netlink, затем внутренние
