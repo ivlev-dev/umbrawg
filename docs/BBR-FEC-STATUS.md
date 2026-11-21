@@ -328,6 +328,7 @@ kernel `2:1` — 1.18–1.21 Гбит/с (v2/v3), rust — 1.26–1.54. Стар
    counter в шарде (wire-version 2).
 2. Поднять потолок шарда/floor cwnd при переходе на сети >6 Гбит/с.
 3. Матрица против `amneziawg`/`amneziawg-go` на loss/rate снята 2026-11-21
-   ([`BENCHMARKS-2026-11-21.md`](BENCHMARKS-2026-11-21.md)). Осталось:
-   AES-256-GCM и mixed ChaCha/AES, multi-peer 5/10/50/100, снижение
-   FEC block timeout и ранний partial flush для RTT.
+   ([`BENCHMARKS-2026-11-21.md`](BENCHMARKS-2026-11-21.md)), включая
+   AES-256-GCM/mixed и multi-peer до 50 пиров. Осталось: 100 пиров (прогноз
+   ~4.3 ГБ у Rust — за пределами стенда), снижение FEC block timeout и ранний
+   partial flush для RTT.

@@ -81,7 +81,8 @@ cd umbrawg-rs && cargo test --workspace && cargo clippy --workspace --all-target
 - Состояние BBRv3/FEC, финальные замеры и ограничения —
   [`docs/BBR-FEC-STATUS.md`](docs/BBR-FEC-STATUS.md).
 - Бенчмарк-матрица 2026-11-21: baseline AmneziaWG, потери 0/2/5/10%, FEC/BBR,
-  UDP и RTT — [`docs/BENCHMARKS-2026-11-21.md`](docs/BENCHMARKS-2026-11-21.md).
+  AES/mixed, обфускация, multi-peer 5/10/50, UDP и RTT —
+  [`docs/BENCHMARKS-2026-11-21.md`](docs/BENCHMARKS-2026-11-21.md).
 - Производительность и отклонённые эксперименты —
   [`umbrawg-linux-kernel-module/docs/PERFORMANCE.md`](umbrawg-linux-kernel-module/docs/PERFORMANCE.md).
 - Полная матрица TCP/UDP, data-plane e2e и сравнение реализаций —

@@ -36,9 +36,10 @@
   `bench/README.md`.
 - Итоговые результаты замеров final5 (2026-11-17) зафиксированы в
   `docs/RESULTS.md`.
-- Бенчмарк-матрица 2026-11-21 (baseline AmneziaWG, потери, FEC/BBR, UDP, RTT)
-  — [`../docs/BENCHMARKS-2026-11-21.md`](../docs/BENCHMARKS-2026-11-21.md);
-  сырые артефакты — `/root/bench-matrix/v2` и `/root/bench-matrix/v3`.
+- Бенчмарк-матрица 2026-11-21 (baseline AmneziaWG, потери, FEC/BBR, UDP, RTT,
+  cipher, обфускация, multi-peer) —
+  [`../docs/BENCHMARKS-2026-11-21.md`](../docs/BENCHMARKS-2026-11-21.md);
+  сырые артефакты — `/root/bench-matrix/{v2,v3,aes,obf,multi}`.
 - BBR/FEC: `uwg set/show bbr|fec|underlay-mtu`, `uwg show <if>
   bbr-stats|fec-stats` для обоих бэкендов; fixed-профили `K=1..8, M=1..2`.
 - Env: `WG_COLOR_MODE`/`WG_HIDE_KEYS` — основные, `UWG_COLOR_MODE`/
@@ -130,18 +131,23 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отч
    netlink из `Cargo.lock` в ветке `main`) и ARM-рантайм.
 4. Поставить компонентные теги `tools-v0.4.1` и `netlink-v0.4.1`;
    до публикации — `updpkgsums` для стабильных Arch-пакетов.
-5. Матрица cipher: `AES-256-GCM` и mixed ChaCha/AES. `CIPHER` уже
-   подставляется в конфиг, но не является осью матрицы; добавить ось и
-   прогнать на стенде.
-6. Multi-peer 5/10/50/100 в `bench.sh` (сейчас дефолт и проверенные
-   значения — 1 и 4).
-7. Зафиксировать методику v2/v3 и артефакты `/root/bench-matrix/{v2,v3}`;
+5. Матрица cipher: `AES-256-GCM` и mixed ChaCha/AES снята отдельными
+   подпрогонами (`/root/bench-matrix/aes`), но `CIPHER` всё ещё не ось
+   `bench.sh` — добавить ось и воспроизвести §5 матрицы штатным стендом.
+6. Multi-peer 5/10/50 снят (`/root/bench-matrix/multi`), 100 не тестировались
+   (у Rust прогноз ~4.3 ГБ, у `awg-go` 50 недостижимы). В `bench.sh` дефолт
+   по-прежнему 1/4 пира — расширить `PEERS_LIST` и добавить сбор RSS/fairness
+   в отчёт.
+7. Зафиксировать методику v2/v3 и артефакты `/root/bench-matrix/{v2,v3,aes,obf,multi}`;
    сослаться на них из `docs/BENCHMARKS-2026-11-21.md`.
 8. Диагностика UDP на чистом канале: отличать `RcvbufErrors` iperf3 от
    дропов туннеля и объяснить 0.08–0.1% потерь у Rust при 400 Мбит/с.
 9. Убрать `go` из дефолта `IMPL_LIST` или явно помечать его как
    отсутствующий: после удаления Go-форка прогон без явного `IMPL_LIST`
    пытается запустить несуществующий бинарник.
+10. Mixed fairness/шейпинг: mixed на 2% ниже чистого AES на 11–13%
+    (1.421/1.438 против 1.627/1.625) — добавить в отчёт стенда fairness и
+    проверить шейпер при разных cipher на концах.
 
 Сделано в 0.2.0–0.4.1: упаковка Debian/RPM из `cargo build --release`,
 man-страницы, completions, systemd-юниты, CI fmt/clippy/test, релизные сборки
