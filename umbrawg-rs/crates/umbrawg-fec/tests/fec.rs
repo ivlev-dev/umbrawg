@@ -223,10 +223,17 @@ fn partial_two_to_one_block_recovers_without_the_block_timeout() {
 }
 
 #[test]
-fn default_block_timeout_stays_inside_the_latency_budget() {
-    let expected = Duration::from_millis(2);
+fn default_block_timeout_is_generous_and_can_be_overridden() {
+    let expected = Duration::from_millis(5);
     assert_eq!(umbrawg_fec::DEFAULT_BLOCK_TIMEOUT, expected);
     assert_eq!(FecDecoder::new(config(2, 1)).timeout(), expected);
+    assert_eq!(
+        FecDecoder::with_timeout(config(2, 1), Duration::from_millis(2)).timeout(),
+        Duration::from_millis(2)
+    );
+    // The hard ceiling must be above the time a whole block needs on the
+    // slowest supported link (8:2 of full-size shards at 10 Mbit/s ~ 11 ms).
+    assert!(umbrawg_fec::MAX_BLOCK_HOLD >= Duration::from_millis(12));
     // Release of a block that cannot be completed must not wait longer than
     // the timeout, and must not happen before it either.
     let config = config(2, 1);
@@ -242,6 +249,96 @@ fn default_block_timeout_stays_inside_the_latency_budget() {
     let released = decoder.poll(now + expected);
     assert_eq!(released.len(), 1);
     assert_eq!(released[0].packets, vec![packets[0].clone()]);
+}
+
+#[test]
+fn slow_shard_stream_is_decoded_instead_of_cut_off() {
+    // A 4:2 block spread over 5 ms (one shard per millisecond) is far longer
+    // than the 2 ms stall timeout, but the deadline slides with every shard:
+    // the block must be decoded, not finalized after the first two shards.
+    let config = config(4, 2);
+    let packets = full_block_packets(4, 24);
+    let blocks = encode(config, 1500, &packets);
+    let shards = shards_of(&blocks[0]);
+    assert_eq!(shards.len(), 6);
+
+    let mut decoder = FecDecoder::with_timeout(config, Duration::from_millis(2));
+    let start = Instant::now();
+    let mut output = Vec::new();
+    for (index, shard) in shards.iter().enumerate() {
+        let at = start + Duration::from_millis(u64::try_from(index).unwrap());
+        output.extend(decoder.push_at(*shard, at).expect("valid shard"));
+    }
+    assert_eq!(decoder.pending_blocks(), 0);
+    assert_eq!(output.len(), 1);
+    assert_eq!(output[0].packets, packets);
+    assert_eq!(output[0].recovered, 0);
+}
+
+#[test]
+fn block_is_released_when_shard_progress_stops() {
+    let config = config(4, 2);
+    let packets = full_block_packets(4, 24);
+    let blocks = encode(config, 1500, &packets);
+    let shards = shards_of(&blocks[0]);
+
+    let mut decoder = FecDecoder::with_timeout(config, Duration::from_millis(2));
+    let start = Instant::now();
+    assert!(decoder.push_at(shards[0], start).expect("valid").is_empty());
+    assert!(decoder
+        .push_at(shards[1], start + Duration::from_millis(1))
+        .expect("valid")
+        .is_empty());
+    assert_eq!(decoder.pending_blocks(), 1);
+    // The deadline is anchored to the last shard, not the first one.
+    assert!(decoder.poll(start + Duration::from_millis(2)).is_empty());
+    let released = decoder.poll(start + Duration::from_millis(3));
+    assert_eq!(released.len(), 1);
+    assert_eq!(
+        released[0].packets,
+        vec![packets[0].clone(), packets[1].clone()]
+    );
+    assert_eq!(released[0].recovered, 0);
+}
+
+#[test]
+fn shard_trickle_is_capped_by_max_block_hold() {
+    // 8:2 needs 8 data shards. A shard every 3 ms keeps sliding the 2 ms
+    // deadline, so the hard ceiling from the first shard is what has to end
+    // the block; without it the trickle could hold the in-order queue open
+    // forever.
+    let config = config(8, 2);
+    let packets = full_block_packets(8, 24);
+    let blocks = encode(config, 1500, &packets);
+    let shards = shards_of(&blocks[0]);
+    assert_eq!(shards.len(), 10);
+
+    let mut decoder = FecDecoder::with_timeout(config, Duration::from_millis(2));
+    let start = Instant::now();
+    let mut output = Vec::new();
+    for (index, shard) in shards.iter().enumerate().take(7) {
+        let at = start + Duration::from_millis(3 * u64::try_from(index).unwrap());
+        output.extend(decoder.push_at(*shard, at).expect("valid shard"));
+    }
+    assert!(
+        output.is_empty(),
+        "seven of eight data shards are not enough"
+    );
+    assert_eq!(decoder.pending_blocks(), 1);
+
+    let hold = umbrawg_fec::MAX_BLOCK_HOLD;
+    assert!(decoder
+        .poll(start + hold - Duration::from_millis(1))
+        .is_empty());
+    let released = decoder.poll(start + hold);
+    assert_eq!(released.len(), 1);
+    assert_eq!(released[0].packets, packets[..7].to_vec());
+    // A shard past the ceiling is late: the block has been released.
+    assert!(decoder
+        .push_at(shards[7], start + hold + Duration::from_millis(1))
+        .expect("valid shard")
+        .is_empty());
+    assert_eq!(decoder.pending_blocks(), 0);
 }
 
 #[test]

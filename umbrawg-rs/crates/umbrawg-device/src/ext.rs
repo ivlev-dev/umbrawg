@@ -66,9 +66,12 @@ const ACK_TIMEOUT_MIN_US: u64 = 2_000;
 const ACK_TIMEOUT_MAX_US: u64 = 5_000;
 /// Lower bound of the randomized partial FEC block deadline.
 ///
-/// This is only the batching window for packets of one burst: a block that
-/// stops filling is flushed well below one poll timeout, so the extra RTT of
-/// an FEC-protected flow stays under 0.5 ms per direction.
+/// This is only the batching window for packets of one burst, not a latency
+/// target: the daemon's poll timeout is rounded up to whole milliseconds
+/// (`poll_timeout_ms`), so a block that stops filling is actually sent on the
+/// next 1 ms wake-up. Sparse packets do not go through this timer at all —
+/// see [`FEC_SOLO_GAP`] — so the deadline can stay short without trading away
+/// the RTT of an idle flow.
 const FEC_DEADLINE_MIN_US: u64 = 100;
 /// Upper bound of the randomized partial FEC block deadline.
 const FEC_DEADLINE_MAX_US: u64 = 300;
@@ -82,6 +85,15 @@ const FEC_DEADLINE_MAX_US: u64 = 300;
 /// saturated flow is read from the TUN in batches, and the few hundred
 /// microseconds between two batches must not turn into a one-packet block.
 const FEC_SOLO_GAP: Duration = Duration::from_millis(2);
+/// Longest gap between two shards of one RX block before it is released.
+///
+/// The decoder deadline slides with every accepted shard (`umbrawg-fec`), so
+/// this bounds the *stall* of one block, not its total duration: an `8:2`
+/// block on a 10 Mbit/s link is spread over ~11 ms, but consecutive shards
+/// are only a serialization time (~1.1 ms) plus queuing apart. Keeping the
+/// stall short bounds the head-of-line wait after a lost block;
+/// `MAX_BLOCK_HOLD` in `umbrawg-fec` bounds the whole block.
+const FEC_RX_BLOCK_TIMEOUT: Duration = Duration::from_millis(2);
 /// Scratch size for one FEC shard header: 8-byte prefix plus a 12-byte body.
 const FEC_SHARD_HEADER_LEN: usize = 20;
 
@@ -1097,7 +1109,7 @@ impl PeerExtension {
             self.fec_tx = fec.map(|fec| {
                 FecEncoder::with_block_id(fec, usize::from(config.max_shard_len), block_id)
             });
-            self.fec_rx = fec.map(FecDecoder::new);
+            self.fec_rx = fec.map(fec_decoder);
             self.fec_active = !matches!(config.fec, FecMode::Off | FecMode::Adaptive);
             self.loss = LossWindow::default();
             self.adaptive_clean_since = None;
@@ -1555,7 +1567,7 @@ impl PeerExtension {
             self.bbr = None;
         }
         if let Some(fec) = self.config.fec.config() {
-            self.fec_rx = Some(FecDecoder::new(fec));
+            self.fec_rx = Some(fec_decoder(fec));
         }
         self.loss = LossWindow::default();
         self.adaptive_clean_since = None;
@@ -1930,6 +1942,16 @@ impl PeerExtension {
             }
         }
     }
+}
+
+/// Builds the RX decoder with the daemon's short stall timeout.
+///
+/// The library default is generous so that a block on a slow link is not cut
+/// off; the daemon instead relies on the sliding deadline (which follows a
+/// slow but steady stream of shards) and wants the in-order release to move
+/// on quickly after a lost block, hence [`FEC_RX_BLOCK_TIMEOUT`].
+fn fec_decoder(config: FecConfig) -> FecDecoder {
+    FecDecoder::with_timeout(config, FEC_RX_BLOCK_TIMEOUT)
 }
 
 fn is_bounds_error(error: FecError) -> bool {
@@ -2965,6 +2987,61 @@ mod tests {
         }
         assert_eq!(delivered, vec![vec![0x11u8; 24]]);
         assert_eq!(rx.fec_stats().unwrap().packets_recovered, 1);
+    }
+
+    #[test]
+    fn fec_rx_uses_the_short_daemon_stall_timeout() {
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 12,
+            max_shard_len: 1900,
+        });
+        let decoder = ext.fec_rx().expect("fec is configured");
+        assert_eq!(decoder.timeout(), FEC_RX_BLOCK_TIMEOUT);
+        assert_eq!(FEC_RX_BLOCK_TIMEOUT, Duration::from_millis(2));
+    }
+
+    #[test]
+    fn fec_decode_follows_a_slow_block_instead_of_dropping_it() {
+        // A 4:2 block whose shards arrive 1 ms apart spans 5 ms, well past the
+        // 2 ms stall timeout. The decoder deadline slides with every shard, so
+        // the daemon must deliver all four packets instead of finalizing the
+        // block after its first two shards.
+        let fec = FecConfig::new(4, 2).unwrap();
+        let mut encoder = FecEncoder::new(fec, 1900);
+        let packets: Vec<Vec<u8>> = (0..4u8).map(|index| vec![index; 40]).collect();
+        let mut block = None;
+        for packet in &packets {
+            block = encoder.push(packet).unwrap().or(block);
+        }
+        let block = block.expect("full block");
+
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 4, m: 2 },
+            ack_interval: 12,
+            max_shard_len: 1900,
+        });
+        let base = Instant::now();
+        let mut delivered = Vec::new();
+        for index in 0..block.shards.len() {
+            delivered.extend(ext.fec_decode(
+                FecShard {
+                    block_id: block.block_id,
+                    index: u8::try_from(index).unwrap(),
+                    k: block.k,
+                    m: block.m,
+                    shard_len: block.shard_len,
+                    payload: &block.shards[index],
+                },
+                base + Duration::from_millis(u64::try_from(index).unwrap()),
+            ));
+        }
+        assert_eq!(delivered, packets);
+        let stats = ext.fec_stats().expect("fec is configured");
+        assert_eq!(stats.blocks_decoded, 1);
+        assert_eq!(stats.decode_fail, 0);
     }
 
     #[test]

@@ -66,15 +66,33 @@ pub use error::FecError;
 /// Maximum number of shards in one Reed-Solomon block (`k + m`).
 pub const MAX_TOTAL_SHARDS: usize = 255;
 
-/// Default time the decoder waits for missing shards before releasing a block.
+/// Default time the decoder waits for a block to make progress.
+///
+/// The deadline is *sliding*: every accepted shard moves it to `now +
+/// timeout`, so a block that is still being received is never released early,
+/// even when the whole block needs longer than the timeout on a slow link.
+/// The timeout therefore only detects a stalled block — it is not the
+/// lifetime of the block. [`MAX_BLOCK_HOLD`] bounds that lifetime.
 ///
 /// Recovery never waits for this timer: as soon as any `k` shards of a block
 /// are present the block is decoded (and a lost data shard restored from
-/// parity) immediately. The timeout only bounds how long a block that can no
-/// longer be completed is held, and how long a later block waits behind a
-/// missing one in the in-order release, so it is kept short: 2 ms is already
-/// an order of magnitude above the shard spacing of one block.
-pub const DEFAULT_BLOCK_TIMEOUT: Duration = Duration::from_millis(2);
+/// parity) immediately.
+///
+/// The daemon overrides the default with a shorter 2 ms timeout
+/// ([`FecDecoder::with_timeout`]) to keep the in-order release snappy; the
+/// library default stays generous for callers that merely want to bound a
+/// stalled block.
+pub const DEFAULT_BLOCK_TIMEOUT: Duration = Duration::from_millis(5);
+
+/// Hard ceiling on how long one block may stay pending, counted from its
+/// first shard.
+///
+/// A sliding deadline alone lets a trickle of shards (a slow link, or a peer
+/// naming stale block ids) keep a block — and everything behind it in the
+/// in-order release — pending forever. This cap bounds it. It must stay above
+/// the time a whole block needs on the slowest supported link: an `8:2` block
+/// of full-size shards on a 10 Mbit/s link takes about 11.4 ms, hence 20 ms.
+pub const MAX_BLOCK_HOLD: Duration = Duration::from_millis(20);
 
 /// Largest shard length accepted by [`FecDecoder`], in bytes.
 ///

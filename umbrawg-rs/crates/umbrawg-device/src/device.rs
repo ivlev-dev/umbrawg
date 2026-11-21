@@ -2254,8 +2254,9 @@ impl Device {
                 self.handle_timer(peer, kind, ctx)?;
                 handled += 1;
             }
-            // A partially filled FEC block has its own 0.5..=2 ms deadline.
-            // Without this flush it would wait for the next data packet.
+            // A partially filled FEC block must not wait for the next data
+            // packet: it is flushed after its 0.1..=0.3 ms batching deadline
+            // (or at once once the flow goes idle, see `fec_push`).
             let due_block = peer.extension().fec_flush_due(ctx.now);
             if let Some(block) = due_block {
                 self.send_fec_block_direct(peer, &block, ctx)?;

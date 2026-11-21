@@ -3,7 +3,9 @@ use std::time::{Duration, Instant};
 
 use crate::gf;
 use crate::matrix::{invert, RSCode};
-use crate::{FecConfig, FecError, DEFAULT_BLOCK_TIMEOUT, MAX_PENDING_BLOCKS, MAX_SHARD_LEN};
+use crate::{
+    FecConfig, FecError, DEFAULT_BLOCK_TIMEOUT, MAX_BLOCK_HOLD, MAX_PENDING_BLOCKS, MAX_SHARD_LEN,
+};
 
 /// A single received shard passed to [`FecDecoder::push`].
 #[derive(Clone, Copy, Debug)]
@@ -39,34 +41,47 @@ pub struct DecodedBlock {
 
 /// Reassembles packets from received Reed-Solomon shards.
 ///
-/// Blocks are held until `k` shards are available or until the block timeout
-/// expires, and are released in ascending block order. A block following a
-/// missing `block_id` waits for the timeout at most. At most
-/// [`MAX_PENDING_BLOCKS`] blocks are held at once; when the limit is exceeded
-/// the oldest block is released early with the data shards received so far.
+/// A block is decoded as soon as `k` of its `k + m` shards are present, so a
+/// lost data shard is restored from parity without any timer. Blocks that are
+/// still incomplete are released in ascending block order once they stop
+/// making progress: every accepted shard moves the block deadline to `now +
+/// timeout` (see [`FecDecoder::timeout`]), so a slow but steady stream of
+/// shards is followed instead of being cut off, while a stalled block is
+/// released `timeout` after its last shard. The deadline never moves past
+/// `first_seen + MAX_BLOCK_HOLD` (see [`MAX_BLOCK_HOLD`]), which bounds both
+/// the lifetime of one block and the head-of-line wait of later blocks. At
+/// most [`MAX_PENDING_BLOCKS`] blocks are held at once; when the limit is
+/// exceeded the oldest block is released early with the data shards received
+/// so far.
 pub struct FecDecoder {
     config: FecConfig,
     code: Result<RSCode, FecError>,
     timeout: Duration,
+    max_hold: Duration,
     blocks: BTreeMap<u64, Block>,
     next_seq: Option<u64>,
     clock: BlockClock,
 }
 
 impl FecDecoder {
-    /// Creates a decoder for `config` with the default 2 ms block timeout.
+    /// Creates a decoder for `config` with the default 5 ms stall timeout.
     #[must_use]
     pub fn new(config: FecConfig) -> Self {
         Self::with_timeout(config, DEFAULT_BLOCK_TIMEOUT)
     }
 
-    /// Creates a decoder for `config` with a custom block timeout.
+    /// Creates a decoder for `config` with a custom stall timeout.
+    ///
+    /// The timeout is the longest gap between two shards of one block; it is
+    /// not the lifetime of the block, which is additionally bounded by
+    /// [`MAX_BLOCK_HOLD`].
     #[must_use]
     pub fn with_timeout(config: FecConfig, timeout: Duration) -> Self {
         Self {
             config,
             code: RSCode::try_new(config.k(), config.m()),
             timeout,
+            max_hold: timeout.max(MAX_BLOCK_HOLD),
             blocks: BTreeMap::new(),
             next_seq: None,
             clock: BlockClock::new(),
@@ -149,12 +164,15 @@ impl FecDecoder {
             }
         }
         let total = usize::from(shard.k) + usize::from(shard.m);
+        let timeout = self.timeout;
+        let max_hold = self.max_hold;
         let block = self.blocks.entry(seq).or_insert_with(|| Block {
             block_id: shard.block_id,
             k: shard.k,
             m: shard.m,
             shard_len: shard.shard_len,
-            deadline: now + self.timeout,
+            first_seen: now,
+            deadline: now + timeout,
             shards: vec![None; total],
             present: 0,
             packets: None,
@@ -170,6 +188,13 @@ impl FecDecoder {
         };
         if slot.is_none() {
             block.present += 1;
+            // A new shard is progress, so the deadline slides: the block is
+            // released only after `timeout` without a shard, not `timeout`
+            // after its first one. The ceiling keeps a trickle of shards from
+            // holding the block (and the whole in-order release) forever.
+            if block.packets.is_none() {
+                block.deadline = (now + timeout).min(block.first_seen + max_hold);
+            }
         }
         *slot = Some(shard.payload.to_vec());
         let data_shards = usize::from(block.k);
@@ -361,6 +386,10 @@ struct Block {
     k: u8,
     m: u8,
     shard_len: u16,
+    /// Arrival of the first shard; the anchor of [`MAX_BLOCK_HOLD`].
+    first_seen: Instant,
+    /// Sliding stall deadline: `max(last shard) + timeout`, capped by
+    /// `first_seen + MAX_BLOCK_HOLD`.
     deadline: Instant,
     shards: Vec<Option<Vec<u8>>>,
     present: usize,
