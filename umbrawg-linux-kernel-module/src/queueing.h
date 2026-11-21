@@ -200,14 +200,20 @@ static inline bool uwg_queue_wakeup_drained(struct multicore_worker *worker,
  * ring exactly like their own; the old round-robin design did the same
  * per chain, so ordering and the packet state machine are unaffected.
  *
- * The threshold counts queue entries (a chain of up to MAX_STAGED_PACKETS
- * skbs on TX, a single skb on RX), not packets. A healthy multi-peer
- * pipeline keeps only a couple of entries queued per peer and stays on
- * the batching path; a single flow that outruns its CPU grows a real
- * backlog and asks for help early. Four entries measured the best
- * balance: single-flow ~3.1 Gbit/s (local-only ~2.4, legacy round-robin
- * ~2.6) while 50 peers stayed at ~8.4 Gbit/s with fairness < 2.1. A
- * threshold of 8 still helped but left single-flow at ~2.7.
+ * The threshold counts queue entries, and the unit differs by direction:
+ * on TX an entry is a chain of up to MAX_STAGED_PACKETS (128) skbs, so
+ * four entries is up to ~512 skb of backlog; on RX an entry is a single
+ * skb, so four entries are four skbs. RX has no chain batching and a
+ * single high-pps flow fills its CPU ring with individual skbs, so the
+ * same number intentionally triggers much earlier in byte terms there.
+ * One number for both keeps the policy simple; a split TX/RX threshold
+ * would need its own measurement pass. A healthy multi-peer pipeline
+ * keeps only a couple of entries queued per peer and stays on the
+ * batching path; a single flow that outruns its CPU grows a real backlog
+ * and asks for help early. Four entries measured the best balance:
+ * single-flow ~3.1 Gbit/s (local-only ~2.4, legacy round-robin ~2.6)
+ * while 50 peers stayed at ~8.4 Gbit/s with fairness < 2.1. A threshold
+ * of 8 still helped but left single-flow at ~2.7.
  */
 #define UWG_CRYPT_STEAL_THRESHOLD 4
 
@@ -236,10 +242,25 @@ uwg_crypt_steal_claim(struct crypt_queue *queue)
 }
 
 /*
- * Called by the producer when a peer's chain backlog crosses the
- * threshold. Only one request is outstanding at a time (steal_cpu
- * doubles as its flag), and one helper is woken per request, rotated
- * over the online CPUs, so a burst cannot turn into a wakeup storm.
+ * Drop a request we own. cmpxchg keeps a request published by somebody
+ * else (or already claimed by a helper) intact.
+ */
+static inline void uwg_crypt_steal_cancel(struct crypt_queue *device_queue,
+					  int own_cpu)
+{
+	atomic_cmpxchg(&device_queue->steal_cpu, own_cpu, -1);
+}
+
+/*
+ * Called by the producer when a peer's backlog crosses the threshold.
+ * steal_cpu doubles as the request slot: cmpxchg publishes at most one
+ * request at a time and one helper is woken per request, rotated over
+ * the online CPUs, so a burst cannot turn into a wakeup storm. Once a
+ * helper has claimed the request, later overflows may publish another
+ * one and several helpers can end up draining the same victim ring; that
+ * is safe (ptr_ring consumer_lock) and bounded by nr_cpus. If a tighter
+ * in-flight bound is ever needed, gate publishing on the number of
+ * helpers already draining that ring.
  */
 static inline void uwg_crypt_maybe_steal(struct crypt_queue *device_queue,
 					 const struct prev_queue *peer_queue,
@@ -259,16 +280,19 @@ static inline void uwg_crypt_maybe_steal(struct crypt_queue *device_queue,
 		cpu = uwg_cpumask_next_online(&device_queue->helper_cpu);
 	if (unlikely(cpu == own_cpu)) {
 		/* Only one CPU online: nobody can help. */
-		atomic_set(&device_queue->steal_cpu, -1);
+		uwg_crypt_steal_cancel(device_queue, own_cpu);
 		return;
 	}
 	worker = per_cpu_ptr(device_queue->worker, cpu);
 	if (!uwg_queue_wakeup_arm(worker, cpu, wq))
 		/* The helper was already queued and may have passed its
 		 * claim point; retry on the next overflow instead of
-		 * leaving the request stuck.
+		 * leaving the request stuck. If the target CPU goes
+		 * offline before its work runs, the bound pool is
+		 * disassociated and a worker runs the queued work on an
+		 * online CPU, so the request is still claimed.
 		 */
-		atomic_cmpxchg(&device_queue->steal_cpu, own_cpu, -1);
+		uwg_crypt_steal_cancel(device_queue, own_cpu);
 }
 
 static inline int uwg_queue_enqueue_per_device_and_peer(
