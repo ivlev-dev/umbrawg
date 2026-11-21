@@ -174,6 +174,8 @@ int uwg_ext_parse_header(const u8 *data, size_t len,
 int uwg_ext_parse_caps(const u8 *payload, size_t len,
 		       struct uwg_ext_caps *caps);
 int uwg_ext_parse_ack(const u8 *payload, size_t len, struct uwg_ext_ack *ack);
+u64 uwg_ext_ack_bitmap(const struct uwg_ext_ack *ack);
+bool uwg_ext_ack_selftest(void);
 int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
 			    struct uwg_ext_fec_shard *shard);
 

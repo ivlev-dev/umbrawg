@@ -42,17 +42,22 @@ struct uwg_fec_rx;
  * inner packet itself: 48 bytes of IP/UDP, the message header and auth tag
  * (MESSAGE_MINIMUM_LENGTH), both extension headers, the two byte shard length
  * prefix and the worst case padding above. uwg_fec_mtu_selftest() keeps this
- * in sync with the builder in uwg_fec_tx_emit().
+ * in sync with the builder in uwg_fec_tx_emit(). The obfuscation prefix S4
+ * (`transport_padding`) is not part of this constant because it is a runtime
+ * policy value; callers pass it to uwg_fec_allowed_inner()/uwg_fec_target_mtu()
+ * and it is subtracted from the same budget.
  */
 #define UWG_FEC_SHARD_WIRE_OVERHEAD \
 	(UWG_FEC_UNDERLAY_IP_UDP_OVERHEAD + MESSAGE_MINIMUM_LENGTH + \
 	 UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN + 2 + \
 	 UWG_FEC_SHARD_PADDING_MAX)
 
-unsigned int uwg_fec_allowed_inner(unsigned int underlay_mtu);
+unsigned int uwg_fec_allowed_inner(unsigned int underlay_mtu,
+				   unsigned int underlay_padding);
 unsigned int uwg_fec_underlay_payload(const struct uwg_device *uwg);
 unsigned int uwg_fec_target_mtu(unsigned int underlay_mtu,
-				unsigned int base_mtu, bool fec_on);
+				unsigned int base_mtu, bool fec_on,
+				unsigned int underlay_padding);
 void uwg_fec_refresh_mtu(struct uwg_device *uwg);
 int uwg_fec_mtu_selftest(void);
 
@@ -98,7 +103,8 @@ void uwg_fec_stats_fill(const struct uwg_peer *peer, struct uwg_fec_stats *stats
 void uwg_fec_stats_fill_device(struct uwg_device *uwg,
 			       struct uwg_fec_stats *stats);
 
-void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter);
+void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter,
+			      u64 keypair_id);
 
 bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive);
 bool uwg_fec_peer_tx_ready(const struct uwg_peer *peer);

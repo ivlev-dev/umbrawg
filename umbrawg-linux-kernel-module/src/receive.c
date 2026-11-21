@@ -598,7 +598,9 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 	    uwg_ext_peer_extension(skb))
 		uwg_ext_caps_extension_seen(peer);
 	uwg_ext_maybe_send_caps(peer);
-	uwg_fec_adaptive_observe(peer, PACKET_CB(skb)->nonce);
+	if (likely(PACKET_CB(skb)->keypair))
+		uwg_fec_adaptive_observe(peer, PACKET_CB(skb)->nonce,
+					 PACKET_CB(skb)->keypair->internal_id);
 
 	if (unlikely(peer->device->bbr_mode != UWG_BBR_MODE_OFF ||
 		     peer->device->fec_mode != UWG_FEC_MODE_OFF)) {

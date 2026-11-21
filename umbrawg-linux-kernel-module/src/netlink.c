@@ -1437,6 +1437,7 @@ skip_set_private_key:
 	 */
 	if (info->attrs[UWGDEVICE_A_FEC] ||
 	    info->attrs[UWGDEVICE_A_UNDERLAY_MTU] ||
+	    info->attrs[UWGDEVICE_A_S4] ||
 	    info->attrs[UWGDEVICE_A_PEERS])
 		uwg_fec_refresh_mtu(uwg);
 	ret = 0;

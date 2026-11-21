@@ -33,10 +33,13 @@ WORK=${WORK:-/tmp/uwg-fec-profile-change.$$}
 SETTLE_SECS=${SETTLE_SECS:-3}
 PING_COUNT=${PING_COUNT:-10}
 
-NS0=uwgfec0
-NS1=uwgfec1
-VA=veth-fec0
-VB=veth-fec1
+# Namespace and veth names are per-process: two copies of this test (for
+# example from parallel CI jobs or a developer rerun) must not delete or
+# collide with each other. uwg0 inside each namespace is still private.
+NS0="uwgfec0-$$"
+NS1="uwgfec1-$$"
+VA="vfec0-$$"
+VB="vfec1-$$"
 T0=10.86.0.1
 T1=10.86.0.2
 UL0=172.30.86.1
@@ -337,6 +340,29 @@ loss=$(ping_loss "$NS0" "$T1")
 loss=$(ping_loss "$NS1" "$T0")
 [ "$loss" = 0 ] || fail "flap: reverse ping loss=${loss}%"
 
+# The first CAPS after a profile change can be lost. Both sides must still
+# converge (the fast retry and the bounded identical-repeat answer exist for
+# exactly this), including when the lost frame was a deferred 200 ms answer.
+say "=== profile change while the first CAPS is lost"
+if command -v tc >/dev/null 2>&1; then
+	ip netns exec "$NS0" tc qdisc replace dev "$VA" root netem \
+		limit 200000 loss 100%
+	ip netns exec "$NS1" tc qdisc replace dev "$VB" root netem \
+		limit 200000 loss 100%
+	set_fec "$NS0" 8:2
+	set_fec "$NS1" 8:2
+	sleep 0.4
+	ip netns exec "$NS0" tc qdisc del dev "$VA" root 2>/dev/null
+	ip netns exec "$NS1" tc qdisc del dev "$VB" root 2>/dev/null
+	check_link "CAPS loss recovery"
+	[ "$(profile "$NS0")" = "8:2" ] ||
+		fail "CAPS loss: $NS0 profile is $(profile "$NS0")"
+	[ "$(profile "$NS1")" = "8:2" ] ||
+		fail "CAPS loss: $NS1 profile is $(profile "$NS1")"
+else
+	note "tc missing: lost-CAPS convergence check skipped"
+fi
+
 # Regression: two devices with both FEC and BBR off must stay silent. A zero
 # CAPS retracts a stale advertisement, but it is itself an extension frame;
 # treating it as proof that the peer still sends extension traffic made both
@@ -375,10 +401,12 @@ sleep 1
 check_link "all-off recovery"
 
 # Adaptive must ignore pure reordering and still arm on real loss. Reordering
-# is simulated by delaying a quarter of the underlay packets; 200 us keeps the
-# delay itself out of TCP's way so the measured drop is dominated by any FEC
-# overhead the wrong decision would add. The kernel self-test covers the same
-# decision deterministically at module load.
+# is simulated by delaying a quarter of the underlay packets. netem's own
+# delay/reorder already costs some TCP throughput, so the throughput check is
+# only a coarse guard against the ~50 % FEC overhead a wrong decision would
+# add; the authoritative check is that adaptive stays off and blocks_encoded
+# does not grow. The kernel self-test covers the decision deterministically at
+# module load.
 if command -v iperf3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 &&
    command -v python3 >/dev/null 2>&1; then
 	say "=== adaptive vs reorder 25% / loss 2%"
@@ -402,10 +430,10 @@ if command -v iperf3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 &&
 		base = float(sys.argv[1])
 		reorder = float(sys.argv[2])
 		drop = (base - reorder) * 100.0 / base
-		print(f"  adaptive reorder TCP drop: {drop:.1f}% (limit 12%)")
-		sys.exit(0 if drop < 12.0 else 1)
+		print(f"  adaptive reorder TCP drop: {drop:.1f}% (limit 20%)")
+		sys.exit(0 if drop < 20.0 else 1)
 		PY
-		[ $? -eq 0 ] || fail "adaptive: TCP degraded more than 12% under reorder"
+		[ $? -eq 0 ] || fail "adaptive: TCP degraded more than 20% under reorder"
 	else
 		fail "adaptive: iperf3 did not complete under reorder"
 	fi

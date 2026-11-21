@@ -77,13 +77,13 @@ int uwg_ext_parse_ack(const u8 *payload, size_t len, struct uwg_ext_ack *ack)
 		return -EINVAL;
 
 	bitmap_len = payload[13];
-	/* The bitmap is always a full 64 bit window. A shorter bitmap used to
-	 * be zero-extended, and every bit past its length then looked like a
-	 * hole: a peer could inflate the reported loss just by sending a
-	 * one-byte bitmap. Reject it instead of guessing which counters it
-	 * meant to acknowledge.
+	/* PROTOCOL-EXT allows a 1..8 byte bitmap and Rust accepts it. A short
+	 * bitmap must not be zero-extended into holes: the uncovered counters
+	 * are simply not reported by this ACK, not lost. Keep the declared
+	 * length here and turn the uncovered tail into "already covered" when
+	 * the bitmap is consumed (uwg_ext_ack_bitmap()).
 	 */
-	if (bitmap_len != UWG_EXT_ACK_BITMAP_MAX)
+	if (bitmap_len < 1 || bitmap_len > UWG_EXT_ACK_BITMAP_MAX)
 		return -EINVAL;
 	if (len != UWG_EXT_ACK_HEADER_LEN + bitmap_len)
 		return -EINVAL;
@@ -96,6 +96,97 @@ int uwg_ext_parse_ack(const u8 *payload, size_t len, struct uwg_ext_ack *ack)
 	memset(ack->bitmap, 0, sizeof(ack->bitmap));
 	memcpy(ack->bitmap, payload + UWG_EXT_ACK_HEADER_LEN, bitmap_len);
 	return 0;
+}
+
+/* Full 64 bit view of an ACK bitmap. Bits the sender did not include are
+ * marked set ("covered") so that consumers such as the BBR ring do not count
+ * them as holes. Bits inside the declared length keep their wire value.
+ */
+u64 uwg_ext_ack_bitmap(const struct uwg_ext_ack *ack)
+{
+	u64 bitmap = get_unaligned_le64(ack->bitmap);
+	unsigned int covered = (unsigned int)ack->bitmap_len * 8;
+
+	if (covered < UWG_EXT_ACK_BITMAP_BITS)
+		bitmap |= ~0ULL << covered;
+	return bitmap;
+}
+
+/* Regression check for the short-bitmap compatibility path: uncovered bits
+ * must look "not reported" rather than holes, otherwise a one-byte bitmap
+ * inflates the loss estimate by up to 63 counters.
+ */
+bool uwg_ext_ack_selftest(void)
+{
+	u8 payload[UWG_EXT_ACK_HEADER_LEN + UWG_EXT_ACK_BITMAP_MAX + 1];
+	struct uwg_ext_ack ack;
+	unsigned int bit, zeros;
+	u64 bitmap;
+	bool ok = true;
+
+	memset(payload, 0, sizeof(payload));
+	put_unaligned_le64(100, payload);
+	payload[13] = 1;
+	payload[16] = 0x01;
+	if (uwg_ext_parse_ack(payload, UWG_EXT_ACK_HEADER_LEN + 1, &ack)) {
+		ok = false;
+	} else {
+		bitmap = uwg_ext_ack_bitmap(&ack);
+		if (!(bitmap & 1) || ack.bitmap_len != 1)
+			ok = false;
+		/* Only the first byte is covered; every bit from 8 upwards
+		 * must be masked as "not reported", never as a hole.
+		 */
+		for (bit = 8; bit < UWG_EXT_ACK_BITMAP_BITS; bit++)
+			if (!(bitmap & ((u64)1 << bit)))
+				ok = false;
+		zeros = 0;
+		for (bit = 1; bit < 8; bit++)
+			if (!(bitmap & ((u64)1 << bit)))
+				++zeros;
+		if (zeros != 7)
+			ok = false;
+	}
+
+	/* Two covered bytes: bits 1..15 are real holes, bits 16..63 are not
+	 * covered and must be masked off as "set".
+	 */
+	memset(payload, 0, sizeof(payload));
+	put_unaligned_le64(100, payload);
+	payload[13] = 2;
+	payload[16] = 0x01;
+	if (uwg_ext_parse_ack(payload, UWG_EXT_ACK_HEADER_LEN + 2, &ack)) {
+		ok = false;
+	} else {
+		bitmap = uwg_ext_ack_bitmap(&ack);
+		zeros = 0;
+		for (bit = 1; bit < 2 * 8; bit++)
+			if (!(bitmap & ((u64)1 << bit)))
+				++zeros;
+		if (zeros != 15)
+			ok = false;
+		for (bit = 2 * 8; bit < UWG_EXT_ACK_BITMAP_BITS; bit++)
+			if (!(bitmap & ((u64)1 << bit)))
+				ok = false;
+	}
+
+	/* Out of range lengths are still rejected. */
+	payload[13] = 0;
+	if (uwg_ext_parse_ack(payload, UWG_EXT_ACK_HEADER_LEN, &ack) != -EINVAL)
+		ok = false;
+	payload[13] = UWG_EXT_ACK_BITMAP_MAX + 1;
+	if (uwg_ext_parse_ack(payload, UWG_EXT_ACK_HEADER_LEN +
+				       UWG_EXT_ACK_BITMAP_MAX + 1,
+			      &ack) != -EINVAL)
+		ok = false;
+	payload[13] = UWG_EXT_ACK_BITMAP_MAX;
+	if (uwg_ext_parse_ack(payload, UWG_EXT_ACK_HEADER_LEN + 1,
+			      &ack) != -EINVAL)
+		ok = false;
+
+	if (!ok)
+		pr_err("EXT ACK self-test: FAIL\n");
+	return ok;
 }
 
 int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
@@ -313,6 +404,33 @@ void uwg_ext_caps_extension_seen(struct uwg_peer *peer)
 	spin_unlock_bh(&peer->caps.lock);
 }
 
+/* Schedule a deferred CAPS answer on the existing delayed-ACK timer. A
+ * separate timer per peer would need a new teardown path; timer_send_ack is
+ * already initialised/shut down with the peer, and uwg_ext_ack_timeout()
+ * calls uwg_ext_maybe_send_caps() before its own early returns.
+ */
+static void uwg_ext_caps_arm(struct uwg_peer *peer)
+{
+	ktime_t next;
+	unsigned long expires;
+	s64 ms;
+	bool pending;
+
+	spin_lock_bh(&peer->caps.lock);
+	pending = peer->caps.resend && peer->caps.next_send != 0;
+	next = peer->caps.next_send;
+	spin_unlock_bh(&peer->caps.lock);
+	if (!pending)
+		return;
+	ms = ktime_ms_delta(next, ktime_get());
+	if (ms <= 0)
+		expires = jiffies + 1;
+	else
+		expires = jiffies + max_t(unsigned long, 1,
+					 msecs_to_jiffies((unsigned long)ms));
+	uwg_timers_ack_reduce(peer, expires);
+}
+
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 {
 	struct uwg_ext_caps local;
@@ -338,7 +456,7 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 	    (!revoke && peer->caps.peer_valid && !peer->caps.resend) ||
 	    (!revoke &&
 	     peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS) ||
-	    (peer->caps.send_attempts &&
+	    (peer->caps.resend &&
 	     ktime_before(now, peer->caps.next_send))) {
 		spin_unlock_bh(&peer->caps.lock);
 		return;
@@ -512,6 +630,11 @@ void uwg_ext_ack_timeout(struct uwg_peer *peer)
 	bool again = false;
 	int len = -ENOENT;
 
+	/* The delayed-ACK timer doubles as the CAPS deferral timer: a changed
+	 * peer profile that arrived less than UWG_EXT_CAPS_CHANGED_MIN_MS
+	 * after our last CAPS must still be answered, not dropped.
+	 */
+	uwg_ext_maybe_send_caps(peer);
 	if (!uwg_ext_enabled(peer->device))
 		return;
 	if (!uwg_ext_peer_answers(peer))
@@ -535,6 +658,10 @@ void uwg_ext_ack_timeout(struct uwg_peer *peer)
 	} else if (again) {
 		uwg_ext_ack_armed(peer);
 	}
+	/* The ACK path may have reduced the timer to an earlier deadline; make
+	 * sure an overdue-but-still-deferred CAPS answer is not forgotten.
+	 */
+	uwg_ext_caps_arm(peer);
 }
 
 static bool uwg_ext_caps_same(const struct uwg_ext_caps *a,
@@ -574,6 +701,7 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	ktime_t now;
 	bool changed;
 	bool too_soon;
+	bool defer = false;
 	bool send = false;
 
 	if (uwg_ext_parse_caps(payload, len, &caps))
@@ -606,12 +734,28 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	too_soon = peer->caps.last_sent &&
 		   ktime_before(now, ktime_add_ms(peer->caps.last_sent,
 						  UWG_EXT_CAPS_CHANGED_MIN_MS));
-	if (!too_soon) {
-		if (changed) {
+	if (changed) {
+		if (too_soon) {
+			/* Do not drop the answer: the recent CAPS may have
+			 * been lost. Answer as soon as the minimum spacing
+			 * allows, via the delayed-ACK timer.
+			 */
+			peer->caps.resend = true;
+			peer->caps.next_send = ktime_add_ms(
+				peer->caps.last_sent,
+				UWG_EXT_CAPS_CHANGED_MIN_MS);
+			if (peer->caps.send_attempts >=
+			    UWG_EXT_CAPS_MAX_ATTEMPTS)
+				peer->caps.send_attempts =
+					UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
+			defer = true;
+		} else {
 			peer->caps.resend = true;
 			peer->caps.next_send = 0;
 			send = true;
-		} else if (!peer->caps.send_attempts) {
+		}
+	} else if (!too_soon) {
+		if (!peer->caps.send_attempts) {
 			peer->caps.resend = true;
 			peer->caps.next_send = 0;
 			send = true;
@@ -637,6 +781,8 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	spin_unlock_bh(&peer->caps.lock);
 	if (send)
 		uwg_ext_maybe_send_caps(peer);
+	else if (defer)
+		uwg_ext_caps_arm(peer);
 }
 
 static void uwg_ext_bbr_on_ack(struct uwg_peer *peer, u64 keypair_id,
@@ -679,7 +825,7 @@ static void uwg_ext_handle_ack(struct uwg_peer *peer, u64 keypair_id,
 	if (uwg_ext_parse_ack(payload, len, &ack))
 		return;
 
-	bitmap = get_unaligned_le64(ack.bitmap);
+	bitmap = uwg_ext_ack_bitmap(&ack);
 	peer->ack_tracker.largest = ack.largest;
 	peer->ack_tracker.bitmap = bitmap;
 	peer->ack_tracker.ack_delay_us = ack.ack_delay_us;

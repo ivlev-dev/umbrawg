@@ -31,6 +31,8 @@ struct uwg_fec_tx {
 	bool adaptive_on;
 	bool adaptive_valid;
 	bool disabled;
+	bool adaptive_have_sample;
+	u64 adaptive_keypair_id;
 	u64 adaptive_largest;
 	u64 adaptive_base;
 	u64 adaptive_received;
@@ -101,11 +103,14 @@ bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive)
 	return true;
 }
 
-unsigned int uwg_fec_allowed_inner(unsigned int underlay_mtu)
+unsigned int uwg_fec_allowed_inner(unsigned int underlay_mtu,
+				   unsigned int underlay_padding)
 {
-	if (underlay_mtu <= UWG_FEC_SHARD_WIRE_OVERHEAD)
+	unsigned int overhead = UWG_FEC_SHARD_WIRE_OVERHEAD + underlay_padding;
+
+	if (underlay_mtu <= overhead)
 		return 0;
-	return underlay_mtu - UWG_FEC_SHARD_WIRE_OVERHEAD;
+	return underlay_mtu - overhead;
 }
 
 unsigned int uwg_fec_underlay_payload(const struct uwg_device *uwg)
@@ -124,14 +129,14 @@ unsigned int uwg_fec_underlay_payload(const struct uwg_device *uwg)
  * falls back to legacy for packets above the underlay budget.
  */
 unsigned int uwg_fec_target_mtu(unsigned int underlay_mtu, unsigned int base_mtu,
-				bool fec_on)
+				bool fec_on, unsigned int underlay_padding)
 {
 	unsigned int allowed, target;
 
 	if (!fec_on)
 		return base_mtu;
 
-	allowed = uwg_fec_allowed_inner(underlay_mtu);
+	allowed = uwg_fec_allowed_inner(underlay_mtu, underlay_padding);
 	/* Above the shard cap every packet would take the legacy path. */
 	if (allowed > UWG_FEC_DATA_SHARD_CAP - 2)
 		allowed = UWG_FEC_DATA_SHARD_CAP - 2;
@@ -165,7 +170,8 @@ void uwg_fec_refresh_mtu(struct uwg_device *uwg)
 	if (cur_mtu != READ_ONCE(uwg->fec_applied_mtu))
 		base = cur_mtu;
 
-	target = uwg_fec_target_mtu(READ_ONCE(uwg->underlay_mtu), base, fec_on);
+	target = uwg_fec_target_mtu(READ_ONCE(uwg->underlay_mtu), base, fec_on,
+				    READ_ONCE(uwg->transport_padding));
 	if (target != cur_mtu) {
 		ret = dev_set_mtu(dev, (int)target);
 		if (ret) {
@@ -191,16 +197,16 @@ static unsigned int uwg_fec_tx_limit(const struct uwg_peer *peer)
 	 * (manual MTU after the last refresh, or a failed dev_set_mtu).
 	 */
 	struct uwg_device *uwg = peer->device;
-	int limit = (int)min_t(unsigned int,
-			       READ_ONCE(uwg->dev->mtu),
-			       uwg_fec_allowed_inner(
-				       READ_ONCE(uwg->underlay_mtu))) + 2;
+	unsigned int allowed, limit;
 
+	allowed = uwg_fec_allowed_inner(READ_ONCE(uwg->underlay_mtu),
+					READ_ONCE(uwg->transport_padding));
+	if (!allowed)
+		return 0;
+	limit = min_t(unsigned int, READ_ONCE(uwg->dev->mtu), allowed) + 2;
 	if (limit > UWG_FEC_DATA_SHARD_CAP)
 		limit = UWG_FEC_DATA_SHARD_CAP;
-	if (limit < 64)
-		limit = 64;
-	return (unsigned int)limit;
+	return limit;
 }
 
 /* Adaptive FEC decides from the receive-side transport counter. A window is
@@ -224,26 +230,30 @@ static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter,
 	tx->adaptive_received = 1;
 	tx->adaptive_observed = 0;
 	tx->adaptive_loss_q16 = 0;
+	tx->adaptive_have_sample = false;
 	tx->adaptive_clean_since = 0;
 	tx->adaptive_segment_start = now;
 }
 
 static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
-					    unsigned long now)
+					    u64 keypair_id, unsigned long now)
 {
 	u64 expected, lost, loss_q16;
 
-	if (!tx->adaptive_valid) {
+	/* The transport counter restarts at zero with every new keypair. The
+	 * counter alone cannot distinguish that from reordering, so the epoch
+	 * must come from the packet's keypair: otherwise the first
+	 * adaptive_base counters of the new epoch are ignored as "old" and a
+	 * 120 second rekey leaves no complete window at all.
+	 */
+	if (!tx->adaptive_valid || tx->adaptive_keypair_id != keypair_id) {
 		tx->adaptive_valid = true;
+		tx->adaptive_keypair_id = keypair_id;
 		uwg_fec_adaptive_window_reset(tx, counter, now);
 		return;
 	}
 	if (counter < tx->adaptive_base) {
-		/* Small backward jumps are reordering, but a huge one means
-		 * the counters restarted after a rekey.
-		 */
-		if (tx->adaptive_base - counter > 1U << 20)
-			uwg_fec_adaptive_window_reset(tx, counter, now);
+		/* Same epoch, counter behind the open window: reordering. */
 		return;
 	}
 	if (counter > tx->adaptive_largest)
@@ -272,11 +282,17 @@ static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 	lost = expected > tx->adaptive_received ?
 		expected - tx->adaptive_received : 0;
 	loss_q16 = (u32)div_u64(lost << 16, expected);
-	if (!tx->adaptive_loss_q16)
+	/* Initialise from the first sample, but track that fact separately:
+	 * a legitimate zero loss estimate must not be mistaken for "no sample
+	 * yet" and turn the next sample into a fresh initialisation.
+	 */
+	if (!tx->adaptive_have_sample) {
+		tx->adaptive_have_sample = true;
 		tx->adaptive_loss_q16 = loss_q16;
-	else
+	} else {
 		tx->adaptive_loss_q16 =
 			(tx->adaptive_loss_q16 * 3 + loss_q16) / 4;
+	}
 	tx->adaptive_observed += expected;
 	tx->adaptive_base = tx->adaptive_largest + 1;
 	tx->adaptive_received = 0;
@@ -299,13 +315,15 @@ static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 			tx->adaptive_clean_since = 0;
 			tx->adaptive_observed = 0;
 			tx->adaptive_loss_q16 = 0;
+			tx->adaptive_have_sample = false;
 		}
 	} else {
 		tx->adaptive_clean_since = 0;
 	}
 }
 
-void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter)
+void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter,
+			      u64 keypair_id)
 {
 	struct uwg_fec_tx *tx;
 
@@ -314,7 +332,7 @@ void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter)
 	if (!tx || !tx->adaptive)
 		goto out;
 	spin_lock_bh(&tx->lock);
-	uwg_fec_adaptive_observe_locked(tx, counter, jiffies);
+	uwg_fec_adaptive_observe_locked(tx, counter, keypair_id, jiffies);
 	spin_unlock_bh(&tx->lock);
 out:
 	rcu_read_unlock();
@@ -1294,7 +1312,8 @@ static bool uwg_fec_adaptive_selftest(void)
 {
 	struct uwg_fec_tx tx;
 	unsigned long now = jiffies;
-	u64 i;
+	u64 i, counter;
+	unsigned int sec;
 	bool ok = true;
 
 #define A_CHECK(cond) do {						\
@@ -1309,21 +1328,21 @@ static bool uwg_fec_adaptive_selftest(void)
 	tx.adaptive = true;
 
 	/* Clean link, every fourth counter arrives only at the end. */
-	uwg_fec_adaptive_observe_locked(&tx, 0, now);
+	uwg_fec_adaptive_observe_locked(&tx, 0, 1, now);
 	for (i = 1; i <= 4096; i++)
 		if (i % 4)
-			uwg_fec_adaptive_observe_locked(&tx, i, now);
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
 	for (i = 4; i <= 4096; i += 4)
-		uwg_fec_adaptive_observe_locked(&tx, i, now);
+		uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
 	now += HZ;
-	uwg_fec_adaptive_observe_locked(&tx, 4097, now);
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now);
 	A_CHECK(!tx.adaptive_on);
 	A_CHECK(!tx.adaptive_loss_q16);
 
 	/* Same window with a real 2% loss: every 50th counter never arrives. */
 	memset(&tx, 0, sizeof(tx));
 	tx.adaptive = true;
-	uwg_fec_adaptive_observe_locked(&tx, 0, now);
+	uwg_fec_adaptive_observe_locked(&tx, 0, 1, now);
 	/* Simulate a stale clean timestamp left over from the disabled
 	 * period: enabling must discard it, or the next clean sample turns
 	 * adaptive off immediately.
@@ -1331,34 +1350,73 @@ static bool uwg_fec_adaptive_selftest(void)
 	tx.adaptive_clean_since = now - 10 * HZ;
 	for (i = 1; i <= 4096; i++)
 		if (i % 50)
-			uwg_fec_adaptive_observe_locked(&tx, i, now);
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
 	now += HZ;
-	uwg_fec_adaptive_observe_locked(&tx, 4097, now);
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now);
 	A_CHECK(tx.adaptive_on);
 	A_CHECK(!tx.adaptive_clean_since);
 
 	/* One clean sample right after enabling must not switch it off. */
 	now += HZ;
 	for (i = 4098; i < 4098 + UWG_FEC_ADAPTIVE_MIN_WINDOW; i++)
-		uwg_fec_adaptive_observe_locked(&tx, i, now);
+		uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
 	A_CHECK(tx.adaptive_on);
 
 	/* ... but a run of clean samples does. The EWMA starts at the lossy
 	 * estimate, so it takes several one-second segments to decay and
 	 * then five more to expire the clean timer.
 	 */
-	{
-		u64 counter = 4098 + UWG_FEC_ADAPTIVE_MIN_WINDOW;
-		unsigned int sec;
+	counter = 4098 + UWG_FEC_ADAPTIVE_MIN_WINDOW;
+	for (sec = 0; sec < 20; sec++) {
+		now += HZ;
+		for (i = 0; i < UWG_FEC_ADAPTIVE_MIN_WINDOW;
+		     i++, counter++)
+			uwg_fec_adaptive_observe_locked(&tx, counter, 1, now);
+	}
+	A_CHECK(!tx.adaptive_on);
 
-		for (sec = 0; sec < 20; sec++) {
-			now += HZ;
-			for (i = 0; i < UWG_FEC_ADAPTIVE_MIN_WINDOW;
-			     i++, counter++)
-				uwg_fec_adaptive_observe_locked(&tx, counter,
-								now);
+	/* Rekey: a long clean epoch leaves adaptive_base far beyond the
+	 * counters of the next epoch, which restart at zero. The estimator
+	 * must follow the keypair, not only the counter, or the first
+	 * adaptive_base packets of the new epoch are ignored and a 120 s
+	 * rekey never produces a full window.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	counter = 0;
+	uwg_fec_adaptive_observe_locked(&tx, counter, 1, now);
+	for (sec = 0; sec < 32; sec++) {
+		now += HZ;
+		for (i = 0; i < 1024; i++) {
+			counter++;
+			uwg_fec_adaptive_observe_locked(&tx, counter, 1, now);
 		}
 	}
+	A_CHECK(!tx.adaptive_on);
+
+	/* New keypair, counters from zero, 2 % loss: must still arm. */
+	now += HZ;
+	for (counter = 0; counter <= 4096; counter++)
+		if (counter % 50)
+			uwg_fec_adaptive_observe_locked(&tx, counter, 2, now);
+	now += HZ;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 2, now);
+	A_CHECK(tx.adaptive_on);
+
+	/* A clean rekey epoch must not arm by itself. */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	uwg_fec_adaptive_observe_locked(&tx, 0, 1, now);
+	for (sec = 0; sec < 4; sec++) {
+		now += HZ;
+		for (i = 0; i < 1024; i++)
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+	}
+	now += HZ;
+	for (counter = 0; counter <= 4096; counter++)
+		uwg_fec_adaptive_observe_locked(&tx, counter, 2, now);
+	now += HZ;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 2, now);
 	A_CHECK(!tx.adaptive_on);
 
 #undef A_CHECK
@@ -1396,7 +1454,7 @@ int uwg_fec_mtu_selftest(void)
 
 	for (i = 0; i < ARRAY_SIZE(underlays); i++) {
 		unsigned int underlay = underlays[i];
-		unsigned int allowed = uwg_fec_allowed_inner(underlay);
+		unsigned int allowed = uwg_fec_allowed_inner(underlay, 0);
 		unsigned int shard_len = allowed + 2;
 		unsigned int datagram;
 
@@ -1411,30 +1469,50 @@ int uwg_fec_mtu_selftest(void)
 		T_CHECK(datagram == underlay);
 	}
 
+	/* The obfuscation prefix S4 is part of the same datagram budget and
+	 * must shrink the shard/MTU just like the Rust side does. 1500 with
+	 * S4=28 leaves exactly room for the worst-case shard.
+	 */
+	T_CHECK(uwg_fec_target_mtu(1500, 1420, true, 28) == 1340);
+	T_CHECK(uwg_fec_allowed_inner(1500, 28) + 2 == 1342);
+	{
+		unsigned int shard_len = uwg_fec_allowed_inner(1500, 28) + 2;
+		unsigned int datagram = UWG_FEC_UNDERLAY_IP_UDP_OVERHEAD +
+					MESSAGE_MINIMUM_LENGTH +
+					UWG_EXT_HEADER_LEN +
+					UWG_EXT_FEC_HEADER_LEN + shard_len +
+					UWG_FEC_SHARD_PADDING_MAX + 28;
+
+		T_CHECK(datagram == 1500);
+	}
+	T_CHECK(uwg_fec_target_mtu(1280, 1420, true, 28) == 1120);
+
 	/* 1500 keeps the shard budget the old formula produced for the
 	 * default 1420 MTU (1420 + 2 - 52), but now the TUN MTU itself is
 	 * lowered to that value, so no packet escapes to the legacy path.
 	 */
-	T_CHECK(uwg_fec_target_mtu(1500, 1420, true) == 1368);
-	T_CHECK(uwg_fec_allowed_inner(1500) + 2 == 1370);
+	T_CHECK(uwg_fec_target_mtu(1500, 1420, true, 0) == 1368);
+	T_CHECK(uwg_fec_allowed_inner(1500, 0) + 2 == 1370);
 	/* A 9000 byte underlay must not raise the MTU above the base one. */
-	T_CHECK(uwg_fec_target_mtu(9000, 1420, true) == 1420);
+	T_CHECK(uwg_fec_target_mtu(9000, 1420, true, 0) == 1420);
 	/* ... but a base MTU above the shard cap is clamped to the cap. */
-	T_CHECK(uwg_fec_target_mtu(9000, 9000, true) ==
+	T_CHECK(uwg_fec_target_mtu(9000, 9000, true, 0) ==
 		UWG_FEC_DATA_SHARD_CAP - 2);
-	T_CHECK(uwg_fec_target_mtu(1280, 1420, true) == 1148);
-	T_CHECK(uwg_fec_target_mtu(1280, 1420, true) >= UWG_UNDERLAY_MTU_MIN);
+	T_CHECK(uwg_fec_target_mtu(1280, 1420, true, 0) == 1148);
+	T_CHECK(uwg_fec_target_mtu(1280, 1420, true, 0) >= UWG_UNDERLAY_MTU_MIN);
 	/* Below the IPv4 minimum the MTU is clamped, and the excess packets
 	 * fall back to the legacy path through uwg_fec_tx_push().
 	 */
-	T_CHECK(uwg_fec_target_mtu(576, 1420, true) == UWG_UNDERLAY_MTU_MIN);
-	T_CHECK(uwg_fec_target_mtu(576, 1420, true) > uwg_fec_allowed_inner(576));
+	T_CHECK(uwg_fec_target_mtu(576, 1420, true, 0) == UWG_UNDERLAY_MTU_MIN);
+	T_CHECK(uwg_fec_target_mtu(576, 1420, true, 0) >
+		uwg_fec_allowed_inner(576, 0));
 	/* With FEC off the base MTU is returned untouched, whatever the
 	 * underlay says.
 	 */
-	T_CHECK(uwg_fec_target_mtu(1500, 1420, false) == 1420);
-	T_CHECK(uwg_fec_target_mtu(576, 1420, false) == 1420);
+	T_CHECK(uwg_fec_target_mtu(1500, 1420, false, 0) == 1420);
+	T_CHECK(uwg_fec_target_mtu(576, 1420, false, 0) == 1420);
 	T_CHECK(uwg_fec_adaptive_selftest());
+	T_CHECK(uwg_ext_ack_selftest());
 
 	if (!ok)
 		return -EINVAL;
