@@ -67,8 +67,17 @@ int uwg_fec_mtu_selftest(void);
 #define UWG_FEC_DATA_SHARD_CAP 1900
 #define UWG_FEC_DATA_SLOTS 16
 #define UWG_FEC_DATA_BLOCK_TIMEOUT_US 5000
-#define UWG_FEC_DATA_TX_DELAY_MIN_US 500
-#define UWG_FEC_DATA_TX_DELAY_MAX_US 2000
+/* Partial-block flush delay. A sparse stream cannot fill k, so the first
+ * packet schedules a flush; the window only has to be wide enough for
+ * back-to-back packets of one burst to share a block. It used to be
+ * 0.5..2 ms, but it was applied with a jiffies timer, which can only fire
+ * on a tick: every sparse packet paid a full tick (1 ms at HZ=1000, up to
+ * 10 ms at HZ=100) plus the workqueue hop, i.e. the classic 4-5 ms FEC RTT
+ * penalty. The flush is a hrtimer now, so the window below is the real cost.
+ * 0.15..0.45 ms keeps a burst together and leaves the round trip near 1 ms.
+ */
+#define UWG_FEC_DATA_TX_DELAY_MIN_US 150
+#define UWG_FEC_DATA_TX_DELAY_MAX_US 450
 /* Random tail added to every shard of a block: it has to stay below the tx
  * limit and is the same for all shards, as Reed-Solomon requires.
  */

@@ -9,6 +9,7 @@
 #include "timers.h"
 #include "type.h"
 
+#include <linux/hrtimer.h>
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
 #include <linux/netdevice.h>
@@ -24,7 +25,11 @@
 struct uwg_fec_tx {
 	struct uwg_peer *peer;
 	spinlock_t lock;
-	struct timer_list timer;
+	/* Soft hrtimer: the callback runs in softirq context, like the old
+	 * timer_list, so it may keep taking tx->lock with spin_lock_bh().
+	 * A jiffies timer quantised the partial flush to a whole tick.
+	 */
+	struct hrtimer timer;
 	u8 k;
 	u8 m;
 	bool adaptive;
@@ -558,26 +563,28 @@ static bool uwg_fec_tx_push_locked(struct uwg_fec_tx *tx,
 	put_unaligned_le16((u16)plen, slot);
 	tx->lens[tx->count] = (u16)plen;
 	tx->count++;
-	if (tx->count == 1)
-		mod_timer(&tx->timer,
-			  jiffies + max_t(unsigned long, 1,
-					  usecs_to_jiffies(
-						  get_random_u32_inclusive(
-							UWG_FEC_DATA_TX_DELAY_MIN_US,
-							UWG_FEC_DATA_TX_DELAY_MAX_US))));
+	if (tx->count == 1) {
+		u32 delay_us = get_random_u32_inclusive(
+			UWG_FEC_DATA_TX_DELAY_MIN_US,
+			UWG_FEC_DATA_TX_DELAY_MAX_US);
+
+		hrtimer_start(&tx->timer,
+			      ns_to_ktime((u64)delay_us * NSEC_PER_USEC),
+			      HRTIMER_MODE_REL_SOFT);
+	}
 	if (tx->count == tx->k)
 		uwg_fec_tx_emit(tx, true, out);
 	return true;
 }
 
-static void uwg_fec_tx_timeout(struct timer_list *timer)
+static enum hrtimer_restart uwg_fec_tx_timeout(struct hrtimer *timer)
 {
-	struct uwg_fec_tx *tx = timer_container_of(tx, timer, timer);
+	struct uwg_fec_tx *tx = container_of(timer, struct uwg_fec_tx, timer);
 	struct uwg_peer *peer = tx->peer;
 	struct sk_buff_head frames;
 
 	if (unlikely(READ_ONCE(peer->is_dead)))
-		return;
+		return HRTIMER_NORESTART;
 
 	__skb_queue_head_init(&frames);
 	spin_lock_bh(&tx->lock);
@@ -586,6 +593,7 @@ static void uwg_fec_tx_timeout(struct timer_list *timer)
 	spin_unlock_bh(&tx->lock);
 	if (!skb_queue_empty(&frames))
 		uwg_packet_send_fec_frames(peer, &frames);
+	return HRTIMER_NORESTART;
 }
 
 bool uwg_fec_tx_push(struct uwg_peer *peer, struct sk_buff *skb,
@@ -994,7 +1002,8 @@ static struct uwg_fec_tx *uwg_fec_tx_alloc(struct uwg_peer *peer, u8 k, u8 m,
 	tx->m = m;
 	tx->adaptive = adaptive;
 	spin_lock_init(&tx->lock);
-	timer_setup(&tx->timer, uwg_fec_tx_timeout, 0);
+	hrtimer_setup(&tx->timer, uwg_fec_tx_timeout, CLOCK_MONOTONIC,
+		      HRTIMER_MODE_REL_SOFT);
 	return tx;
 }
 
@@ -1077,7 +1086,7 @@ static void uwg_fec_state_stop(struct uwg_fec_tx *tx, struct uwg_fec_rx *rx)
 		spin_lock_bh(&tx->lock);
 		tx->disabled = true;
 		spin_unlock_bh(&tx->lock);
-		timer_shutdown_sync(&tx->timer);
+		hrtimer_cancel(&tx->timer);
 		uwg_fec_tx_free(tx);
 	}
 	if (rx) {
@@ -1287,10 +1296,11 @@ void uwg_peer_fec_rcu_free(struct uwg_peer *peer)
 	struct uwg_fec_rx *rx = rcu_dereference_protected(peer->fec_rx, 1);
 
 	/* Runs from an RCU callback, so no sleeping: release() already shut
-	 * the timers down, and timer_delete is safe in softirq context.
+	 * the timers down, and hrtimer_try_to_cancel is safe in softirq
+	 * context (it never waits for a callback running elsewhere).
 	 */
 	if (tx) {
-		timer_delete(&tx->timer);
+		hrtimer_try_to_cancel(&tx->timer);
 		uwg_fec_tx_free(tx);
 	}
 	if (rx) {
