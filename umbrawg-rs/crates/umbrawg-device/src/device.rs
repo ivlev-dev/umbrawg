@@ -30,7 +30,7 @@ use crate::buffer::{BufferPool, DEFAULT_BUFFER_SIZE};
 use crate::error::{DeviceError, Result};
 pub use crate::ext::BbrBatch;
 use crate::ext::FecStats;
-use crate::gso::BatchLayout;
+use crate::gso::{BatchLayout, MAX_GSO_GROUPS};
 use crate::index::IndexTable;
 use crate::io::{
     DatagramSink, IncomingDropCounters, IncomingMeta, IncomingOutcome, IoContext, PacketIo,
@@ -175,6 +175,12 @@ pub struct SentBatch {
     pub needs_handshake: bool,
     /// Адрес пира, если он известен.
     pub endpoint: Option<SocketAddr>,
+    /// Максимум сегментов в GSO-группе для FEC-шардов; `0` — обычная группа.
+    ///
+    /// Сокет больше не ограничивает GSO целиком: ограничение нужно только
+    /// шардам, чтобы один потерянный супердатаграмм не сделал блок
+    /// невосстановимым. Legacy-группы сохраняют общий лимит сокета.
+    pub fec_caps: [u8; MAX_GSO_GROUPS],
 }
 
 pub struct Device {
@@ -404,22 +410,6 @@ impl Device {
         }
         let next = self.under_load_detector.refresh(now, self.under_load());
         self.transition_under_load(next);
-    }
-
-    #[must_use]
-    pub fn fec_gso_segments(&self) -> Option<usize> {
-        let config = self.ext_config();
-        match config.fec {
-            crate::FecMode::Off => None,
-            crate::FecMode::Fixed { .. } => config.fec.config().map(|fec| fec.m().max(1)),
-            crate::FecMode::Adaptive => self
-                .peers
-                .load()
-                .values()
-                .any(|peer| peer.extension().fec_active())
-                .then(|| config.fec.config().map(|fec| fec.m().max(1)))
-                .flatten(),
-        }
     }
 
     #[must_use]
@@ -1032,6 +1022,7 @@ impl Device {
         rng: &mut R,
         now: Instant,
         layout: &mut BatchLayout,
+        fec_caps: &mut [u8; MAX_GSO_GROUPS],
     ) -> Result<usize> {
         let mut frame = [0u8; 2048];
         let block_padding = ObfParams::random_reserve_len(rng, MESSAGE_PADDING_MULTIPLE - 1);
@@ -1074,6 +1065,12 @@ impl Device {
             if !layout.push(offset, length) {
                 return Err(DeviceError::PacketTooLarge);
             }
+            // A GSO superdatagram is lost as a whole, so this block's shards
+            // may share one only up to its parity count. `0` in `fec_caps`
+            // stays reserved for legacy groups.
+            let group = layout.len().saturating_sub(1);
+            let cap = block.m.max(1);
+            fec_caps[group] = fec_caps[group].max(cap);
             offset += length;
             peer.extension().note_fec_shard_sent();
         }
@@ -1369,8 +1366,20 @@ impl Device {
         if peer.current_keypair().is_none() {
             return 0;
         }
+        struct FinishOnDrop<'a>(&'a Peer);
+        impl Drop for FinishOnDrop<'_> {
+            fn drop(&mut self) {
+                self.0.extension().finish_control_flush();
+            }
+        }
         let mut sent = 0;
-        let frames = peer.extension().pending_control(ctx.now);
+        let frames = peer.extension().begin_control_flush(ctx.now);
+        if frames.is_empty() {
+            return 0;
+        }
+        // Even an unwind must release the per-peer flush ownership, otherwise
+        // the control queue would stay blocked until the process restarts.
+        let _finish = FinishOnDrop(peer.as_ref());
         for frame in frames {
             // Control frames use the same datagram scratch as data packets.
             // A fixed 1 KiB stack buffer cannot hold a full-size FEC shard
@@ -1405,6 +1414,7 @@ impl Device {
                 }
             }
         }
+        peer.extension().finish_control_flush();
         sent
     }
 
@@ -1475,6 +1485,7 @@ impl Device {
                 sent: 0,
                 needs_handshake: false,
                 endpoint,
+                fec_caps: [0; MAX_GSO_GROUPS],
             });
         }
         if endpoint.is_none() {
@@ -1505,11 +1516,13 @@ impl Device {
                 sent: 0,
                 needs_handshake: staged > 0,
                 endpoint,
+                fec_caps: [0; MAX_GSO_GROUPS],
             });
         };
         let batch_padding = ObfParams::random_reserve_len(ctx.rng, MESSAGE_PADDING_MULTIPLE - 1);
         if peer.extension().fec_tx_active() {
             let mut offset = 0usize;
+            let mut fec_caps = [0u8; MAX_GSO_GROUPS];
             for plaintext in plaintexts {
                 // Drop the extension guard before the match body: FEC shard
                 // encryption takes the same per-peer lock via on_packet_sent.
@@ -1527,6 +1540,7 @@ impl Device {
                             ctx.rng,
                             ctx.now,
                             &mut layout,
+                            &mut fec_caps,
                         )?;
                     }
                     Ok(None) => {}
@@ -1563,6 +1577,7 @@ impl Device {
                 sent: plaintexts.len(),
                 needs_handshake: false,
                 endpoint,
+                fec_caps,
             });
         }
         let mut offset = 0;
@@ -1599,6 +1614,7 @@ impl Device {
             sent: plaintexts.len(),
             needs_handshake: false,
             endpoint,
+            fec_caps: [0; MAX_GSO_GROUPS],
         })
     }
 
@@ -2214,6 +2230,15 @@ impl Device {
         if !self.is_up() {
             return Ok(0);
         }
+        // Refresh the control-flush clock even when there are no peers: a
+        // stale timestamp would put the next deadline in the past and turn
+        // the idle poll into a 1 ms busy loop.
+        {
+            let mut last = self.control_flush_at.lock();
+            if ctx.now > *last {
+                *last = ctx.now;
+            }
+        }
         let peers = self.peers.load();
         let mut handled = 0;
         let mut kinds = [TimerKind::RetransmitHandshake; 5];
@@ -2337,7 +2362,9 @@ impl Device {
         let now = Instant::now();
         // A pending zero CAPS must leave even when no data and no keepalive
         // are scheduled, so the device guarantees a control-flush wake-up.
-        let control = *self.control_flush_at.lock() + CONTROL_FLUSH_INTERVAL;
+        // `max(now, last)` keeps the deadline in the future even after a long
+        // idle period where no flush_control/tick refreshed the timestamp.
+        let control = (*self.control_flush_at.lock()).max(now) + CONTROL_FLUSH_INTERVAL;
         let mut next: Option<Instant> = Some(control);
         let peers = self.peers.load();
         for peer in peers.values() {
@@ -2734,7 +2761,7 @@ mod tests {
             .next_deadline()
             .expect("the control flush deadline is always present");
         assert!(
-            first <= now + CONTROL_FLUSH_INTERVAL,
+            first <= now + CONTROL_FLUSH_INTERVAL + Duration::from_millis(5),
             "first deadline {first:?} is not bounded by {CONTROL_FLUSH_INTERVAL:?}"
         );
 
@@ -2752,6 +2779,41 @@ mod tests {
         assert!(
             second >= later + CONTROL_FLUSH_INTERVAL - Duration::from_millis(1),
             "deadline {second:?} was not refreshed past {later:?}"
+        );
+    }
+
+    #[test]
+    fn idle_control_deadline_stays_in_the_future() {
+        let device = Device::new(DeviceConfig::default()).expect("device");
+        // A device without peers and without any traffic for a long time.
+        *device.control_flush_at.lock() = Instant::now() - Duration::from_secs(30);
+
+        let now = Instant::now();
+        let deadline = device
+            .next_deadline()
+            .expect("the control flush deadline is always present");
+        assert!(
+            deadline > now,
+            "a stale control clock produced a past deadline: {deadline:?}"
+        );
+        assert!(
+            deadline >= now + CONTROL_FLUSH_INTERVAL - Duration::from_millis(5),
+            "{deadline:?}"
+        );
+
+        // A tick refreshes the clock, so the next deadline is a full interval
+        // away even on a device that has no peers to flush.
+        let mut rng = TestRng(5);
+        let mut scratch = [0u8; 1024];
+        let mut io = NullIo;
+        let mut ctx = IoContext::new(&mut rng, now, &mut scratch, &mut io);
+        device.tick(&mut ctx).expect("tick");
+        let after = device
+            .next_deadline()
+            .expect("the control flush deadline is always present");
+        assert!(
+            after >= now + CONTROL_FLUSH_INTERVAL - Duration::from_millis(1),
+            "{after:?}"
         );
     }
 

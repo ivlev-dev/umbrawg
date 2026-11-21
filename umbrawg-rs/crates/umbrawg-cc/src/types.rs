@@ -65,11 +65,14 @@ pub struct BbrStats {
     pub delivered: u64,
     /// Total bytes reported lost through [`crate::Bbr::on_loss`].
     pub lost_bytes: u64,
-    /// Total datagrams reported lost through [`crate::Bbr::on_loss`].
+    /// Total datagrams counted as path losses (bitmap holes, watermark,
+    /// stale sweeps and explicit [`crate::Bbr::on_loss`] reports).
     pub lost_packets: u64,
     /// Loss reports ignored because the datagram was already resolved.
     pub spurious_losses: u64,
-    /// Unacknowledged datagrams dropped from the tracking ring.
+    /// In-flight datagrams evicted from the tracking ring before any
+    /// feedback arrived. These are not counted as losses and are disjoint
+    /// from [`Self::lost_packets`].
     pub orphaned_packets: u64,
     /// Datagrams dropped locally by the send path and released from the
     /// in-flight accounting without being treated as path loss.

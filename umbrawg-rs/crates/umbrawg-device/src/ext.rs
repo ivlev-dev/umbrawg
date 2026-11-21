@@ -973,6 +973,14 @@ pub(crate) struct PeerExtension {
     caps_warn_last: Option<Instant>,
     bbr_queue: BbrQueue,
     last_ack_largest: Option<u64>,
+    /// A control flush owns the queue between `pending_control` and
+    /// [`Self::finish_control_flush`].
+    ///
+    /// The peer extension lock is released while frames are encrypted and
+    /// sent, so without this flag two workers could clone the same frames and
+    /// put duplicates on the wire while the second `note_frame_sent` removed
+    /// an unrelated frame.
+    control_flush_active: bool,
 }
 
 impl Default for PeerExtension {
@@ -1010,6 +1018,7 @@ impl PeerExtension {
             caps_warn_last: None,
             bbr_queue: BbrQueue::new(),
             last_ack_largest: None,
+            control_flush_active: false,
         };
         extension.apply(config);
         extension
@@ -1169,10 +1178,6 @@ impl PeerExtension {
             && self.fec_tx.is_some()
             && self.peer_caps.contains(CapsFlags::FEC)
             && self.fec_profile_matches()
-    }
-
-    pub(crate) fn fec_active(&self) -> bool {
-        self.fec_active && self.peer_caps.contains(CapsFlags::FEC)
     }
 
     /// Feeds one received counter to the adaptive loss estimator.
@@ -1700,6 +1705,28 @@ impl PeerExtension {
         // Cloning a frame only bumps an `Arc`; the bound stays
         // `CONTROL_QUEUE_CAPACITY` instead of doubling with a lease copy.
         self.pending.iter().cloned().collect()
+    }
+
+    /// Starts a serialized control flush and returns the frames to send.
+    ///
+    /// The extension lock is released while the caller encrypts and sends, so
+    /// a concurrent worker must see an empty batch instead of cloning the
+    /// same frames again. The owner must call [`Self::finish_control_flush`]
+    /// after every frame was confirmed or requeued.
+    pub(crate) fn begin_control_flush(&mut self, now: Instant) -> Vec<ControlFrame> {
+        if self.control_flush_active {
+            return Vec::new();
+        }
+        let frames = self.pending_control(now);
+        if !frames.is_empty() {
+            self.control_flush_active = true;
+        }
+        frames
+    }
+
+    /// Releases the control queue after [`Self::begin_control_flush`].
+    pub(crate) fn finish_control_flush(&mut self) {
+        self.control_flush_active = false;
     }
 
     /// Appends a newly generated frame, enforcing the single explicit limit.
@@ -3766,7 +3793,41 @@ mod tests {
 
         let stats = ext.bbr.as_ref().unwrap().stats();
         assert_eq!(stats.inflight, 0);
-        assert!(stats.orphaned_packets >= 1);
+        assert!(stats.lost_packets >= 1);
+        assert_eq!(stats.orphaned_packets, 0);
+    }
+
+    #[test]
+    fn control_flush_is_serialized_between_workers() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::default();
+        for value in [1u8, 2] {
+            let frame = ControlFrame::inline(ControlKind::Ack, |output| {
+                output[0] = value;
+                Some(1)
+            })
+            .expect("frame fits");
+            ext.push_control(frame);
+        }
+
+        let first = ext.begin_control_flush(base);
+        assert_eq!(first.len(), 2);
+        assert!(
+            ext.begin_control_flush(base).is_empty(),
+            "a concurrent flush must not clone the frames already being sent"
+        );
+
+        // Abort after the first frame: the second stays queued exactly once.
+        ext.note_frame_sent(first[0].kind(), base);
+        let second = first[1].clone();
+        ext.push_control(second);
+        ext.finish_control_flush();
+
+        let resent = ext.begin_control_flush(base);
+        assert_eq!(resent.len(), 1, "the aborted frame must not be lost");
+        ext.note_frame_sent(resent[0].kind(), base);
+        ext.finish_control_flush();
+        assert!(ext.begin_control_flush(base).is_empty());
     }
 
     #[test]

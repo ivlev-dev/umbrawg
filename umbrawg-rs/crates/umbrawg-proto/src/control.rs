@@ -156,6 +156,9 @@ pub struct Ack {
     /// ECN CE counter increased.
     pub ecn_ce: bool,
     /// Bitmap of received counters; bit 0 is `largest_counter`.
+    ///
+    /// Bits above the length carried by a short ACK are set ("covered"), like
+    /// the kernel's `uwg_ext_ack_bitmap`, so they never look like holes.
     pub received: u64,
 }
 
@@ -197,11 +200,20 @@ impl Ack {
         }
         let mut bitmap = [0u8; 8];
         bitmap[..bitmap_len].copy_from_slice(&body[ACK_HEADER_LEN..ACK_HEADER_LEN + bitmap_len]);
+        // Wire parity with the kernel: bits the sender did not include are
+        // marked as covered (set), not as holes. A short bitmap is a
+        // compatibility path; treating its absent high bits as losses would
+        // inflate the BBR loss estimate by up to 63 counters.
+        let mut received = u64::from_le_bytes(bitmap);
+        let covered = bitmap_len * 8;
+        if covered < 64 {
+            received |= !0u64 << covered;
+        }
         Ok(Self {
             largest_counter: u64::from_le_bytes(body[0..8].try_into().expect("checked length")),
             ack_delay_us: u32::from_le_bytes(body[8..12].try_into().expect("checked length")),
             ecn_ce: body[12] & 1 != 0,
-            received: u64::from_le_bytes(bitmap),
+            received,
         })
     }
 }
@@ -414,6 +426,21 @@ mod tests {
         buffer[6..8].copy_from_slice(&body_len.to_le_bytes());
         buffer[21] = 1;
         buffer[24] = 0b101;
+        // Parity with the kernel: the seven bytes the sender omitted are
+        // covered (set), so their counters are not reported as holes.
+        assert_eq!(Ack::decode(&buffer).unwrap().received, 0b101 | (!0u64 << 8));
+    }
+
+    #[test]
+    fn full_ack_bitmap_keeps_the_wire_bits() {
+        let ack = Ack {
+            largest_counter: 7,
+            ack_delay_us: 0,
+            ecn_ce: false,
+            received: 0b101,
+        };
+        let mut buffer = [0u8; 32];
+        ack.encode(&mut buffer).unwrap();
         assert_eq!(Ack::decode(&buffer).unwrap().received, 0b101);
     }
 

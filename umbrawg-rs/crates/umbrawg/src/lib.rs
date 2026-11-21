@@ -353,7 +353,6 @@ fn open_socket_set(
     fwmark: u32,
     buffer: usize,
     limits: GsoLimits,
-    gso_segments: Option<usize>,
 ) -> io::Result<SocketSet> {
     let mut sockets = Vec::with_capacity(extra + 1);
     let primary = open_socket(port, fwmark, buffer, limits)?;
@@ -376,11 +375,6 @@ fn open_socket_set(
         }
     }
     let set = SocketSet::new(sockets).map_err(|error| io::Error::other(error.to_string()))?;
-    if let Some(segments) = gso_segments {
-        for socket in set.all() {
-            socket.limit_gso_segments(segments);
-        }
-    }
     Ok(set)
 }
 
@@ -680,11 +674,11 @@ fn send_run_inner<R: rand_core::RngCore>(
             let Some(endpoint) = sent.endpoint else {
                 return;
             };
-            if !batch.push_for_peer(peer, endpoint, offset, &sent.layout) {
+            if !batch.push_for_peer(peer, endpoint, offset, &sent.layout, &sent.fec_caps) {
                 batch.flush_with(socket, batch_buffer, |peer, bytes| {
                     device.on_send_drop(peer, bytes);
                 });
-                if !batch.push_for_peer(peer, endpoint, offset, &sent.layout) {
+                if !batch.push_for_peer(peer, endpoint, offset, &sent.layout, &sent.fec_caps) {
                     return;
                 }
             }
@@ -950,7 +944,6 @@ fn worker_loop(
     let mut bound_epoch: Option<u64> = None;
     let mut bound_underlay: Option<u16> = None;
     let mut bound_mark: Option<u32> = None;
-    let mut bound_gso_limit = usize::MAX;
     let mut rebind_after = Instant::now();
 
     while !shutdown_requested() {
@@ -982,7 +975,6 @@ fn worker_loop(
                 want_mark,
                 socket_buffer,
                 runtime_underlay(underlay, &device).gso_limits(),
-                device.fec_gso_segments(),
             ) {
                 Ok(new_socket) => {
                     // An ephemeral request must be reported as the port that
@@ -1007,13 +999,6 @@ fn worker_loop(
             }
         }
         let active = socket.as_ref().expect("socket is bound");
-        let want_gso_limit = device.fec_gso_segments().unwrap_or(usize::MAX);
-        if bound_gso_limit != want_gso_limit {
-            for listener in active.all() {
-                listener.limit_gso_segments(want_gso_limit);
-            }
-            bound_gso_limit = want_gso_limit;
-        }
         if bound_mark != Some(want_mark) && apply_socket_mark(active, want_mark) {
             bound_mark = Some(want_mark);
         }
@@ -1792,6 +1777,18 @@ mod tests {
         assert!(deadline <= now, "{deadline:?}");
         assert_eq!(poll_timeout_ms(now, Some(deadline)), 1);
         assert_eq!(earliest_deadline(Some(deadline), None), Some(deadline));
+    }
+
+    #[test]
+    fn idle_device_without_peers_does_not_poll_at_one_millisecond() {
+        let device = Device::new(DeviceConfig::default()).expect("device");
+        // Long enough for a stale control clock to fall into the past.
+        thread::sleep(Duration::from_millis(300));
+        let now = Instant::now();
+        assert_eq!(
+            poll_timeout_ms(now, device.next_deadline()),
+            IDLE_TIMEOUT_MS
+        );
     }
 
     #[test]

@@ -132,11 +132,17 @@ fn fec_recovered_losses_do_not_slow_the_flow() {
     // A datagram recovered by FEC after the 64-bit ACK window has moved on
     // can no longer be named by an ACK. The watermark correctly reports such
     // a record as a loss because the controller cannot distinguish it from a
-    // real one; what must not happen is a collapsed flow.
+    // real one; what must not happen is a collapsed flow or a second entry in
+    // the orphan counter.
     assert_eq!(result.stats.spurious_losses, 0, "{:?}", result.stats);
+    assert_eq!(
+        result.stats.orphaned_packets, 0,
+        "watermark losses must not also be counted as orphans: {:?}",
+        result.stats
+    );
     assert!(
-        result.stats.lost_packets <= result.stats.orphaned_packets,
-        "only watermark releases may be reported for a FEC-recovered path: {:?}",
+        result.stats.lost_packets > 0,
+        "late FEC recovery must be visible as a watermark loss: {:?}",
         result.stats
     );
 

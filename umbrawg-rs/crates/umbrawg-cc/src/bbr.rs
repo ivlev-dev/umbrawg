@@ -421,9 +421,9 @@ impl Bbr {
             self.ring.release_unreachable(ack.largest_counter, 63);
         if unreachable_packets > 0 {
             self.inflight = self.inflight.saturating_sub(unreachable_bytes);
-            self.orphaned_packets = self.orphaned_packets.saturating_add(unreachable_packets);
             // The records left the ACK window unacknowledged: that is the
-            // watermark loss signal, not a collection of orphans.
+            // watermark loss signal. They are counted as losses, not as
+            // orphans, so one datagram never appears in both counters.
             self.note_loss_batch(unreachable_bytes, unreachable_packets, now_ns);
         }
 
@@ -578,8 +578,9 @@ impl Bbr {
             let (bytes, packets) = self.ring.sweep(now_ns, age);
             if packets > 0 {
                 self.inflight = self.inflight.saturating_sub(bytes);
-                self.orphaned_packets = self.orphaned_packets.saturating_add(packets);
-                // A record that outlived the sweep age was never acknowledged.
+                // A record that outlived the sweep age was never acknowledged:
+                // it is a loss, not an orphan. Keeping the two counters
+                // disjoint makes the statistics summable.
                 self.note_loss_batch(bytes, packets, now_ns);
             }
         }
@@ -1217,7 +1218,10 @@ mod tests {
         assert_eq!(stats.lost_packets, 16, "{stats:?}");
         assert_eq!(stats.lost_bytes, 16 * 1400, "{stats:?}");
         assert_eq!(bbr.inflight(), 63 * 1400);
-        assert_eq!(stats.orphaned_packets, 16);
+        assert_eq!(
+            stats.orphaned_packets, 0,
+            "watermark losses must not also count as orphans"
+        );
     }
 
     #[test]
@@ -1233,6 +1237,22 @@ mod tests {
         assert_eq!(stats.lost_packets, 4, "{stats:?}");
         assert_eq!(stats.lost_bytes, 4 * 1400, "{stats:?}");
         assert_eq!(stats.dropped_packets, 0);
+    }
+
+    #[test]
+    fn ring_eviction_is_orphaned_but_not_lost() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        // One counter past the ring capacity displaces the oldest in-flight
+        // record. That is an orphan: no feedback ever named it, and it must
+        // not be counted as a loss.
+        for counter in 0..=(RING_CAPACITY as u64) {
+            bbr.on_send(counter, 1400, base);
+        }
+        let stats = bbr.stats();
+        assert_eq!(stats.orphaned_packets, 1, "{stats:?}");
+        assert_eq!(stats.lost_packets, 0, "{stats:?}");
+        assert_eq!(stats.lost_bytes, 0, "{stats:?}");
     }
 
     #[test]

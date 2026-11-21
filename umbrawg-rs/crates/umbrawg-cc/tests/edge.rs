@@ -105,9 +105,10 @@ fn counter_overflow_is_handled() {
     );
     assert_eq!(bbr.stats().delivered, MSS as u64);
     // Counter zero is outside the 64-bit bitmap window of `u64::MAX`, so it
-    // is released from the in-flight accounting as unreachable.
+    // is released by the watermark and counted as a loss, not as an orphan.
     assert_eq!(bbr.inflight(), 0);
-    assert_eq!(bbr.stats().orphaned_packets, 1);
+    assert_eq!(bbr.stats().orphaned_packets, 0);
+    assert_eq!(bbr.stats().lost_packets, 1);
 
     bbr.on_loss(u64::MAX - 1, after(base, Duration::from_millis(30)));
     bbr.on_loss(u64::MAX, after(base, Duration::from_millis(31)));
@@ -185,7 +186,7 @@ fn duplicate_ack_does_not_advance_rounds() {
 }
 
 #[test]
-fn timer_releases_orphaned_packets() {
+fn timer_releases_stale_packets_as_losses() {
     let base = base_time();
     let mut bbr = Bbr::new(BbrConfig::default());
     for counter in 0..5u64 {
@@ -195,7 +196,8 @@ fn timer_releases_orphaned_packets() {
 
     let stats = bbr.stats();
     assert_eq!(bbr.inflight(), 0);
-    assert_eq!(stats.orphaned_packets, 5);
+    assert_eq!(stats.orphaned_packets, 0);
+    assert_eq!(stats.lost_packets, 5);
     assert!(bbr.cwnd() >= MIN_CWND);
 }
 

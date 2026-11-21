@@ -664,7 +664,6 @@ pub(crate) fn rx_loop(
     let mut bound_epoch: Option<u64> = None;
     let mut bound_underlay: Option<u16> = None;
     let mut bound_mark: Option<u32> = None;
-    let mut bound_gso_limit = usize::MAX;
     let mut rebind_after = Instant::now();
     let mut cursor = 0usize;
     let mut stats_at = Instant::now();
@@ -698,7 +697,6 @@ pub(crate) fn rx_loop(
                 want_mark,
                 socket_buffer,
                 crate::runtime_underlay(underlay, &device).gso_limits(),
-                device.fec_gso_segments(),
             ) {
                 Ok(new_socket) => {
                     let actual = new_socket.primary().local_addr().port();
@@ -727,13 +725,6 @@ pub(crate) fn rx_loop(
             }
         }
         let active = socket.as_ref().expect("socket is bound").as_ref();
-        let want_gso_limit = device.fec_gso_segments().unwrap_or(usize::MAX);
-        if bound_gso_limit != want_gso_limit {
-            for listener in active.all() {
-                listener.limit_gso_segments(want_gso_limit);
-            }
-            bound_gso_limit = want_gso_limit;
-        }
         if bound_mark != Some(want_mark) && crate::apply_socket_mark(active, want_mark) {
             bound_mark = Some(want_mark);
         }

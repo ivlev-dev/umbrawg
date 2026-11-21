@@ -3,7 +3,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use umbrawg_device::{BatchLayout, GsoGroup, Peer};
+use umbrawg_device::{BatchLayout, GsoGroup, Peer, MAX_GSO_GROUPS};
 use umbrawg_transport::{
     Endpoint, GsoSize, Outgoing, SendQueue, Socket, SocketSource, TransportError,
 };
@@ -60,6 +60,8 @@ struct PeerBatch {
 pub struct TxBatch {
     queue: SendQueue,
     groups: Vec<GsoGroup>,
+    /// Максимум сегментов в GSO-группе: 64 для legacy, `m` для FEC-шардов.
+    caps: Vec<usize>,
     peers: Vec<PeerBatch>,
     used: usize,
     dropped: usize,
@@ -71,6 +73,7 @@ impl TxBatch {
         Ok(Self {
             queue: SendQueue::new(capacity)?,
             groups: Vec::with_capacity(MAX_GROUPS),
+            caps: Vec::with_capacity(MAX_GROUPS),
             peers: Vec::new(),
             used: 0,
             dropped: 0,
@@ -80,6 +83,7 @@ impl TxBatch {
     /// Сбрасывает накопленные группы, не трогая выделенную память.
     pub fn clear(&mut self) {
         self.groups.clear();
+        self.caps.clear();
         self.peers.clear();
         self.used = 0;
         self.dropped = 0;
@@ -101,19 +105,35 @@ impl TxBatch {
     /// отправить накопленное и повторить добавление.
     #[cfg(test)]
     pub fn push(&mut self, endpoint: SocketAddr, base: usize, layout: &BatchLayout) -> bool {
-        self.push_with_peer(None, endpoint, base, layout)
+        self.push_with_peer(None, endpoint, base, layout, &[0; MAX_GSO_GROUPS])
     }
 
     /// Добавляет группы пира `peer`, чтобы ошибки отправки можно было вернуть
     /// в окно BBR этого пира.
+    ///
+    /// `fec_caps[i]` — предел сегментов в GSO-группе `i`: `0` для обычного
+    /// трафика, `m` для FEC-шардов. Ограничение действует только на группу,
+    /// а не на весь сокет.
     pub fn push_for_peer(
         &mut self,
         peer: &Arc<Peer>,
         endpoint: SocketAddr,
         base: usize,
         layout: &BatchLayout,
+        fec_caps: &[u8; MAX_GSO_GROUPS],
     ) -> bool {
-        self.push_with_peer(Some(peer), endpoint, base, layout)
+        self.push_with_peer(Some(peer), endpoint, base, layout, fec_caps)
+    }
+
+    #[cfg(test)]
+    fn push_caps(
+        &mut self,
+        endpoint: SocketAddr,
+        base: usize,
+        layout: &BatchLayout,
+        fec_caps: &[u8; MAX_GSO_GROUPS],
+    ) -> bool {
+        self.push_with_peer(None, endpoint, base, layout, fec_caps)
     }
 
     fn push_with_peer(
@@ -122,6 +142,7 @@ impl TxBatch {
         endpoint: SocketAddr,
         base: usize,
         layout: &BatchLayout,
+        fec_caps: &[u8; MAX_GSO_GROUPS],
     ) -> bool {
         if layout.is_empty() {
             return true;
@@ -134,13 +155,19 @@ impl TxBatch {
             .last()
             .is_some_and(|peer| peer.endpoint == endpoint);
         let mut pushed = 0;
-        for group in layout.groups() {
+        for (index, group) in layout.groups().iter().enumerate() {
             let start = group.start + base;
+            let cap = match fec_caps.get(index).copied().unwrap_or(0) {
+                0 => MAX_GROUP_SEGMENTS,
+                shards => usize::from(shards).clamp(1, MAX_GROUP_SEGMENTS),
+            };
+            let merge_limit = cap.min(MAX_GROUP_SEGMENTS);
             let merged = same_peer
+                && self.caps.last() == Some(&cap)
                 && self.groups.last().is_some_and(|last| {
                     last.segment_len == group.segment_len
                         && last.end() == start
-                        && last.segments + group.segments <= MAX_GROUP_SEGMENTS
+                        && last.segments + group.segments <= merge_limit
                 });
             if merged {
                 if let Some(last) = self.groups.last_mut() {
@@ -153,6 +180,7 @@ impl TxBatch {
                 segment_len: group.segment_len,
                 segments: group.segments,
             });
+            self.caps.push(cap);
             pushed += 1;
         }
         if same_peer {
@@ -212,7 +240,16 @@ impl TxBatch {
             let mut pending = 0usize;
             for offset in 0..peer.group_count {
                 let group = self.groups[peer.first_group + offset];
-                while !append_group(&mut outgoings, &mut pending, buffer, group, limits, gso) {
+                let cap = self.caps[peer.first_group + offset];
+                while !append_group(
+                    &mut outgoings,
+                    &mut pending,
+                    buffer,
+                    group,
+                    limits,
+                    gso,
+                    cap,
+                ) {
                     if pending == 0 {
                         self.note_dropped(&peer, group.len(), 1, &mut on_drop);
                         log::debug!(
@@ -322,6 +359,7 @@ fn append_group<'a>(
     group: GsoGroup,
     limits: SegmentLimits,
     gso: bool,
+    cap: usize,
 ) -> bool {
     if group.is_empty() {
         return true;
@@ -331,8 +369,8 @@ fn append_group<'a>(
     };
     let segment_len = group.segment_len;
     let (per_datagram, gso_size) = if gso && segment_len <= limits.max_gso_size {
-        let per_datagram = limits
-            .max_segments
+        let per_datagram = cap
+            .min(limits.max_segments)
             .min(limits.max_datagram_len / segment_len)
             .max(1);
         let gso_size = GsoSize::from_usize(segment_len).ok();
@@ -394,7 +432,8 @@ mod tests {
             &DATA,
             group,
             limits(4000, 30, 1400),
-            true
+            true,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 1);
         assert_eq!(out[0].len(), 300);
@@ -419,7 +458,8 @@ mod tests {
             &DATA,
             group,
             limits(4000, 30, 1400),
-            true
+            true,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 1);
         assert_eq!(out[0].gso_size(), None);
@@ -442,7 +482,8 @@ mod tests {
             &DATA,
             group,
             limits,
-            true
+            true,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 1);
         assert_eq!(out[0].len(), 2960);
@@ -464,7 +505,8 @@ mod tests {
             &DATA,
             group,
             limits(250, 30, 1400),
-            true
+            true,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 3);
         assert_eq!(out[0].len(), 200);
@@ -489,7 +531,8 @@ mod tests {
             &DATA,
             group,
             limits(100_000, 2, 1400),
-            true
+            true,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 3);
         assert_eq!(out[0].len(), 200);
@@ -512,7 +555,8 @@ mod tests {
             &DATA,
             group,
             limits(100_000, 30, 1400),
-            false
+            false,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 4);
         assert!(out[..4]
@@ -536,7 +580,8 @@ mod tests {
             &DATA,
             group,
             limits(6000, 30, 1400),
-            true
+            true,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 2);
         assert!(out[..2]
@@ -559,7 +604,8 @@ mod tests {
             &DATA,
             group,
             limits(100_000, 30, 1400),
-            false
+            false,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 0);
     }
@@ -579,7 +625,8 @@ mod tests {
             &DATA,
             group,
             limits(4000, 30, 1400),
-            true
+            true,
+            MAX_GROUP_SEGMENTS
         ));
         assert_eq!(pending, 0);
     }
@@ -699,6 +746,7 @@ mod tests {
             segment_len: 100,
             segments,
         });
+        batch.caps.push(MAX_GROUP_SEGMENTS);
         batch.peers.push(PeerBatch {
             peer: None,
             endpoint: "127.0.0.1:9".parse().unwrap(),
@@ -724,6 +772,57 @@ mod tests {
     }
 
     #[test]
+    fn fec_caps_limit_only_shard_groups() {
+        let mut caps = [0u8; MAX_GSO_GROUPS];
+        caps[1] = 1; // FEC 2:1: one shard per GSO superdatagram.
+        let mut layout = BatchLayout::new();
+        for index in 0..4 {
+            assert!(layout.push(index * 100, 100));
+        }
+        for index in 0..4 {
+            assert!(layout.push(400 + index * 120, 120));
+        }
+        let mut batch = TxBatch::new(MAX_OUTGOING).unwrap();
+        let endpoint: SocketAddr = "10.0.0.1:1111".parse().unwrap();
+        assert!(batch.push_caps(endpoint, 0, &layout, &caps));
+        assert_eq!(batch.caps, vec![MAX_GROUP_SEGMENTS, 1]);
+
+        let limits = limits(100_000, 64, 1400);
+        let buffer = vec![0u8; 4 * 100 + 4 * 120];
+        let mut out = [Outgoing::new(&[]); MAX_OUTGOING];
+        let mut pending = 0;
+        assert!(append_group(
+            &mut out,
+            &mut pending,
+            &buffer,
+            batch.groups[0],
+            limits,
+            true,
+            batch.caps[0]
+        ));
+        assert_eq!(pending, 1, "legacy segments must still be coalesced");
+        assert_eq!(
+            out[0].gso_size(),
+            Some(GsoSize::new(100).expect("non-zero"))
+        );
+
+        pending = 0;
+        assert!(append_group(
+            &mut out,
+            &mut pending,
+            &buffer,
+            batch.groups[1],
+            limits,
+            true,
+            batch.caps[1]
+        ));
+        assert_eq!(pending, 4, "2:1 shards must go one per datagram");
+        assert!(out[..4]
+            .iter()
+            .all(|outgoing| outgoing.gso_size().is_none()));
+    }
+
+    #[test]
     fn dropped_groups_are_reported_with_their_peer_and_bytes() {
         let socket = Socket::bind(AddressFamily::Ipv4, 0).unwrap();
         socket.disable_gso();
@@ -740,6 +839,7 @@ mod tests {
             segment_len: 100,
             segments,
         });
+        batch.caps.push(MAX_GROUP_SEGMENTS);
         batch.peers.push(PeerBatch {
             peer: Some(Arc::clone(&peer)),
             endpoint: "127.0.0.1:9".parse().unwrap(),
