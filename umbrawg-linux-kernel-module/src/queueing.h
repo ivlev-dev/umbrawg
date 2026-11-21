@@ -192,6 +192,85 @@ static inline bool uwg_queue_wakeup_drained(struct multicore_worker *worker,
 	return false;
 }
 
+/*
+ * Work stealing: a per-CPU ring keeps a flow's chains together for
+ * batching, but a single flow only ever feeds one CPU. When a peer's
+ * chain backlog on that CPU grows past the threshold, the producer asks
+ * another CPU to steal from it. Idle workers then drain the victim's
+ * ring exactly like their own; the old round-robin design did the same
+ * per chain, so ordering and the packet state machine are unaffected.
+ *
+ * The threshold counts queue entries (a chain of up to MAX_STAGED_PACKETS
+ * skbs on TX, a single skb on RX), not packets. A healthy multi-peer
+ * pipeline keeps only a couple of entries queued per peer and stays on
+ * the batching path; a single flow that outruns its CPU grows a real
+ * backlog and asks for help early. Four entries measured the best
+ * balance: single-flow ~3.1 Gbit/s (local-only ~2.4, legacy round-robin
+ * ~2.6) while 50 peers stayed at ~8.4 Gbit/s with fairness < 2.1. A
+ * threshold of 8 still helped but left single-flow at ~2.7.
+ */
+#define UWG_CRYPT_STEAL_THRESHOLD 4
+
+/*
+ * Claim the pending steal request. Only a worker other than the victim
+ * may take it, and only one helper claims it (cmpxchg to -1). Returns the
+ * victim's queue, or NULL when there is nothing to do.
+ */
+static inline struct crypt_queue *
+uwg_crypt_steal_claim(struct crypt_queue *queue)
+{
+	struct crypt_queue *parent = READ_ONCE(queue->parent);
+	struct crypt_queue *victim;
+	int cpu;
+
+	if (unlikely(!parent))
+		return NULL;
+	cpu = atomic_read(&parent->steal_cpu);
+	if (unlikely(cpu < 0))
+		return NULL;
+	victim = per_cpu_ptr(parent->worker, cpu)->ptr;
+	if (unlikely(!victim || victim == queue))
+		return NULL;
+	return atomic_cmpxchg(&parent->steal_cpu, cpu, -1) == cpu ?
+		       victim : NULL;
+}
+
+/*
+ * Called by the producer when a peer's chain backlog crosses the
+ * threshold. Only one request is outstanding at a time (steal_cpu
+ * doubles as its flag), and one helper is woken per request, rotated
+ * over the online CPUs, so a burst cannot turn into a wakeup storm.
+ */
+static inline void uwg_crypt_maybe_steal(struct crypt_queue *device_queue,
+					 const struct prev_queue *peer_queue,
+					 int own_cpu,
+					 struct workqueue_struct *wq)
+{
+	struct multicore_worker *worker;
+	int cpu;
+
+	if (atomic_read(&peer_queue->count) <= UWG_CRYPT_STEAL_THRESHOLD)
+		return;
+	if (atomic_cmpxchg(&device_queue->steal_cpu, -1, own_cpu) != -1)
+		return;
+
+	cpu = uwg_cpumask_next_online(&device_queue->helper_cpu);
+	if (unlikely(cpu == own_cpu))
+		cpu = uwg_cpumask_next_online(&device_queue->helper_cpu);
+	if (unlikely(cpu == own_cpu)) {
+		/* Only one CPU online: nobody can help. */
+		atomic_set(&device_queue->steal_cpu, -1);
+		return;
+	}
+	worker = per_cpu_ptr(device_queue->worker, cpu);
+	if (!uwg_queue_wakeup_arm(worker, cpu, wq))
+		/* The helper was already queued and may have passed its
+		 * claim point; retry on the next overflow instead of
+		 * leaving the request stuck.
+		 */
+		atomic_cmpxchg(&device_queue->steal_cpu, own_cpu, -1);
+}
+
 static inline int uwg_queue_enqueue_per_device_and_peer(
 	struct crypt_queue *device_queue, struct prev_queue *peer_queue,
 	struct sk_buff *skb, struct workqueue_struct *wq)
@@ -228,6 +307,8 @@ static inline int uwg_queue_enqueue_per_device_and_peer(
 		return -EPIPE;
 	}
 	uwg_queue_wakeup_arm(worker, cpu, wq);
+	/* The single flow that backs up its ring gets idle CPUs to help. */
+	uwg_crypt_maybe_steal(device_queue, peer_queue, cpu, wq);
 	put_cpu();
 	return 0;
 }

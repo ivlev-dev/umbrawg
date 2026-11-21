@@ -960,31 +960,45 @@ void uwg_packet_tx_worker(struct work_struct *work)
 	}
 }
 
+static void uwg_packet_encrypt_chain(struct sk_buff *first)
+{
+	enum packet_state state = PACKET_STATE_CRYPTED;
+	struct sk_buff *skb, *next;
+
+	skb_list_walk_safe(first, skb, next) {
+		if (likely(encrypt_packet(skb, PACKET_CB(first)->keypair))) {
+			uwg_reset_packet(skb, true);
+		} else {
+			state = PACKET_STATE_DEAD;
+			break;
+		}
+	}
+	uwg_queue_enqueue_per_peer_tx(first, state);
+
+	if (need_resched())
+		cond_resched();
+}
+
 void uwg_packet_encrypt_worker(struct work_struct *work)
 {
 	struct multicore_worker *worker = container_of(work,
 						       struct multicore_worker,
 						       work);
 	struct crypt_queue *queue = worker->ptr;
-	struct sk_buff *first, *skb, *next;
+	struct crypt_queue *victim;
+	struct sk_buff *first;
 
 	for (;;) {
-		while ((first = ptr_ring_consume_bh(&queue->ring)) != NULL) {
-			enum packet_state state = PACKET_STATE_CRYPTED;
+		while ((first = ptr_ring_consume_bh(&queue->ring)) != NULL)
+			uwg_packet_encrypt_chain(first);
 
-			skb_list_walk_safe(first, skb, next) {
-				if (likely(encrypt_packet(skb, PACKET_CB(first)->keypair))) {
-					uwg_reset_packet(skb, true);
-				} else {
-					state = PACKET_STATE_DEAD;
-					break;
-				}
-			}
-			uwg_queue_enqueue_per_peer_tx(first, state);
-
-			if (need_resched())
-				cond_resched();
+		/* An idle CPU helps a single flow that outgrew its ring. */
+		victim = uwg_crypt_steal_claim(queue);
+		if (victim) {
+			while ((first = ptr_ring_consume_bh(&victim->ring)) != NULL)
+				uwg_packet_encrypt_chain(first);
 		}
+
 		if (uwg_queue_wakeup_drained(worker, queue))
 			break;
 	}

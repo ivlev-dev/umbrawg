@@ -713,23 +713,38 @@ next:
 	return work_done;
 }
 
+static void uwg_packet_decrypt_skb(struct sk_buff *skb)
+{
+	enum packet_state state =
+		likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
+			PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
+
+	uwg_queue_enqueue_per_peer_rx(skb, state);
+
+	if (need_resched())
+		cond_resched();
+}
+
 void uwg_packet_decrypt_worker(struct work_struct *work)
 {
 	struct multicore_worker *worker = container_of(work,
 						       struct multicore_worker,
 						       work);
 	struct crypt_queue *queue = worker->ptr;
+	struct crypt_queue *victim;
 	struct sk_buff *skb;
 
 	for (;;) {
-		while ((skb = ptr_ring_consume_bh(&queue->ring)) != NULL) {
-			enum packet_state state =
-				likely(decrypt_packet(skb, PACKET_CB(skb)->keypair)) ?
-					PACKET_STATE_CRYPTED : PACKET_STATE_DEAD;
-			uwg_queue_enqueue_per_peer_rx(skb, state);
-			if (need_resched())
-				cond_resched();
+		while ((skb = ptr_ring_consume_bh(&queue->ring)) != NULL)
+			uwg_packet_decrypt_skb(skb);
+
+		/* An idle CPU helps a single flow that outgrew its ring. */
+		victim = uwg_crypt_steal_claim(queue);
+		if (victim) {
+			while ((skb = ptr_ring_consume_bh(&victim->ring)) != NULL)
+				uwg_packet_decrypt_skb(skb);
 		}
+
 		if (uwg_queue_wakeup_drained(worker, queue))
 			break;
 	}

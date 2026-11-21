@@ -34,9 +34,19 @@ struct crypt_queue {
 	/* Holds skb chains (up to MAX_STAGED_PACKETS each), not single skbs. */
 	struct ptr_ring ring;
 	struct multicore_worker __percpu *worker;
-	/* Round-robin cursor for the shared handshake queue only.
-	 * The per-CPU crypt queues must not use it: their ring is chosen by
-	 * the producing CPU (uwg_queue_enqueue_per_device_and_peer()), and
+	/* Back-pointer from a per-CPU ring to the device-level queue; NULL
+	 * for the shared handshake queue.
+	 */
+	struct crypt_queue *parent;
+	/* Device-level: CPU whose ring is backed up, or -1. Idle workers
+	 * steal from that ring until it drains.
+	 */
+	atomic_t steal_cpu;
+	/* Device-level: round-robin cursor for picking the next helper. */
+	int helper_cpu;
+	/* Round-robin cursor for the shared handshake queue only. The
+	 * per-CPU crypt queues must not use it: their ring is chosen by the
+	 * producing CPU (uwg_queue_enqueue_per_device_and_peer()), and
 	 * spreading a flow over rings destroys worker batching.
 	 */
 	int last_cpu;
