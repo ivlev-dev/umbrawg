@@ -163,13 +163,16 @@ struct WorkerIo<'a> {
     tun: &'a Tun,
     rx: &'a mut RxBatch,
     stats: Option<&'a parallel::RxStats>,
+    /// Устройство доступно только на путях демона: внутренние вызовы
+    /// устройства передают `None`, чтобы не заходить в него повторно.
+    device: Option<&'a Device>,
 }
 
 impl DatagramSink for WorkerIo<'_> {
     fn send_datagram(
         &mut self,
         endpoint: SocketAddr,
-        _peer: Option<&Peer>,
+        peer: Option<&Peer>,
         payload: &[u8],
         gso_size: Option<usize>,
     ) {
@@ -183,6 +186,12 @@ impl DatagramSink for WorkerIo<'_> {
             .next()
             .send_to(Endpoint::new(endpoint), payload, gso)
         {
+            // The datagram was already registered with the congestion
+            // controller: a local send error must return its bytes to the
+            // window instead of waiting for the watermark sweep.
+            if let (Some(device), Some(peer)) = (self.device, peer) {
+                device.on_send_drop(peer, payload.len());
+            }
             log::debug!("send to {endpoint} failed: {error}");
         }
     }
@@ -377,20 +386,57 @@ fn open_socket_set(
 
 /// Проверяет, нужно ли пересоздать набор сокетов.
 ///
+/// `bound_epoch` — эпоха `listen_port`, при которой набор был привязан.
+/// Запрос `listen-port 0` не меняет значение порта, поэтому повторный запрос
+/// эфемерного порта виден только по смене эпохи.
+///
+/// `bound_underlay` — MTU подложки, из которого посчитаны GSO-лимиты сокетов:
+/// смена `underlay-mtu` через UAPI требует новой привязки, иначе сегменты
+/// остаются ограничены старым MTU до рестарта.
+///
 /// `bound_extra` — число дополнительных портов, запрошенное при последней
 /// успешной привязке: при частичном сбое набор может содержать меньше сокетов,
 /// и повторная привязка каждый цикл только вредила бы.
+#[allow(clippy::too_many_arguments)]
 fn rebind_needed(
     current: Option<&SocketSet>,
+    bound_epoch: Option<u64>,
+    want_epoch: u64,
     bound_extra: Option<usize>,
+    bound_underlay: Option<u16>,
     want_port: u16,
     want_extra: usize,
+    want_underlay: u16,
 ) -> bool {
     let Some(current) = current else {
         return true;
     };
+    if bound_epoch != Some(want_epoch) || bound_underlay != Some(want_underlay) {
+        return true;
+    }
     let port_matches = want_port == 0 || current.primary().local_addr().port() == want_port;
     !port_matches || bound_extra != Some(want_extra)
+}
+
+/// Порт, который нужно запросить при перепривязке.
+///
+/// Перепривязка из-за смены GSO-лимитов не должна менять эфемерный порт:
+/// пиры уже знают старый endpoint. Новый порт выбирается только для явного
+/// `listen-port 0` (сменилась эпоха) или для нового фиксированного порта.
+fn rebind_port(
+    requested: u16,
+    bound_epoch: Option<u64>,
+    want_epoch: u64,
+    current: Option<u16>,
+) -> u16 {
+    if requested != 0 {
+        return requested;
+    }
+    if bound_epoch == Some(want_epoch) {
+        current.unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 fn poll_inputs(source: &dyn SocketSource, tun: &Tun, fds: &mut Vec<libc::pollfd>) {
@@ -407,6 +453,43 @@ fn poll_inputs(source: &dyn SocketSource, tun: &Tun, fds: &mut Vec<libc::pollfd>
             revents: 0,
         });
     }
+}
+
+/// Миллисекунды до ближайшего дедлайна в пределах `1..=IDLE_TIMEOUT_MS`.
+///
+/// ACK и partial-блок FEC имеют дедлайны 0.5..=5 мс; опрос по ближайшему из
+/// них убирает ожидание до 10 мс. Минимум 1 мс не превращает цикл в busy-loop,
+/// а отсутствие дедлайна сохраняет прежний 10-мс простой.
+pub(crate) fn poll_timeout_ms(now: Instant, deadline: Option<Instant>) -> i32 {
+    let Some(deadline) = deadline else {
+        return IDLE_TIMEOUT_MS;
+    };
+    let wait = deadline.saturating_duration_since(now);
+    let millis = wait.as_micros().div_ceil(1000);
+    i32::try_from(millis)
+        .unwrap_or(i32::MAX)
+        .clamp(1, IDLE_TIMEOUT_MS)
+}
+
+/// Более ранний из двух необязательных дедлайнов.
+pub(crate) fn earliest_deadline(
+    first: Option<Instant>,
+    second: Option<Instant>,
+) -> Option<Instant> {
+    match (first, second) {
+        (Some(left), Some(right)) => Some(left.min(right)),
+        (left, right) => left.or(right),
+    }
+}
+
+/// Ограничения подложки с MTU, актуальным для устройства.
+///
+/// Стартовые значения приходят из env, но `underlay-mtu` можно изменить
+/// через UAPI. GSO-лимиты и `max_datagram_len` сокета выводятся из MTU,
+/// поэтому их нужно пересчитывать, а не хранить снимок времени старта.
+pub(crate) fn runtime_underlay(base: Underlay, device: &Device) -> Underlay {
+    base.with_mtu(u32::from(device.underlay_mtu()))
+        .unwrap_or(base)
 }
 
 fn is_tun_would_block(error: &TunError) -> bool {
@@ -447,8 +530,12 @@ fn send_run<R: rand_core::RngCore>(
             if packet.len() <= 256 {
                 small[small_len] = packet;
                 small_len += 1;
-            } else {
-                let _ = device.bbr_enqueue(peer, packet);
+            } else if !device.bbr_enqueue(peer, packet) {
+                log::debug!(
+                    "BBR queue is full: dropped {} bytes ({} dropped so far)",
+                    packet.len(),
+                    device.bbr_queue_drop_count()
+                );
             }
         }
         if small_len > 0 {
@@ -535,7 +622,9 @@ fn send_run_inner<R: rand_core::RngCore>(
     }
     let record = tun.mtu() as usize + TUN_PACKET_MARGIN;
     if batch_flush_needed(batch.used(), plaintexts.len(), record, batch_buffer.len()) {
-        batch.flush(socket, batch_buffer);
+        batch.flush_with(socket, batch_buffer, |peer, bytes| {
+            device.on_send_drop(peer, bytes);
+        });
     }
     let mut offset = batch.used();
     let mut retried = false;
@@ -545,6 +634,7 @@ fn send_run_inner<R: rand_core::RngCore>(
             tun,
             rx,
             stats: None,
+            device: Some(device),
         };
         let mut context = IoContext::new(rng, now, scratch, &mut io);
         match device.send_batch(peer, plaintexts, &mut batch_buffer[offset..], &mut context) {
@@ -556,7 +646,9 @@ fn send_run_inner<R: rand_core::RngCore>(
                     break Err(error);
                 }
                 retried = true;
-                batch.flush(socket, batch_buffer);
+                batch.flush_with(socket, batch_buffer, |peer, bytes| {
+                    device.on_send_drop(peer, bytes);
+                });
                 offset = batch.used();
             }
         }
@@ -564,13 +656,16 @@ fn send_run_inner<R: rand_core::RngCore>(
     match result {
         Ok(sent) => {
             if sent.staged > 0 {
-                batch.flush(socket, batch_buffer);
+                batch.flush_with(socket, batch_buffer, |peer, bytes| {
+                    device.on_send_drop(peer, bytes);
+                });
                 if sent.needs_handshake {
                     let mut io = WorkerIo {
                         socket,
                         tun,
                         rx,
                         stats: None,
+                        device: Some(device),
                     };
                     let mut context = IoContext::new(rng, now, scratch, &mut io);
                     if let Err(error) = device.initiate_handshake(peer, &mut context) {
@@ -585,9 +680,11 @@ fn send_run_inner<R: rand_core::RngCore>(
             let Some(endpoint) = sent.endpoint else {
                 return;
             };
-            if !batch.push(endpoint, offset, &sent.layout) {
-                batch.flush(socket, batch_buffer);
-                if !batch.push(endpoint, offset, &sent.layout) {
+            if !batch.push_for_peer(peer, endpoint, offset, &sent.layout) {
+                batch.flush_with(socket, batch_buffer, |peer, bytes| {
+                    device.on_send_drop(peer, bytes);
+                });
+                if !batch.push_for_peer(peer, endpoint, offset, &sent.layout) {
                     return;
                 }
             }
@@ -596,12 +693,15 @@ fn send_run_inner<R: rand_core::RngCore>(
             }
         }
         Err(DeviceError::BufferTooSmall { .. }) => {
-            batch.flush(socket, batch_buffer);
+            batch.flush_with(socket, batch_buffer, |peer, bytes| {
+                device.on_send_drop(peer, bytes);
+            });
             let mut io = WorkerIo {
                 socket,
                 tun,
                 rx,
                 stats: None,
+                device: Some(device),
             };
             let mut context = IoContext::new(rng, now, scratch, &mut io);
             for plaintext in plaintexts {
@@ -847,6 +947,8 @@ fn worker_loop(
     let mut rekey: Vec<Arc<Peer>> = Vec::with_capacity(TUN_BATCH);
     let mut socket: Option<SocketSet> = None;
     let mut bound_extra: Option<usize> = None;
+    let mut bound_epoch: Option<u64> = None;
+    let mut bound_underlay: Option<u16> = None;
     let mut bound_mark: Option<u32> = None;
     let mut bound_gso_limit = usize::MAX;
     let mut rebind_after = Instant::now();
@@ -854,21 +956,43 @@ fn worker_loop(
     while !shutdown_requested() {
         let now = Instant::now();
         device.refresh_under_load(now);
-        let want_port = device.listen_port();
+        let (want_port, want_epoch) = device.listen_port_request();
         let want_extra = usize::from(device.extra_ports());
         let want_mark = device.fwmark();
-        if now >= rebind_after && rebind_needed(socket.as_ref(), bound_extra, want_port, want_extra)
-        {
-            match open_socket_set(
+        let want_underlay = device.underlay_mtu();
+        if now >= rebind_after
+            && rebind_needed(
+                socket.as_ref(),
+                bound_epoch,
+                want_epoch,
+                bound_extra,
+                bound_underlay,
                 want_port,
+                want_extra,
+                want_underlay,
+            )
+        {
+            let current_port = socket
+                .as_ref()
+                .map(|current| current.primary().local_addr().port());
+            let bind_port = rebind_port(want_port, bound_epoch, want_epoch, current_port);
+            match open_socket_set(
+                bind_port,
                 want_extra,
                 want_mark,
                 socket_buffer,
-                underlay.gso_limits(),
+                runtime_underlay(underlay, &device).gso_limits(),
                 device.fec_gso_segments(),
             ) {
                 Ok(new_socket) => {
+                    // An ephemeral request must be reported as the port that
+                    // was actually bound; the request itself stays `0` so a
+                    // repeated `listen-port 0` is still visible.
+                    let actual = new_socket.primary().local_addr().port();
+                    device.note_bound_listen_port(want_epoch, actual);
+                    bound_epoch = Some(want_epoch);
                     bound_extra = Some(want_extra);
+                    bound_underlay = Some(want_underlay);
                     bound_mark = Some(want_mark);
                     socket = Some(new_socket);
                 }
@@ -899,6 +1023,7 @@ fn worker_loop(
                 tun: &tun,
                 rx: &mut rx,
                 stats: None,
+                device: Some(device.as_ref()),
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             let _ = device.flush_control(peer, &mut context);
@@ -944,7 +1069,9 @@ fn worker_loop(
         );
 
         if !batch.is_empty() {
-            batch.flush(active, &batch_buffer);
+            batch.flush_with(active, &batch_buffer, |peer, bytes| {
+                device.on_send_drop(peer, bytes);
+            });
         }
         for peer in &rekey {
             let mut io = WorkerIo {
@@ -952,6 +1079,7 @@ fn worker_loop(
                 tun: &tun,
                 rx: &mut rx,
                 stats: None,
+                device: Some(device.as_ref()),
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             if let Err(error) = device.after_batch_sent(peer, &mut context) {
@@ -984,6 +1112,7 @@ fn worker_loop(
                                 tun: &tun,
                                 rx: &mut rx,
                                 stats: None,
+                                device: Some(device.as_ref()),
                             };
                             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
                             match device.handle_incoming_with(
@@ -1017,6 +1146,7 @@ fn worker_loop(
                 tun: &tun,
                 rx: &mut rx,
                 stats: None,
+                device: Some(device.as_ref()),
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             if let Err(error) = device.flush_staged(peer, &mut context) {
@@ -1036,6 +1166,7 @@ fn worker_loop(
                 tun: &tun,
                 rx: &mut rx,
                 stats: None,
+                device: Some(device.as_ref()),
             };
             let started = Instant::now();
             let mut context = IoContext::new(&mut rng, started, &mut scratch, &mut io);
@@ -1047,8 +1178,9 @@ fn worker_loop(
         if !busy {
             let mut fds = Vec::with_capacity(active.all().len() + 1);
             poll_inputs(active, &tun, &mut fds);
+            let timeout = poll_timeout_ms(Instant::now(), device.next_deadline());
             unsafe {
-                libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, IDLE_TIMEOUT_MS);
+                libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout);
             }
         }
     }
@@ -1123,6 +1255,10 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         ext.ack_interval
     );
     let device = Arc::new(Device::new(DeviceConfig {
+        // The extension derives the FEC shard budget and the tunnel MTU from
+        // the underlay MTU, so the device must know the configured value and
+        // not fall back to the 1500-byte default.
+        underlay_mtu: u16::try_from(underlay.mtu()).map_err(io::Error::other)?,
         ext,
         ..DeviceConfig::default()
     })?);
@@ -1492,20 +1628,203 @@ mod tests {
     }
 
     #[test]
-    fn rebind_tracks_port_and_extra_count() {
+    fn rebind_tracks_port_epoch_and_extra_count() {
         let limits = Underlay::new(1500, 1).unwrap().gso_limits();
         let first = open_socket(0, 0, SOCKET_BUFFER_BYTES, limits).expect("first socket");
         let second = open_socket(0, 0, SOCKET_BUFFER_BYTES, limits).expect("second socket");
         let port = first.local_addr().port();
         let set = SocketSet::new(vec![first, second]).expect("socket set");
 
-        assert!(rebind_needed(None, None, 0, 1));
-        assert!(!rebind_needed(Some(&set), Some(1), 0, 1));
-        assert!(!rebind_needed(Some(&set), Some(1), port, 1));
-        assert!(rebind_needed(Some(&set), Some(1), 0, 2));
-        assert!(rebind_needed(Some(&set), None, 0, 1));
+        assert!(rebind_needed(None, None, 0, None, None, 0, 1, 1500));
+        assert!(!rebind_needed(
+            Some(&set),
+            Some(0),
+            0,
+            Some(1),
+            Some(1500),
+            0,
+            1,
+            1500
+        ));
+        assert!(!rebind_needed(
+            Some(&set),
+            Some(0),
+            0,
+            Some(1),
+            Some(1500),
+            port,
+            1,
+            1500
+        ));
+        assert!(rebind_needed(
+            Some(&set),
+            Some(0),
+            0,
+            Some(1),
+            Some(1500),
+            0,
+            2,
+            1500
+        ));
+        assert!(rebind_needed(
+            Some(&set),
+            Some(0),
+            0,
+            None,
+            Some(1500),
+            0,
+            1,
+            1500
+        ));
+        // A repeated `listen-port 0` bumps the epoch even though the value
+        // stayed zero: the sockets must be rebound to a new ephemeral port.
+        assert!(rebind_needed(
+            Some(&set),
+            Some(0),
+            1,
+            Some(1),
+            Some(1500),
+            0,
+            1,
+            1500
+        ));
+        // A runtime `underlay-mtu` change invalidates the GSO limits baked
+        // into the sockets, so they must be recreated without a restart.
+        assert!(rebind_needed(
+            Some(&set),
+            Some(0),
+            0,
+            Some(1),
+            Some(1500),
+            0,
+            1,
+            9000
+        ));
         let other_port = if port == 1 { 2 } else { 1 };
-        assert!(rebind_needed(Some(&set), Some(1), other_port, 1));
+        assert!(rebind_needed(
+            Some(&set),
+            Some(0),
+            0,
+            Some(1),
+            Some(1500),
+            other_port,
+            1,
+            1500
+        ));
+    }
+
+    #[test]
+    fn runtime_underlay_updates_the_gso_budget() {
+        let device = Device::new(DeviceConfig::default()).expect("device");
+        let base = Underlay::new(1500, 64).expect("underlay");
+        assert_eq!(runtime_underlay(base, &device).max_segment(), 1472);
+
+        device.set_underlay_mtu(9000).expect("underlay");
+        let raised = runtime_underlay(base, &device);
+        assert_eq!(raised.max_segment(), 8972);
+        assert_eq!(raised.segments(), base.segments());
+
+        device.set_underlay_mtu(1280).expect("underlay");
+        assert_eq!(runtime_underlay(base, &device).max_segment(), 1252);
+    }
+
+    #[test]
+    fn recreated_sockets_use_the_raised_gso_limits() {
+        let base = Underlay::new(1500, 64).expect("underlay");
+        let before = open_socket(0, 0, SOCKET_BUFFER_BYTES, base.gso_limits())
+            .expect("1500-byte underlay socket");
+        let raised = base.with_mtu(9000).expect("underlay");
+        let after = open_socket(0, 0, SOCKET_BUFFER_BYTES, raised.gso_limits())
+            .expect("9000-byte underlay socket");
+        // A 1600-byte segment cannot be coalesced on the 1500-byte underlay
+        // but fits once the runtime MTU is raised: this is exactly the GSO
+        // decision made by `append_group`.
+        let before_limits = tx::SegmentLimits::from_socket(&before);
+        let after_limits = tx::SegmentLimits::from_socket(&after);
+        assert!(
+            before_limits.max_gso_size < 1600,
+            "{}",
+            before_limits.max_gso_size
+        );
+        assert!(
+            after_limits.max_gso_size >= 1600,
+            "{}",
+            after_limits.max_gso_size
+        );
+        assert!(
+            after_limits.max_gso_size > before_limits.max_gso_size,
+            "{} -> {}",
+            before_limits.max_gso_size,
+            after_limits.max_gso_size
+        );
+    }
+
+    #[test]
+    fn rebind_port_keeps_an_established_ephemeral_port() {
+        // A GSO/underlay rebind must not change the port peers already know.
+        assert_eq!(rebind_port(0, Some(0), 0, Some(51820)), 51820);
+        // A fresh `listen-port 0` request asks for a new ephemeral port.
+        assert_eq!(rebind_port(0, Some(0), 1, Some(51820)), 0);
+        // No current socket yet.
+        assert_eq!(rebind_port(0, Some(0), 0, None), 0);
+        // A fixed port always wins over the current one.
+        assert_eq!(rebind_port(51821, Some(0), 0, Some(51820)), 51821);
+    }
+
+    #[test]
+    fn configured_peer_deadline_reaches_the_poll_loop() {
+        use umbrawg_crypto::{Key, PublicKey};
+        use umbrawg_device::PeerConfig;
+
+        let device = Device::new(DeviceConfig {
+            private_key: Some(Key::from_bytes([0x55; 32])),
+            ..DeviceConfig::default()
+        })
+        .expect("device");
+        let mut config = PeerConfig::new(PublicKey::from_bytes([0x66; 32]));
+        config.endpoint = Some("198.51.100.7:51820".parse().expect("endpoint"));
+        device.add_peer(config).expect("peer");
+
+        let now = Instant::now();
+        let deadline = device
+            .next_deadline()
+            .expect("a restarted peer must want a handshake/revoke deadline");
+        assert!(deadline <= now, "{deadline:?}");
+        assert_eq!(poll_timeout_ms(now, Some(deadline)), 1);
+        assert_eq!(earliest_deadline(Some(deadline), None), Some(deadline));
+    }
+
+    #[test]
+    fn poll_timeout_follows_the_nearest_deadline() {
+        let now = Instant::now();
+        assert_eq!(poll_timeout_ms(now, None), IDLE_TIMEOUT_MS);
+        assert_eq!(poll_timeout_ms(now, Some(now)), 1);
+        assert_eq!(
+            poll_timeout_ms(now, Some(now + Duration::from_micros(500))),
+            1
+        );
+        assert_eq!(
+            poll_timeout_ms(now, Some(now + Duration::from_millis(2))),
+            2
+        );
+        assert_eq!(
+            poll_timeout_ms(now, Some(now + Duration::from_millis(5))),
+            5
+        );
+        assert_eq!(
+            poll_timeout_ms(now, Some(now + Duration::from_secs(1))),
+            IDLE_TIMEOUT_MS
+        );
+        assert_eq!(
+            earliest_deadline(
+                Some(now + Duration::from_millis(9)),
+                Some(now + Duration::from_millis(1))
+            ),
+            Some(now + Duration::from_millis(1))
+        );
+        assert_eq!(earliest_deadline(None, Some(now)), Some(now));
+        assert_eq!(earliest_deadline(Some(now), None), Some(now));
+        assert_eq!(earliest_deadline(None, None), None);
     }
 
     #[test]

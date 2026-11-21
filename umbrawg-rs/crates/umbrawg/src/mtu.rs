@@ -88,6 +88,17 @@ impl Underlay {
         self.mtu
     }
 
+    /// Потолок числа GSO-сегментов.
+    #[cfg(test)]
+    pub fn segments(self) -> usize {
+        self.segments
+    }
+
+    /// Копия ограничений с другим MTU подложки.
+    pub fn with_mtu(self, mtu: u32) -> Result<Self, String> {
+        Self::new(mtu, self.segments)
+    }
+
     /// Ограничения GSO для IPv4: размер сегмента из MTU подложки, потолок
     /// сегментов — из конфигурации.
     pub fn gso_limits(self) -> GsoLimits {
@@ -280,7 +291,7 @@ pub fn set_interface_mtu(name: &str, mtu: u16) -> io::Result<u32> {
 #[derive(Debug)]
 pub struct MtuGuard {
     underlay: Underlay,
-    last: Mutex<Option<(u16, u16)>>,
+    last: Mutex<Option<(u32, u16, u16)>>,
 }
 
 impl MtuGuard {
@@ -299,7 +310,15 @@ impl MtuGuard {
 
     /// Проверяет TUN MTU и `S4`, логируя вердикт только при изменении входа.
     pub fn check(&self, tun_mtu: u16, s4: u16) {
-        let Some((fits, message)) = self.record(tun_mtu, s4) else {
+        self.check_with(self.underlay, tun_mtu, s4);
+    }
+
+    /// Проверяет TUN MTU по актуальным ограничениям подложки.
+    ///
+    /// Ограничения могут измениться через UAPI (`underlay-mtu`), поэтому
+    /// демон передаёт сюда эффективное значение, а не стартовое из env.
+    pub fn check_with(&self, underlay: Underlay, tun_mtu: u16, s4: u16) {
+        let Some((fits, message)) = self.record_with(underlay, tun_mtu, s4) else {
             return;
         };
         if fits {
@@ -309,16 +328,17 @@ impl MtuGuard {
         }
     }
 
-    fn record(&self, tun_mtu: u16, s4: u16) -> Option<(bool, String)> {
+    fn record_with(&self, underlay: Underlay, tun_mtu: u16, s4: u16) -> Option<(bool, String)> {
         let mut last = match self.last.lock() {
             Ok(last) => last,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if *last == Some((tun_mtu, s4)) {
+        let key = (underlay.mtu(), tun_mtu, s4);
+        if *last == Some(key) {
             return None;
         }
-        *last = Some((tun_mtu, s4));
-        Some(mtu_report(self.underlay, tun_mtu, s4))
+        *last = Some(key);
+        Some(mtu_report(underlay, tun_mtu, s4))
     }
 }
 
@@ -472,12 +492,26 @@ mod tests {
 
     #[test]
     fn guard_reports_only_on_change() {
-        let guard = MtuGuard::new(Underlay::new(1500, DEFAULT_GSO_SEGMENTS).unwrap());
-        assert!(guard.record(1420, 60).is_some());
-        assert!(guard.record(1420, 60).is_none());
-        assert!(guard.record(1420, 28).is_some());
-        assert!(guard.record(1420, 60).is_some());
-        assert!(guard.record(1400, 60).is_some());
+        let rules = Underlay::new(1500, DEFAULT_GSO_SEGMENTS).unwrap();
+        let guard = MtuGuard::new(rules);
+        assert!(guard.record_with(rules, 1420, 60).is_some());
+        assert!(guard.record_with(rules, 1420, 60).is_none());
+        assert!(guard.record_with(rules, 1420, 28).is_some());
+        assert!(guard.record_with(rules, 1420, 60).is_some());
+        assert!(guard.record_with(rules, 1400, 60).is_some());
+        // A UAPI underlay change is a new verdict even at the same TUN MTU.
+        assert!(guard
+            .record_with(underlay(9000), 1400, 60)
+            .is_some_and(|(fits, _)| fits));
+    }
+
+    #[test]
+    fn underlay_with_mtu_keeps_the_segment_cap() {
+        let rules = underlay(1500);
+        let raised = rules.with_mtu(9000).expect("valid mtu");
+        assert_eq!(raised.segments(), rules.segments());
+        assert_eq!(raised.max_segment(), 8972);
+        assert!(rules.with_mtu(MIN_UNDERLAY_MTU - 1).is_err());
     }
 
     #[test]

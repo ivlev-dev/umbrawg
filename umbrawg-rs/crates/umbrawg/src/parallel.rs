@@ -529,7 +529,7 @@ impl WorkerChannel {
         self.jobs.len()
     }
 
-    fn wait(&self, tun_fd: RawFd) {
+    fn wait(&self, tun_fd: RawFd, timeout_ms: i32) {
         self.sleeping.store(true, Ordering::SeqCst);
         if !self.jobs.is_empty() {
             self.sleeping.store(false, Ordering::SeqCst);
@@ -548,7 +548,7 @@ impl WorkerChannel {
             },
         ];
         unsafe {
-            libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, IDLE_TIMEOUT_MS);
+            libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms);
         }
         self.sleeping.store(false, Ordering::SeqCst);
         if fds[1].revents != 0 {
@@ -661,6 +661,8 @@ pub(crate) fn rx_loop(
         .collect();
     let mut socket: Option<Arc<SocketSet>> = None;
     let mut bound_extra: Option<usize> = None;
+    let mut bound_epoch: Option<u64> = None;
+    let mut bound_underlay: Option<u16> = None;
     let mut bound_mark: Option<u32> = None;
     let mut bound_gso_limit = usize::MAX;
     let mut rebind_after = Instant::now();
@@ -670,21 +672,37 @@ pub(crate) fn rx_loop(
     let stats_enabled = std::env::var("UMBRAWG_RX_STATS").is_ok_and(|value| value.trim() == "1");
 
     while !shutdown_requested() {
-        let want_port = device.listen_port();
+        let (want_port, want_epoch) = device.listen_port_request();
         let want_extra = usize::from(device.extra_ports());
         let want_mark = device.fwmark();
+        let want_underlay = device.underlay_mtu();
         if Instant::now() >= rebind_after
-            && rebind_needed(socket.as_deref(), bound_extra, want_port, want_extra)
-        {
-            match open_socket_set(
+            && rebind_needed(
+                socket.as_deref(),
+                bound_epoch,
+                want_epoch,
+                bound_extra,
+                bound_underlay,
                 want_port,
+                want_extra,
+                want_underlay,
+            )
+        {
+            let current_port = socket
+                .as_ref()
+                .map(|current| current.primary().local_addr().port());
+            let bind_port = crate::rebind_port(want_port, bound_epoch, want_epoch, current_port);
+            match open_socket_set(
+                bind_port,
                 want_extra,
                 want_mark,
                 socket_buffer,
-                underlay.gso_limits(),
+                crate::runtime_underlay(underlay, &device).gso_limits(),
                 device.fec_gso_segments(),
             ) {
                 Ok(new_socket) => {
+                    let actual = new_socket.primary().local_addr().port();
+                    device.note_bound_listen_port(want_epoch, actual);
                     log::info!(
                         "parallel rx listening on {} ({} sockets)",
                         new_socket.primary().local_addr(),
@@ -692,7 +710,9 @@ pub(crate) fn rx_loop(
                     );
                     let new_socket = Arc::new(new_socket);
                     shared.set_socket(Some(Arc::clone(&new_socket)));
+                    bound_epoch = Some(want_epoch);
                     bound_extra = Some(want_extra);
+                    bound_underlay = Some(want_underlay);
                     bound_mark = Some(want_mark);
                     socket = Some(new_socket);
                 }
@@ -794,15 +814,16 @@ pub(crate) fn rx_loop(
         }
 
         let now = Instant::now();
-        if now >= housekeeping_at {
+        let deadline = device.next_deadline();
+        if now >= housekeeping_at || deadline.is_some_and(|deadline| deadline <= now) {
             housekeeping_at = now + HOUSEKEEPING_INTERVAL;
             housekeeping(&device, active, now, &mut rng, &mut scratch);
             shared.stats.housekeeping.fetch_add(1, Ordering::Relaxed);
         }
 
         if !busy {
-            let wait = housekeeping_at.saturating_duration_since(Instant::now());
-            let timeout = wait.as_millis().min(IDLE_TIMEOUT_MS as u128) as i32;
+            let wakeup = crate::earliest_deadline(Some(housekeeping_at), device.next_deadline());
+            let timeout = crate::poll_timeout_ms(Instant::now(), wakeup);
             let mut fds: Vec<libc::pollfd> = active
                 .all()
                 .iter()
@@ -813,7 +834,7 @@ pub(crate) fn rx_loop(
                 })
                 .collect();
             unsafe {
-                libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout.max(1));
+                libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout);
             }
         }
     }
@@ -1200,6 +1221,7 @@ fn execute_job<R: RngCore>(
                 tun,
                 rx,
                 stats: Some(stats),
+                device: Some(device),
             };
             let mut context = IoContext::new(rng, now, scratch, &mut io);
             match device.handle_prepared(
@@ -1259,6 +1281,7 @@ pub(crate) fn worker_loop(
                     tun: &tun,
                     rx: &mut rx,
                     stats: Some(&shared.stats),
+                    device: Some(device.as_ref()),
                 };
                 let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
                 let _ = device.flush_control(peer, &mut context);
@@ -1304,7 +1327,9 @@ pub(crate) fn worker_loop(
             );
 
             if !batch.is_empty() {
-                let (_, dropped) = batch.flush_tracked(active, &batch_buffer);
+                let (_, dropped) = batch.flush_with(active, &batch_buffer, |peer, bytes| {
+                    device.on_send_drop(peer, bytes);
+                });
                 if dropped > 0 {
                     shared
                         .stats
@@ -1318,6 +1343,7 @@ pub(crate) fn worker_loop(
                     tun: &tun,
                     rx: &mut rx,
                     stats: Some(&shared.stats),
+                    device: Some(device.as_ref()),
                 };
                 let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
                 if let Err(error) = device.after_batch_sent(peer, &mut context) {
@@ -1365,7 +1391,8 @@ pub(crate) fn worker_loop(
         }
 
         if !busy && released == 0 {
-            channel.wait(tun.fd());
+            let timeout = crate::poll_timeout_ms(Instant::now(), device.next_deadline());
+            channel.wait(tun.fd(), timeout);
         }
     }
 
@@ -1953,7 +1980,7 @@ mod tests {
                         channel.release(job.slot);
                         received += 1;
                     } else {
-                        channel.wait(idle_fd);
+                        channel.wait(idle_fd, IDLE_TIMEOUT_MS);
                     }
                 }
                 while let Some(job) = channel.pop() {
@@ -2095,8 +2122,11 @@ mod tests {
         let worker_tail = &source[worker_start..];
         let tests_start = worker_tail.find("#[cfg(test)]").expect("tests module");
         let worker_body = &worker_tail[..tests_start];
-        assert!(!worker_body.contains("next_deadline"));
+        // The worker may only use the deadline to size its wait; timers and
+        // FEC/ACK housekeeping stay in the rx thread.
+        assert!(worker_body.contains("poll_timeout_ms"));
         assert!(!worker_body.contains("housekeeping("));
+        assert!(!worker_body.contains("device.tick("));
         let rx_start = source
             .find("pub(crate) fn rx_loop(")
             .expect("rx_loop is defined");

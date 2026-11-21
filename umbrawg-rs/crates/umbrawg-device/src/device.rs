@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -44,6 +44,13 @@ use crate::underload::{UnderLoadDetector, DEFAULT_UNDER_LOAD_PPS};
 use crate::{DEFAULT_EXTRA_PORTS, MAX_EXTRA_PORTS};
 
 const TRANSPORT_FLOOD_INTERVAL: Duration = Duration::from_millis(1000 / INITIATIONS_PER_SECOND);
+
+/// Maximum time the device goes without servicing pending control frames.
+///
+/// CAPS revocations and ACKs normally leave from the worker loop every few
+/// milliseconds. This bound is the safety net for a loop that only waits on
+/// a deadline: a zero CAPS must not wait for data or a keepalive.
+const CONTROL_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 
 /// Настройки обфускации и таймеров, снятые один раз на батч приёма.
 #[derive(Clone)]
@@ -120,7 +127,7 @@ impl Default for DeviceConfig {
             listen_port: 0,
             fwmark: 0,
             extra_ports: DEFAULT_EXTRA_PORTS,
-            mtu: 1420,
+            mtu: crate::DEFAULT_MTU,
             underlay_mtu: DEFAULT_UNDERLAY_MTU,
             obfuscation: ObfParams::default(),
             timings: Timings::new(),
@@ -134,6 +141,19 @@ impl Default for DeviceConfig {
 pub struct TimerEvent {
     pub peer: PeerId,
     pub kind: TimerKind,
+}
+
+/// Configured and actually bound UDP ports of the device.
+///
+/// WireGuard semantics: `listen_port == 0` asks for a new ephemeral port. The
+/// daemon reports back the port it actually bound, while the request stays
+/// `0` so a repeated `set listen_port=0` is still visible as a new request
+/// (the epoch below changes even though the value does not).
+#[derive(Clone, Copy, Debug, Default)]
+struct ListenPortState {
+    requested: u16,
+    bound: u16,
+    epoch: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -173,7 +193,7 @@ pub struct Device {
     under_load: AtomicBool,
     under_load_detection: AtomicBool,
     under_load_detector: UnderLoadDetector,
-    listen_port: AtomicU16,
+    listen_port: Mutex<ListenPortState>,
     fwmark: AtomicU32,
     extra_ports: AtomicU8,
     mtu: AtomicU16,
@@ -183,6 +203,9 @@ pub struct Device {
     incoming_drops: IncomingDropCounters,
     ext_config: RwLock<crate::ExtConfig>,
     cookies_disabled_logged: AtomicBool,
+    bbr_queue_drops: AtomicU64,
+    /// Last time pending control frames were serviced.
+    control_flush_at: Mutex<Instant>,
 }
 
 impl Device {
@@ -220,7 +243,11 @@ impl Device {
             under_load: AtomicBool::new(false),
             under_load_detection: AtomicBool::new(true),
             under_load_detector: UnderLoadDetector::new(DEFAULT_UNDER_LOAD_PPS),
-            listen_port: AtomicU16::new(config.listen_port),
+            listen_port: Mutex::new(ListenPortState {
+                requested: config.listen_port,
+                bound: 0,
+                epoch: 0,
+            }),
             fwmark: AtomicU32::new(config.fwmark),
             extra_ports: AtomicU8::new(config.extra_ports.min(MAX_EXTRA_PORTS)),
             mtu: AtomicU16::new(config.mtu),
@@ -233,6 +260,8 @@ impl Device {
             incoming_drops: IncomingDropCounters::default(),
             ext_config: RwLock::new(config.ext),
             cookies_disabled_logged: AtomicBool::new(false),
+            bbr_queue_drops: AtomicU64::new(0),
+            control_flush_at: Mutex::new(Instant::now()),
         };
         device.note_cookie_policy();
         Ok(device)
@@ -284,6 +313,11 @@ impl Device {
             let handshake = peer.rebuild_handshake(identity.as_ref());
             removed.extend(&handshake);
             self.index.remove_many(&removed);
+            if identity.is_some() && peer.endpoint().is_some() {
+                peer.with_timers(|timers| {
+                    timers.arm(TimerKind::NewHandshake, Instant::now());
+                });
+            }
         }
         Ok(())
     }
@@ -407,12 +441,49 @@ impl Device {
         }
     }
 
+    /// Returns the effective UDP port: the bound ephemeral port when the
+    /// daemon obtained one, otherwise the requested value.
     pub fn listen_port(&self) -> u16 {
-        self.listen_port.load(Ordering::Relaxed)
+        let state = self.listen_port.lock();
+        if state.bound != 0 {
+            state.bound
+        } else {
+            state.requested
+        }
+    }
+
+    /// Returns the requested port and its request epoch.
+    ///
+    /// A request for port `0` is turned into the bound port once the socket
+    /// loop has one, and its epoch is bumped on every request, so a repeated
+    /// `set listen_port=0` is still visible as a new request.
+    #[must_use]
+    pub fn listen_port_request(&self) -> (u16, u64) {
+        let state = self.listen_port.lock();
+        (state.requested, state.epoch)
     }
 
     pub fn set_listen_port(&self, port: u16) {
-        self.listen_port.store(port, Ordering::Relaxed);
+        let mut state = self.listen_port.lock();
+        state.requested = port;
+        state.bound = 0;
+        if port == 0 {
+            state.epoch = state.epoch.wrapping_add(1);
+        }
+    }
+
+    /// Records the port the socket loop actually bound for request `epoch`.
+    ///
+    /// A stale result from a bind that raced a newer `set listen_port` is
+    /// ignored instead of overwriting the new request. The requested value is
+    /// updated as well, so every worker of a multi-queue device converges on
+    /// the same ephemeral port instead of keeping its own.
+    pub fn note_bound_listen_port(&self, epoch: u64, port: u16) {
+        let mut state = self.listen_port.lock();
+        if state.epoch == epoch {
+            state.requested = port;
+            state.bound = port;
+        }
     }
 
     #[must_use]
@@ -531,9 +602,17 @@ impl Device {
         let prefixes = config.allowed_ips.clone();
         let id = self.allocate_peer_id();
         let identity = self.identity.read();
+        let has_identity = identity.is_some();
         let peer = Arc::new(Peer::new(id, config, identity.as_ref()));
         peer.configure_extension(self.ext_config());
         drop(identity);
+        // A configured peer with an endpoint and no session would otherwise
+        // stay silent until it has data to send. A restarted process must
+        // re-handshake right away: only then can it decrypt the peer's FEC
+        // traffic and revoke a stale CAPS advertisement.
+        if has_identity && peer.endpoint().is_some() && peer.current_keypair().is_none() {
+            peer.with_timers(|timers| timers.arm(TimerKind::NewHandshake, Instant::now()));
+        }
         let mut by_key = (**self.peers.load()).clone();
         by_key.insert(key, Arc::clone(&peer));
         let mut by_id = (**self.peers_by_id.load()).clone();
@@ -623,6 +702,10 @@ impl Device {
 
     pub fn set_peer_endpoint(&self, peer: &Peer, endpoint: Option<SocketAddr>) {
         peer.set_endpoint(endpoint);
+        if endpoint.is_some() && self.identity.read().is_some() && peer.current_keypair().is_none()
+        {
+            peer.with_timers(|timers| timers.arm(TimerKind::NewHandshake, Instant::now()));
+        }
     }
 
     pub fn initiate_handshake<R: RngCore, S: DatagramSink>(
@@ -1277,6 +1360,12 @@ impl Device {
         peer: &Arc<Peer>,
         ctx: &mut IoContext<'_, R, S>,
     ) -> usize {
+        {
+            let mut last = self.control_flush_at.lock();
+            if ctx.now > *last {
+                *last = ctx.now;
+            }
+        }
         if peer.current_keypair().is_none() {
             return 0;
         }
@@ -1518,8 +1607,30 @@ impl Device {
         peer.extension().bbr_queue_active()
     }
 
+    /// Queues a plaintext packet for the BBR pacer.
+    ///
+    /// Returns `false` when the queue is full. The rejection is counted by
+    /// [`Device::bbr_queue_drop_count`] so a full queue is never silent.
     pub fn bbr_enqueue(&self, peer: &Peer, packet: &[u8]) -> bool {
-        peer.extension().bbr_enqueue(packet)
+        let accepted = peer.extension().bbr_enqueue(packet);
+        if !accepted {
+            self.bbr_queue_drops.fetch_add(1, Ordering::Relaxed);
+        }
+        accepted
+    }
+
+    /// Datagrams rejected by the BBR queue because it was full.
+    #[must_use]
+    pub fn bbr_queue_drop_count(&self) -> u64 {
+        self.bbr_queue_drops.load(Ordering::Relaxed)
+    }
+
+    /// Releases a datagram the local send path dropped from the BBR window.
+    ///
+    /// A local send error is not a path loss: the bytes leave the in-flight
+    /// accounting without a congestion response.
+    pub fn on_send_drop(&self, peer: &Peer, bytes: usize) {
+        peer.extension().on_drop_bytes(bytes);
     }
 
     #[must_use]
@@ -1559,7 +1670,12 @@ impl Device {
         peer.extension().fec_packet_limit()
     }
 
-    /// Returns per-peer FEC accounting, or `None` when FEC is disabled.
+    /// Returns per-peer FEC accounting, or `None` when FEC is disabled and
+    /// every counter is zero.
+    ///
+    /// Counters recorded while FEC was on (for example a control frame that
+    /// was dropped) stay observable after FEC is switched off; only an
+    /// all-off, all-zero peer reports `None`.
     #[must_use]
     pub fn fec_stats(&self, peer: &Peer) -> Option<FecStats> {
         peer.extension().fec_stats()
@@ -2113,6 +2229,17 @@ impl Device {
                 self.handle_timer(peer, kind, ctx)?;
                 handled += 1;
             }
+            // A partially filled FEC block has its own 0.5..=2 ms deadline.
+            // Without this flush it would wait for the next data packet.
+            let due_block = peer.extension().fec_flush_due(ctx.now);
+            if let Some(block) = due_block {
+                self.send_fec_block_direct(peer, &block, ctx)?;
+                handled += 1;
+            }
+            // A deadline wake-up is also a control-flush opportunity: a zero
+            // CAPS revocation or an ACK must leave even when no data and no
+            // keepalive are scheduled on the TX path.
+            handled += self.flush_control(peer, ctx);
         }
         self.rate_limiter.gc(ctx.now);
         Ok(handled)
@@ -2207,13 +2334,26 @@ impl Device {
         if !self.is_up() {
             return None;
         }
-        let mut next: Option<Instant> = None;
+        let now = Instant::now();
+        // A pending zero CAPS must leave even when no data and no keepalive
+        // are scheduled, so the device guarantees a control-flush wake-up.
+        let control = *self.control_flush_at.lock() + CONTROL_FLUSH_INTERVAL;
+        let mut next: Option<Instant> = Some(control);
         let peers = self.peers.load();
         for peer in peers.values() {
             if !peer.running() {
                 continue;
             }
             if let Some(deadline) = peer.next_deadline() {
+                next = Some(match next {
+                    Some(current) if current <= deadline => current,
+                    _ => deadline,
+                });
+            }
+            // ACK and FEC deadlines live in the peer extension and are much
+            // shorter than the WireGuard timers; the poll timeout must see
+            // them or feedback waits for the idle ceiling.
+            if let Some(deadline) = peer.extension().next_deadline(now) {
                 next = Some(match next {
                     Some(current) if current <= deadline => current,
                     _ => deadline,
@@ -2490,6 +2630,129 @@ mod tests {
             self.fill_bytes(dst);
             Ok(())
         }
+    }
+
+    #[test]
+    fn ephemeral_listen_port_request_reports_the_bound_port() {
+        let device = Device::new(DeviceConfig::default()).unwrap();
+        assert_eq!(device.listen_port_request(), (0, 0));
+        assert_eq!(device.listen_port(), 0);
+
+        device.note_bound_listen_port(0, 51820);
+        assert_eq!(device.listen_port(), 51820);
+        assert_eq!(device.listen_port_request(), (51820, 0));
+
+        // A new `listen-port 0` request bumps the epoch; the requested value
+        // returns to zero so another ephemeral bind is forced.
+        device.set_listen_port(0);
+        assert_eq!(device.listen_port_request(), (0, 1));
+        assert_eq!(device.listen_port(), 0);
+
+        // A bind result from the previous request must not overwrite it.
+        device.note_bound_listen_port(0, 40000);
+        assert_eq!(device.listen_port(), 0);
+        device.note_bound_listen_port(1, 40001);
+        assert_eq!(device.listen_port(), 40001);
+        assert_eq!(device.listen_port_request(), (40001, 1));
+    }
+
+    #[test]
+    fn fixed_listen_port_is_reported_before_and_after_bind() {
+        let device = Device::new(DeviceConfig::default()).unwrap();
+        device.set_listen_port(51820);
+        assert_eq!(device.listen_port_request(), (51820, 0));
+        assert_eq!(device.listen_port(), 51820);
+        device.note_bound_listen_port(0, 51820);
+        assert_eq!(device.listen_port(), 51820);
+    }
+
+    #[test]
+    fn configured_peer_starts_a_handshake_from_the_deadline() {
+        struct CountingIo {
+            sent: usize,
+        }
+
+        impl DatagramSink for CountingIo {
+            fn send_datagram(
+                &mut self,
+                _endpoint: SocketAddr,
+                _peer: Option<&Peer>,
+                _payload: &[u8],
+                _gso_size: Option<usize>,
+            ) {
+                self.sent += 1;
+            }
+        }
+
+        impl PacketIo for CountingIo {
+            fn deliver(&mut self, _peer: &Peer, _packet: &[u8]) {}
+        }
+
+        let device = Device::new(DeviceConfig {
+            private_key: Some(Key::from_bytes([0x33; 32])),
+            ..DeviceConfig::default()
+        })
+        .expect("device");
+        let mut config = PeerConfig::new(PublicKey::from_bytes([0x44; 32]));
+        config.endpoint = Some("192.0.2.1:51820".parse().expect("endpoint"));
+        device.add_peer(config).expect("peer");
+
+        let deadline = device
+            .next_deadline()
+            .expect("a configured peer must arm a deadline");
+        assert!(
+            deadline <= Instant::now(),
+            "the first handshake must be due immediately: {deadline:?}"
+        );
+
+        let mut rng = TestRng(7);
+        let now = Instant::now();
+        let mut scratch = [0u8; 4096];
+        let mut io = CountingIo { sent: 0 };
+        let mut ctx = IoContext::new(&mut rng, now, &mut scratch, &mut io);
+        device.tick(&mut ctx).expect("tick");
+        assert!(io.sent > 0, "tick must send the handshake initiation");
+        assert!(
+            device.next_deadline().is_some_and(|next| next > now),
+            "the retransmit timer must replace the immediate deadline"
+        );
+    }
+
+    #[test]
+    fn control_flush_deadline_is_bounded_and_refreshed() {
+        let device = Device::new(DeviceConfig {
+            private_key: Some(Key::from_bytes([0x77; 32])),
+            ..DeviceConfig::default()
+        })
+        .expect("device");
+        let peer = device
+            .add_peer(PeerConfig::new(PublicKey::from_bytes([0x78; 32])))
+            .expect("peer");
+
+        let now = Instant::now();
+        let first = device
+            .next_deadline()
+            .expect("the control flush deadline is always present");
+        assert!(
+            first <= now + CONTROL_FLUSH_INTERVAL,
+            "first deadline {first:?} is not bounded by {CONTROL_FLUSH_INTERVAL:?}"
+        );
+
+        // Servicing control frames moves the deadline forward: a pending
+        // zero CAPS is never starved by an idle loop.
+        let later = now + Duration::from_millis(100);
+        let mut rng = TestRng(3);
+        let mut scratch = [0u8; 1024];
+        let mut io = NullIo;
+        let mut ctx = IoContext::new(&mut rng, later, &mut scratch, &mut io);
+        assert_eq!(device.flush_control(&peer, &mut ctx), 0);
+        let second = device
+            .next_deadline()
+            .expect("the control flush deadline is always present");
+        assert!(
+            second >= later + CONTROL_FLUSH_INTERVAL - Duration::from_millis(1),
+            "deadline {second:?} was not refreshed past {later:?}"
+        );
     }
 
     #[test]

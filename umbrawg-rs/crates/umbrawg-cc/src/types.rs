@@ -71,6 +71,9 @@ pub struct BbrStats {
     pub spurious_losses: u64,
     /// Unacknowledged datagrams dropped from the tracking ring.
     pub orphaned_packets: u64,
+    /// Datagrams dropped locally by the send path and released from the
+    /// in-flight accounting without being treated as path loss.
+    pub dropped_packets: u64,
     /// Completed packet-timed rounds.
     pub rounds: u64,
     /// Whether the last round was application-limited.

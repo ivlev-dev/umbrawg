@@ -1,8 +1,9 @@
 //! Накопитель исходящих датаграмм для одного рабочего потока.
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use umbrawg_device::{BatchLayout, GsoGroup};
+use umbrawg_device::{BatchLayout, GsoGroup, Peer};
 use umbrawg_transport::{
     Endpoint, GsoSize, Outgoing, SendQueue, Socket, SocketSource, TransportError,
 };
@@ -45,8 +46,11 @@ impl SegmentLimits {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 struct PeerBatch {
+    /// Пир, которому принадлежат группы; `None` только у синтетических
+    /// накопителей в тестах.
+    peer: Option<Arc<Peer>>,
     endpoint: SocketAddr,
     first_group: usize,
     group_count: usize,
@@ -95,7 +99,30 @@ impl TxBatch {
     ///
     /// Возвращает `false`, если накопитель переполнен: вызывающий обязан
     /// отправить накопленное и повторить добавление.
+    #[cfg(test)]
     pub fn push(&mut self, endpoint: SocketAddr, base: usize, layout: &BatchLayout) -> bool {
+        self.push_with_peer(None, endpoint, base, layout)
+    }
+
+    /// Добавляет группы пира `peer`, чтобы ошибки отправки можно было вернуть
+    /// в окно BBR этого пира.
+    pub fn push_for_peer(
+        &mut self,
+        peer: &Arc<Peer>,
+        endpoint: SocketAddr,
+        base: usize,
+        layout: &BatchLayout,
+    ) -> bool {
+        self.push_with_peer(Some(peer), endpoint, base, layout)
+    }
+
+    fn push_with_peer(
+        &mut self,
+        peer: Option<&Arc<Peer>>,
+        endpoint: SocketAddr,
+        base: usize,
+        layout: &BatchLayout,
+    ) -> bool {
         if layout.is_empty() {
             return true;
         }
@@ -131,9 +158,13 @@ impl TxBatch {
         if same_peer {
             if let Some(last) = self.peers.last_mut() {
                 last.group_count += pushed;
+                if peer.is_some() {
+                    last.peer = peer.cloned();
+                }
             }
         } else {
             self.peers.push(PeerBatch {
+                peer: peer.cloned(),
                 endpoint,
                 first_group: self.groups.len() - pushed,
                 group_count: pushed,
@@ -151,11 +182,22 @@ impl TxBatch {
     ///
     /// Пакеты разных пиров уходят через разные сокеты набора по кругу, чтобы
     /// внешний поток одного пира раскладывался по нескольким 4-tuple.
-    pub fn flush(&mut self, sockets: &dyn SocketSource, buffer: &[u8]) -> usize {
-        self.flush_tracked(sockets, buffer).0
+    #[cfg(test)]
+    pub fn flush_tracked(&mut self, sockets: &dyn SocketSource, buffer: &[u8]) -> (usize, usize) {
+        self.flush_with(sockets, buffer, |_, _| {})
     }
 
-    pub fn flush_tracked(&mut self, sockets: &dyn SocketSource, buffer: &[u8]) -> (usize, usize) {
+    /// Отправляет накопленное и сообщает о локально отброшенных байтах.
+    ///
+    /// `on_drop` вызывается для каждого пира, чьи датаграммы не удалось
+    /// отправить; демон возвращает эти байты в окно BBR. Возвращает
+    /// `(отправлено, отброшено датаграмм)`.
+    pub fn flush_with(
+        &mut self,
+        sockets: &dyn SocketSource,
+        buffer: &[u8],
+        mut on_drop: impl FnMut(&Arc<Peer>, usize),
+    ) -> (usize, usize) {
         if self.groups.is_empty() {
             self.clear();
             return (0, 0);
@@ -165,14 +207,14 @@ impl TxBatch {
         let mut sent = 0;
         let mut outgoings = [Outgoing::new(&[]); MAX_OUTGOING];
         for index in 0..self.peers.len() {
-            let peer = self.peers[index];
+            let peer = self.peers[index].clone();
             let socket = sockets.next();
             let mut pending = 0usize;
             for offset in 0..peer.group_count {
                 let group = self.groups[peer.first_group + offset];
                 while !append_group(&mut outgoings, &mut pending, buffer, group, limits, gso) {
                     if pending == 0 {
-                        self.dropped += 1;
+                        self.note_dropped(&peer, group.len(), 1, &mut on_drop);
                         log::debug!(
                             "dropping GSO group of {} segments: it does not fit {} datagrams",
                             group.segments,
@@ -180,12 +222,12 @@ impl TxBatch {
                         );
                         break;
                     }
-                    sent += self.send(socket, peer.endpoint, &outgoings[..pending]);
+                    sent += self.send(socket, &peer, &outgoings[..pending], &mut on_drop);
                     pending = 0;
                 }
             }
             if pending > 0 {
-                sent += self.send(socket, peer.endpoint, &outgoings[..pending]);
+                sent += self.send(socket, &peer, &outgoings[..pending], &mut on_drop);
             }
         }
         let dropped = self.dropped;
@@ -193,7 +235,14 @@ impl TxBatch {
         (sent, dropped)
     }
 
-    fn send(&mut self, socket: &Socket, endpoint: SocketAddr, outgoings: &[Outgoing<'_>]) -> usize {
+    fn send(
+        &mut self,
+        socket: &Socket,
+        batch: &PeerBatch,
+        outgoings: &[Outgoing<'_>],
+        on_drop: &mut impl FnMut(&Arc<Peer>, usize),
+    ) -> usize {
+        let endpoint = batch.endpoint;
         let mut sent = 0;
         let mut remaining = outgoings;
         let mut attempts = 0;
@@ -203,7 +252,7 @@ impl TxBatch {
                     attempts += 1;
                     if attempts > MAX_SEND_ATTEMPTS {
                         log::debug!("send batch made no progress to {endpoint}");
-                        self.dropped += remaining.len();
+                        self.note_dropped_outgoing(batch, remaining, on_drop);
                         break;
                     }
                 }
@@ -216,19 +265,42 @@ impl TxBatch {
                     attempts += 1;
                     if attempts > MAX_SEND_ATTEMPTS {
                         log::debug!("send batch is blocked on {endpoint}");
-                        self.dropped += remaining.len();
+                        self.note_dropped_outgoing(batch, remaining, on_drop);
                         break;
                     }
                     wait_writable(socket);
                 }
                 Err(error) => {
                     log::debug!("send batch to {endpoint} failed: {error}");
-                    self.dropped += remaining.len();
+                    self.note_dropped_outgoing(batch, remaining, on_drop);
                     break;
                 }
             }
         }
         sent
+    }
+
+    fn note_dropped_outgoing(
+        &mut self,
+        batch: &PeerBatch,
+        remaining: &[Outgoing<'_>],
+        on_drop: &mut impl FnMut(&Arc<Peer>, usize),
+    ) {
+        let bytes: usize = remaining.iter().map(Outgoing::len).sum();
+        self.note_dropped(batch, bytes, remaining.len(), on_drop);
+    }
+
+    fn note_dropped(
+        &mut self,
+        batch: &PeerBatch,
+        bytes: usize,
+        datagrams: usize,
+        on_drop: &mut impl FnMut(&Arc<Peer>, usize),
+    ) {
+        self.dropped = self.dropped.saturating_add(datagrams);
+        if let Some(peer) = batch.peer.as_ref().filter(|_| bytes > 0) {
+            on_drop(peer, bytes);
+        }
     }
 }
 
@@ -293,7 +365,8 @@ fn append_group<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use umbrawg_device::GsoGroup;
+    use umbrawg_crypto::PrivateKey;
+    use umbrawg_device::{Device, DeviceConfig, GsoGroup, PeerConfig};
     use umbrawg_transport::AddressFamily;
 
     const DATA: [u8; 4096] = [0x5a; 4096];
@@ -627,6 +700,7 @@ mod tests {
             segments,
         });
         batch.peers.push(PeerBatch {
+            peer: None,
             endpoint: "127.0.0.1:9".parse().unwrap(),
             first_group: 0,
             group_count: 1,
@@ -647,5 +721,38 @@ mod tests {
         assert!(!batch.push(endpoint, used, &layout(&[(10, 1)])));
         assert_eq!(batch.groups.len(), MAX_GROUPS);
         assert_eq!(batch.used(), used);
+    }
+
+    #[test]
+    fn dropped_groups_are_reported_with_their_peer_and_bytes() {
+        let socket = Socket::bind(AddressFamily::Ipv4, 0).unwrap();
+        socket.disable_gso();
+        let device = Device::new(DeviceConfig::default()).expect("device");
+        let key = PrivateKey::from_bytes([3u8; 32]).public_key();
+        let peer = device.add_peer(PeerConfig::new(key)).expect("peer");
+
+        // A group larger than one `sendmmsg` cannot be split: the first
+        // append fails with nothing pending and the whole group is dropped.
+        let segments = MAX_OUTGOING + 1;
+        let mut batch = TxBatch::new(MAX_OUTGOING).unwrap();
+        batch.groups.push(GsoGroup {
+            start: 0,
+            segment_len: 100,
+            segments,
+        });
+        batch.peers.push(PeerBatch {
+            peer: Some(Arc::clone(&peer)),
+            endpoint: "127.0.0.1:9".parse().unwrap(),
+            first_group: 0,
+            group_count: 1,
+        });
+        let buffer = vec![0u8; segments * 100];
+        let mut drops = Vec::new();
+        let (sent, dropped) = batch.flush_with(&socket, &buffer, |peer, bytes| {
+            drops.push((peer.public_key(), bytes));
+        });
+        assert_eq!(sent, 0);
+        assert_eq!(dropped, 1);
+        assert_eq!(drops, vec![(peer.public_key(), segments * 100)]);
     }
 }

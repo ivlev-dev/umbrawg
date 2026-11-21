@@ -27,9 +27,13 @@
 //! # FEC and loss
 //!
 //! Packets recovered by the FEC layer are reported as received in the ACK
-//! bitmap, so they never produce a gap. [`Bbr::on_loss`] is the only real
-//! congestion signal; calling it for a counter that was already acknowledged
-//! (or already declared lost) is treated as spurious and ignored.
+//! bitmap, so they never produce a gap. [`Bbr::on_loss`] is the explicit
+//! congestion signal; the ACK watermark and the stale-record sweep also
+//! report a datagram that left the tracked window unacknowledged as a loss.
+//! Calling [`Bbr::on_loss`] for a counter that was already acknowledged (or
+//! already declared lost) is treated as spurious and ignored.
+//! [`Bbr::on_drop`] releases a datagram that failed locally without treating
+//! the local error as a path loss.
 //!
 //! # Deviations from Linux BBRv3
 //!

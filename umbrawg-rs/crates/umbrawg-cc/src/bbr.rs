@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::config::BbrConfig;
 use crate::filters::{BwWindow, MinRtt};
 use crate::pacing::{Pacer, MAX_RATE, NS_PER_SEC};
-use crate::ring::{SentPacket, SentRing, SlotState};
+use crate::ring::{LossOutcome, SentPacket, SentRing, SlotState, RING_CAPACITY};
 use crate::types::{Ack, BbrStats, Mode};
 
 /// Denominator for fixed-point gains (`1.0 == 1000`).
@@ -172,6 +172,7 @@ pub struct Bbr {
     lost_packets: u64,
     spurious_losses: u64,
     orphaned_packets: u64,
+    dropped_packets: u64,
     ecn_ce: u64,
     last_sweep_ns: u64,
 }
@@ -227,6 +228,7 @@ impl Bbr {
             lost_packets: 0,
             spurious_losses: 0,
             orphaned_packets: 0,
+            dropped_packets: 0,
             ecn_ce: 0,
             last_sweep_ns: 0,
         }
@@ -343,6 +345,7 @@ impl Bbr {
             lost_packets: self.lost_packets,
             spurious_losses: self.spurious_losses,
             orphaned_packets: self.orphaned_packets,
+            dropped_packets: self.dropped_packets,
             rounds: self.round_count,
             app_limited: self.app_limited,
             inflight_hi: self.inflight_hi,
@@ -419,6 +422,9 @@ impl Bbr {
         if unreachable_packets > 0 {
             self.inflight = self.inflight.saturating_sub(unreachable_bytes);
             self.orphaned_packets = self.orphaned_packets.saturating_add(unreachable_packets);
+            // The records left the ACK window unacknowledged: that is the
+            // watermark loss signal, not a collection of orphans.
+            self.note_loss_batch(unreachable_bytes, unreachable_packets, now_ns);
         }
 
         let ack_delay_ns = ack_delay_ns(ack.ack_delay);
@@ -469,18 +475,14 @@ impl Bbr {
         self.pacer.refill(now_ns);
 
         match self.ring.mark_lost(counter) {
-            Some(packet) if packet.state == SlotState::InFlight => {
+            LossOutcome::InFlight(packet) => {
                 let len = u64::from(packet.len);
                 self.inflight = self.inflight.saturating_sub(len);
                 self.note_loss(len, now_ns);
             }
-            Some(packet) => {
-                // The record was already released from the in-flight
-                // accounting: still a real congestion signal, just without
-                // an in-flight adjustment.
-                self.note_loss(u64::from(packet.len), now_ns);
-            }
-            None => {
+            // The watermark or a previous bitmap already counted this loss.
+            LossOutcome::AlreadyCounted | LossOutcome::Dropped => {}
+            LossOutcome::Unknown => {
                 let unreachable =
                     counter < self.largest_acked && self.largest_acked.saturating_sub(counter) > 63;
                 if unreachable {
@@ -494,6 +496,61 @@ impl Bbr {
 
         self.update_cwnd(0);
         self.update_pacing(now_ns);
+    }
+
+    /// Returns a locally dropped datagram to the congestion window.
+    ///
+    /// The datagram was registered with [`Bbr::on_send`] but never reached the
+    /// wire (for example the underlay refused it). Its bytes leave the
+    /// in-flight accounting, but the drop is not treated as delivery and not
+    /// treated as a congestion signal: a local error says nothing about the
+    /// path. Reports for counters that are unknown, acknowledged, lost or
+    /// already dropped are ignored.
+    pub fn on_drop(&mut self, counter: u64, now: Instant) {
+        if self.max_sent.is_none_or(|max| counter > max) {
+            return;
+        }
+        let now_ns = self.stamp(now);
+        self.pacer.refill(now_ns);
+        if let Some(packet) = self.ring.mark_dropped(counter) {
+            self.inflight = self.inflight.saturating_sub(u64::from(packet.len));
+            self.dropped_packets = self.dropped_packets.saturating_add(1);
+        }
+    }
+
+    /// Releases the newest in-flight datagrams covering `bytes`.
+    ///
+    /// Used on a batch send error, where the wire counter of every failed
+    /// datagram is not available at the drop site but the datagrams were the
+    /// ones encrypted last. The walk starts at [`SentRing`] capacity and stops
+    /// once the byte budget is covered, so the cost is bounded. The drops are
+    /// not counted as path losses.
+    pub fn on_drop_bytes(&mut self, bytes: usize) {
+        if bytes == 0 {
+            return;
+        }
+        let Some(max_sent) = self.max_sent else {
+            return;
+        };
+        let mut budget = u64::try_from(bytes).unwrap_or(u64::MAX);
+        let mut counter = max_sent;
+        let mut released = 0u64;
+        for _ in 0..RING_CAPACITY {
+            if budget == 0 {
+                break;
+            }
+            if let Some(packet) = self.ring.mark_dropped(counter) {
+                let len = u64::from(packet.len);
+                self.inflight = self.inflight.saturating_sub(len);
+                budget = budget.saturating_sub(len);
+                released = released.saturating_add(1);
+            }
+            let Some(previous) = counter.checked_sub(1) else {
+                break;
+            };
+            counter = previous;
+        }
+        self.dropped_packets = self.dropped_packets.saturating_add(released);
     }
 
     /// Drives time-based work: pacing refill, `PROBE_BW` phase watchdog,
@@ -522,6 +579,8 @@ impl Bbr {
             if packets > 0 {
                 self.inflight = self.inflight.saturating_sub(bytes);
                 self.orphaned_packets = self.orphaned_packets.saturating_add(packets);
+                // A record that outlived the sweep age was never acknowledged.
+                self.note_loss_batch(bytes, packets, now_ns);
             }
         }
 
@@ -530,9 +589,17 @@ impl Bbr {
     }
 
     fn note_loss(&mut self, len: u64, now_ns: u64) {
-        self.lost_bytes = self.lost_bytes.saturating_add(len);
-        self.lost_packets = self.lost_packets.saturating_add(1);
-        self.round_lost = self.round_lost.saturating_add(len);
+        self.note_loss_batch(len, 1, now_ns);
+    }
+
+    /// Accounts a batch of losses and applies the per-round cut once.
+    fn note_loss_batch(&mut self, bytes: u64, packets: u64, now_ns: u64) {
+        if packets == 0 {
+            return;
+        }
+        self.lost_bytes = self.lost_bytes.saturating_add(bytes);
+        self.lost_packets = self.lost_packets.saturating_add(packets);
+        self.round_lost = self.round_lost.saturating_add(bytes);
         self.round_congestion = true;
 
         let total = self.round_delivered.saturating_add(self.round_lost);
@@ -1131,5 +1198,96 @@ mod tests {
         assert!(floor > stats.cwnd);
         assert_eq!(bbr.effective_cwnd(), floor);
         assert_eq!(stats.cwnd, bbr.cwnd());
+    }
+
+    #[test]
+    fn watermark_release_counts_losses_beyond_the_ack_window() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        for counter in 0..80u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        // Only the newest counter is acknowledged: counters 0..=15 left the
+        // 64-bit bitmap window unacknowledged and are the watermark loss.
+        bbr.on_ack(
+            &Ack::new(79, 1, Duration::ZERO, false),
+            base + Duration::from_millis(5),
+        );
+        let stats = bbr.stats();
+        assert_eq!(stats.lost_packets, 16, "{stats:?}");
+        assert_eq!(stats.lost_bytes, 16 * 1400, "{stats:?}");
+        assert_eq!(bbr.inflight(), 63 * 1400);
+        assert_eq!(stats.orphaned_packets, 16);
+    }
+
+    #[test]
+    fn stale_sweep_counts_losses() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        for counter in 0..4u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        bbr.on_timer(base + Duration::from_secs(3));
+        let stats = bbr.stats();
+        assert_eq!(bbr.inflight(), 0);
+        assert_eq!(stats.lost_packets, 4, "{stats:?}");
+        assert_eq!(stats.lost_bytes, 4 * 1400, "{stats:?}");
+        assert_eq!(stats.dropped_packets, 0);
+    }
+
+    #[test]
+    fn on_drop_releases_inflight_without_a_loss() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        for counter in 0..4u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        bbr.on_drop(1, base + Duration::from_millis(1));
+        assert_eq!(bbr.inflight(), 3 * 1400);
+        let stats = bbr.stats();
+        assert_eq!(stats.dropped_packets, 1, "{stats:?}");
+        assert_eq!(stats.lost_packets, 0, "{stats:?}");
+        // A later loss report for the same counter must not count again.
+        bbr.on_loss(1, base + Duration::from_millis(2));
+        let stats = bbr.stats();
+        assert_eq!(stats.lost_packets, 0, "{stats:?}");
+        assert_eq!(stats.spurious_losses, 0, "{stats:?}");
+    }
+
+    #[test]
+    fn on_drop_bytes_releases_the_newest_datagrams() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        for counter in 0..4u64 {
+            bbr.on_send(counter, 1400, base);
+        }
+        bbr.on_drop_bytes(2 * 1400);
+        let stats = bbr.stats();
+        assert_eq!(bbr.inflight(), 2 * 1400);
+        assert_eq!(stats.dropped_packets, 2, "{stats:?}");
+        assert_eq!(stats.lost_packets, 0, "{stats:?}");
+        // The newest counters were released; the older two are still tracked.
+        bbr.on_drop(2, base + Duration::from_millis(1));
+        assert_eq!(bbr.stats().dropped_packets, 2);
+        bbr.on_drop(1, base + Duration::from_millis(2));
+        assert_eq!(bbr.stats().dropped_packets, 3);
+        assert_eq!(bbr.inflight(), 1400);
+    }
+
+    #[test]
+    fn on_drop_ignores_unknown_and_acked_counters() {
+        let base = Instant::now();
+        let mut bbr = Bbr::new(BbrConfig::default());
+        bbr.on_send(0, 1400, base);
+        bbr.on_drop(7, base + Duration::from_millis(1));
+        assert_eq!(bbr.inflight(), 1400);
+        assert_eq!(bbr.stats().dropped_packets, 0);
+        bbr.on_ack(
+            &Ack::new(0, 1, Duration::ZERO, false),
+            base + Duration::from_millis(2),
+        );
+        bbr.on_drop(0, base + Duration::from_millis(3));
+        assert_eq!(bbr.stats().dropped_packets, 0);
+        assert_eq!(bbr.inflight(), 0);
     }
 }
