@@ -89,49 +89,54 @@ underlay MTU 9000, TUN 1420 (`docs/PERFORMANCE.md`, «Единый замер fi
 ### 2.1. Путь одного DATA-пакета
 
 1. **Внешний RX.** UDP-сокет модуля создаётся как UDP-туннель с
-   `encap_rcv = uwg_receive` (`src/socket.c:394-397`). Обработчик вызывает
-   `uwg_packet_receive` (`src/socket.c:357-368`) в контексте NAPI/softirq
-   нижележащего устройства, а не в отдельном потоке модуля.
-2. **Разбор заголовка.** `prepare_skb_header` (`src/receive.c:97-169`)
+   `encap_rcv = uwg_receive` (`src/socket.c:441`). Обработчик
+   (`src/socket.c:397`) вызывает `uwg_packet_receive` (`src/socket.c:407`)
+   в контексте NAPI/softirq нижележащего устройства, а не в отдельном
+   потоке модуля.
+2. **Разбор заголовка.** `prepare_skb_header` (`src/receive.c:105-176`)
    разбирает внешний IP/UDP, снимает header protection и определяет тип.
    Для `MESSAGE_DATA` вызывается `uwg_packet_consume_data`
-   (`src/receive.c:610-641`).
+   (`src/receive.c:738-777`).
 3. **Поиск ключа.** По `key_idx` ищется keypair и пир в `index_hashtable` под
-   `rcu_read_lock_bh` (`src/receive.c:616-625`). Пир и keypair получают ссылки.
+   `rcu_read_lock_bh` (`src/receive.c:744-749`). Пир и keypair получают ссылки.
 4. **Постановка в per-peer очередь и крипто-кольцо.**
-   `uwg_queue_enqueue_per_device_and_peer` (`src/queueing.h:183-208`):
+   `uwg_queue_enqueue_per_device_and_peer` (`src/queueing.h:195-233`):
    - `uwg_prev_queue_enqueue(peer_queue, skb)` — пакет попадает в
-     `peer->rx_queue` (`src/queueing.h:195`), очередь ограничена
-     `MAX_QUEUED_PACKETS = 1024` (`src/queueing.c:145`, `src/messages.h:53`);
-   - выбирается CPU по round-robin (`uwg_cpumask_next_online`,
-     `src/queueing.h:201`), пакет кладётся в per-CPU `decrypt_queue.ring`
-     (`src/queueing.h:203-204`), воркер будится с коалесингом
-     (`src/queueing.h:163-181`, `src/queueing.h:206`).
-5. **Расшифровка.** `uwg_packet_decrypt_worker` (`src/receive.c:588-608`)
+     `peer->rx_queue` (`src/queueing.h:208`), очередь ограничена
+     `MAX_QUEUED_PACKETS = 8192` (`src/queueing.c:144`, `src/messages.h:53`);
+   - CPU не выбирается: `get_cpu()` берёт текущий, пакет кладётся в
+     `decrypt_queue.ring` этого CPU (`src/queueing.h:223-228`). Ring на
+     CPU — `max(128, crypt_queue_budget / num_possible_cpus())`, бюджет
+     по умолчанию 4096 (`src/device.c:59-62`, `src/device.c:378-381`);
+     слот ring'а хранит цепочку skb, а не один пакет. Воркер будится с
+     коалесингом (`src/queueing.h:175-192`, `src/queueing.h:230`).
+     Переполнение ring'а — `-EPIPE`, дроп пакета и `rx_dropped++`
+     (`src/receive.c:756-767`).
+5. **Расшифровка.** `uwg_packet_decrypt_worker` (`src/receive.c:716-736`)
    работает на per-CPU workqueue `uwg-crypt-<dev>`
-   (`WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU`, `src/device.c:360-363`).
+   (`WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU`, `src/device.c:415-416`).
    После `decrypt_packet` вызывается `uwg_queue_enqueue_per_peer_rx`
-   (`src/receive.c:601`): состояние `PACKET_CB(skb)->state` переводится в
+   (`src/receive.c:729`): состояние `PACKET_CB(skb)->state` переводится в
    `CRYPTED`/`DEAD`, берётся временная ссылка на пира и вызывается
-   `napi_schedule(&peer->napi)` (`src/queueing.h:223-233`).
+   `napi_schedule(&peer->napi)` (`src/queueing.h:248-258`).
 6. **Per-peer NAPI.** Поток `napi/<dev>-<id>` вызывает `uwg_packet_rx_poll`
-   (`src/receive.c:527-586`). Он:
-   - читает голову `peer->rx_queue` (`src/receive.c:541`) и ждёт, пока голова
-     станет `CRYPTED`/`DEAD` (`src/receive.c:542-543`); пока голова
+   (`src/receive.c:647-714`). Он:
+   - читает голову `peer->rx_queue` (`src/receive.c:663`) и ждёт, пока голова
+     станет `CRYPTED`/`DEAD` (`src/receive.c:664-666`); пока голова
      `UNCRYPTED`, следующие пакеты не обрабатываются — так держится порядок;
    - проверяет replay-окно `counter_validate` под спинлоком keypair
-     (`src/receive.c:551`, `src/receive.c:381-417`);
-   - обновляет endpoint и `udp_window` (`src/receive.c:560-566`), делает
-     `uwg_reset_packet` (`src/receive.c:568`), разбирает внутренний IP,
-     проверяет `allowedips` по source (`src/receive.c:493-498`,
-     `src/allowedips.c:407`) и обрезает пакет до заявленной длины
-     (`src/receive.c:487-491`);
+     (`src/receive.c:672`, `src/receive.c:457-492`);
+   - обновляет endpoint и `udp_window` (`src/receive.c:682-697`), делает
+     `uwg_reset_packet` (`src/receive.c:696`), разбирает внутренний IP и
+     обрезает пакет до заявленной длины (`src/receive.c:534`), проверяет
+     `allowedips` по source (`src/receive.c:537-542`,
+     `src/allowedips.c:407`);
    - отдаёт пакет в стек через `napi_gro_receive(&peer->napi, skb)`
-     (`src/receive.c:500`), то есть GRO и `ip_rcv`/TCP выполняются в этом
-     же потоке.
+     (`src/receive.c:544-545`), то есть GRO и `ip_rcv`/TCP выполняются в
+     этом же потоке.
 7. **Бюджет.** За один вызов обрабатывается не больше `budget`
    (по умолчанию `NAPI_POLL_WEIGHT = 64`); при исчерпании бюджета
-   `napi_complete_done` не вызывается (`src/receive.c:578-583`).
+   `napi_complete_done` не вызывается (`src/receive.c:706-707`).
 
 ### 2.2. NAPI создаётся на пира
 

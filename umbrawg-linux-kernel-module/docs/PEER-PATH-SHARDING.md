@@ -20,12 +20,12 @@ S3 — не повтор S2: точка разреза переносится р
 
 - Порядок пакетов в `master` держится не на replay-локе, а на единственном
   потребителе `peer->rx_queue`, который ждёт готовности головы
-  (`src/receive.c:541-543`, `src/queueing.h:149-161`). Расшифровка при этом
+  (`src/receive.c:664-666`, `src/queueing.h:161-173`). Расшифровка при этом
   выполняется параллельно на per-CPU воркерах, а порядок восстанавливается
   очередью.
 - Replay-проверка — 0.4% сэмплов диспетчера (P0). Оставлять её
   последовательной дешево, а параллелить опасно: окно и `spinlock` — единое
-  состояние keypair (`src/noise.h:18-22`, `src/receive.c:381-417`).
+  состояние keypair (`src/noise.h:23-29`, `src/receive.c:457-492`).
 - Основная последовательная стоимость — не replay, а `uwg_reset_packet`
   (4.3%), таймеры (5.4%), allowedips (2.0%), refcount-put (3.8%) и доставка
   (42.9–49.3%). Именно они, кроме `uwg_timers_data_received`, в S3 уходят в
@@ -110,27 +110,34 @@ S3 параллелит ещё и тяжёлый X, который в S2 ост�
 Путь одного DATA-пакета в `master`:
 
 ```
-udp encap_rcv (socket.c:357-368)
-  → uwg_packet_receive (receive.c:643)
-  → uwg_packet_consume_data (receive.c:610)
-      rcu_read_lock_bh, lookup keypair/peer (receive.c:616-622)
-      uwg_queue_enqueue_per_device_and_peer (queueing.h:183-208)
+udp encap_rcv (socket.c:397, 441)
+  → uwg_packet_receive (receive.c:779)
+  → uwg_packet_consume_data (receive.c:738)
+      rcu_read_lock_bh, lookup keypair/peer (receive.c:744-749)
+      uwg_queue_enqueue_per_device_and_peer (queueing.h:195-233)
         → prev_queue_enqueue(peer->rx_queue)  порядок фиксируется здесь
-        → per-CPU decrypt ring, round-robin CPU
-  → decrypt worker (receive.c:588-608), параллельно на 0..N CPU
-      decrypt_packet (receive.c:328-378)
-      state = CRYPTED/DEAD, napi_schedule(peer->napi) (queueing.h:223-233)
-  → per-peer threaded NAPI, uwg_packet_rx_poll (receive.c:527-586)
+        → decrypt ring текущего CPU (get_cpu), бюджет 4096 на устройство
+  → decrypt worker (receive.c:716-736), per-CPU, локально к producer'у
+      decrypt_packet (receive.c:370-419)
+      state = CRYPTED/DEAD, napi_schedule(peer->napi) (queueing.h:248-258)
+  → per-peer threaded NAPI, uwg_packet_rx_poll (receive.c:647-714)
       ждёт голову rx_queue, пока state == UNCRYPTED
-      counter_validate (receive.c:551)
-      endpoint_from_skb (receive.c:560)
-      udp_window (receive.c:564-566)
-      uwg_reset_packet (receive.c:568)
-      consume_data_done (receive.c:421-525)
+      counter_validate (receive.c:672)
+      endpoint_from_skb (receive.c:682)
+      udp_window (receive.c:684-697)
+      uwg_reset_packet (receive.c:696)
+      consume_data_done (receive.c:572-644)
         set_peer_endpoint, keypair slide, keep_key_fresh, таймеры,
         keepalive, разбор IP, trim, allowedips, napi_gro_receive,
         статистика, put ссылок
 ```
+
+Крипто-очереди в `master` — per-CPU, но без round-robin: enqueue идёт в
+ring текущего CPU (`get_cpu`/`put_cpu`), ring на CPU —
+`max(128, crypt_queue_budget / possible_cpus())` при бюджете 4096
+(`ae0906c7`). Это лечит локальность и bufferbloat (50 пиров: RTT 130 → 5.4
+мс, 7.82 Гбит/с), но **не** шардирует post-decrypt путь: `rx_queue` и NAPI
+остаются одни на пира, поэтому описанная ниже сериализация сохраняется.
 
 Что сериализовано:
 
@@ -144,8 +151,8 @@ udp encap_rcv (socket.c:357-368)
 | таймеры | таймер-база, `mod_timer`/`timer_delete`; проверка `is_dead` в `mod_peer_timer` (`timers.c:32-41`) |
 | keypair slide | `spin_lock_bh(keypair_update_lock)`, редкий путь (`noise.c:255-292`) |
 | allowedips | RCU, без локов (`allowedips.c:127-147`) |
-| доставка/GRO | один `napi_struct` пира ⇒ один поток (`receive.c:500`) |
-| статистика | `dev_sw_netstats_rx_add` per-CPU; `peer->rx_bytes +=` не атомарно (`receive.c:22-26`) |
+| доставка/GRO | один `napi_struct` пира ⇒ один поток (`receive.c:544`) |
+| статистика | `dev_sw_netstats_rx_add` per-CPU; `peer->rx_bytes +=` не атомарно (`receive.c:30`) |
 
 Ключевой факт: per-peer лока в fast-path нет. Порядок держится на
 единственном потребителе `rx_queue` и единственном NAPI-потоке. Любой разрез
@@ -632,8 +639,9 @@ UAF: GRO перезаписывает `skb->cb`, а при `GRO_CONSUMED` осв
   `UWG_RX_PATH_RING_TOTAL = 4096`, `UWG_RX_PATH_RING_MIN = 256`. При `K=2` —
   2048, при `K=4` — 1024, при `K=8` — 512, при `K=16` — 256. Суммарно на
   устройство — не больше 4096 указателей (32 КБ), сами skb уже в полёте.
-  Формула учитывает горячий шард и несколько пиров: `rx_queue` вмещает 1024
-  на пира, поэтому кольцо не должно быть меньше 512 при `K<=8`.
+  Формула учитывает горячий шард и несколько пиров: `rx_queue` вмещает до
+  8192 (`MAX_QUEUED_PACKETS`), но ring шарда намеренно меньше — 512 при
+  `K<=8` достаточно для батча и всплеска, а не для всего запаса пира.
 - `ptr_ring_produce_bh` в шлюзе; на ошибке — дроп только этого пакета,
   `ring_full++`, `rx_dropped++`, ссылки снимает шлюз.
 - `producer_lock` — общая cacheline для всех шлюзов устройства. При многих
