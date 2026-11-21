@@ -141,11 +141,12 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отч
    netlink из `Cargo.lock` в ветке `main`) и ARM-рантайм.
 4. Поставить компонентные теги `tools-v0.4.1` и `netlink-v0.4.1`;
    до публикации — `updpkgsums` для стабильных Arch-пакетов.
-5. Матрица cipher: `AES-256-GCM` и mixed ChaCha/AES снята отдельными
-   подпрогонами (`/root/bench-matrix/aes`), но `CIPHER` всё ещё не ось
-   `bench.sh` — добавить ось и воспроизвести §5 матрицы штатным стендом.
+5. Матрица cipher: `AES-256-GCM` и mixed ChaCha/AES снята на 1/5/50 пирах
+   (`/root/bench-matrix/aes`: kernel +10.8…+29%, Rust +13.9…+35% к ChaCha),
+   но `CIPHER` всё ещё не ось `bench.sh` — добавить ось и воспроизвести §5
+   матрицы штатным стендом.
 6. Multi-peer 5/10/50 снят (`/root/bench-matrix/multi`), 100 не тестировались
-   (у Rust прогноз ~4.3 ГБ, у `awg-go` 50 недостижимы). В `bench.sh` дефолт
+   (у Rust прогноз ~4.5 ГБ, у `awg-go` 50 недостижимы). В `bench.sh` дефолт
    по-прежнему 1/4 пира — расширить `PEERS_LIST` и добавить сбор RSS/fairness
    в отчёт.
 7. Зафиксировать методику v2/v3 и артефакты `/root/bench-matrix/{v2,v3,aes,obf,multi}`;

@@ -82,8 +82,10 @@ cd umbrawg-rs && cargo test --workspace && cargo clippy --workspace --all-target
   [`docs/BBR-FEC-STATUS.md`](docs/BBR-FEC-STATUS.md).
 - Бенчмарк-матрица 2026-11-21: baseline AmneziaWG, потери 0/2/5/10%, FEC/BBR,
   AES/mixed, обфускация, multi-peer 5/10/50, UDP-методика (`-w 8M`),
-  FEC RTT, slow-link. Деградация 10 → 50 пиров закрыта в `ae0906c7`
-  (7.82 Гбит/с, fairness 1.92) —
+  FEC RTT, slow-link. Деградация 10 → 50 и single-flow закрыты work stealing
+  (`c5457f06`/`0844f750`): 8.25–9.12 Гбит/с, fairness 1.4–2.2, single-flow
+  3.08–3.14; AES на AES-NI/VAES быстрее ChaCha, classic RX — дефолт, parallel
+  RX Rust на 50 пирах зависает (P1) —
   [`docs/BENCHMARKS-2026-11-21.md`](docs/BENCHMARKS-2026-11-21.md).
 - Производительность и отклонённые эксперименты —
   [`umbrawg-linux-kernel-module/docs/PERFORMANCE.md`](umbrawg-linux-kernel-module/docs/PERFORMANCE.md).

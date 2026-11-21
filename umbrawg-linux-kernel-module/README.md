@@ -232,10 +232,12 @@ Mbit/s, TCP, c=1. Gain over `amneziawg`: **+25.3…+33.2%** for a single
 connection (obf0/obf1). With 10 connections per client the gain is smaller
 (+31.0% 1c, +22.2% 3c on obf0). `go` leads in 3c mode (3.0–4.7 Gbit/s).
 
-One peer is limited by its own threaded NAPI at **~2.2–2.4 Gbit/s TCP**,
-regardless of the number of connections. Sharding by peers lifts the limit:
-four peers reach **4.99 Gbit/s TCP** (kernel, obf0) / 4.65 (obf1); `go`
-4.66 / 4.49. UDP holds the 1 Gbit/s line (kernel).
+One peer is limited by its own threaded NAPI; with work stealing it reaches
+**3.08–3.14 Gbit/s TCP** regardless of the number of connections (2.31–2.40
+before stealing). Sharding by peers lifts the limit further: four peers reach
+**4.99 Gbit/s TCP** (kernel, obf0) / 4.65 (obf1); `go` 4.66 / 4.49; 50 peers
+reach **8.25–9.12 Gbit/s** with fairness 1.4–2.2. UDP holds the 1 Gbit/s
+line (kernel).
 
 Details, tables and rejected experiments: [docs/PERFORMANCE.md](docs/PERFORMANCE.md).
 Full matrix (rust/rust-par, UDP, CPU, multi-peer, e2e):
@@ -259,10 +261,10 @@ contract, per-flow limits, the pool lifecycle, risks and the test plan are in
 
 ## Limitations
 
-- One peer is limited by its own threaded NAPI (~2.2–2.4 Gbit/s TCP); several
-  connections to the same peer do not add throughput. Throughput scales with
-  the number of peers: four peers reach 4.65–4.99 Gbit/s TCP (final4,
-  obf0/obf1).
+- One peer is limited by its own threaded NAPI (3.08–3.14 Gbit/s TCP with
+  work stealing); several connections to the same peer do not add throughput.
+  Throughput scales with the number of peers: four peers reach 4.65–4.99
+  Gbit/s TCP (final4, obf0/obf1), 50 peers — 8.25–9.12 Gbit/s.
 - Threaded NAPI cannot be disabled: turning it off costs 11–13% TCP.
 - GSO aggregation is part of the send path: the module builds standard UDP GSO
   skbs (up to 23 KB) and the kernel segments them before they hit the wire, so
