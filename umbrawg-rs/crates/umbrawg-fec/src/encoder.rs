@@ -15,7 +15,8 @@ pub struct EncodedBlock {
     /// Number of data shards `k`; for a partial flush it is the number of
     /// packets actually present (so a receiver can deliver immediately).
     pub k: u8,
-    /// Number of parity shards in `shards`; `0` for a partial block from [`FecEncoder::flush`].
+    /// Number of parity shards in `shards`; `0` for a partial block sent to a
+    /// peer that does not advertise partial-block parity support.
     pub m: u8,
     /// Length of every shard in bytes.
     pub shard_len: u16,
@@ -136,19 +137,17 @@ impl FecEncoder {
         if self.pending.len() < k {
             return Ok(None);
         }
-        Ok(self.emit(true, rng))
+        Ok(self.emit(usize::from(self.config.parity_shards), rng))
     }
 
     /// Emits the packets accumulated so far as a partial block without parity.
     ///
     /// Returns `None` when no packets are pending. The emitted block has
     /// `m == 0` and contains only data shards, matching the protocol rule that
-    /// a block flushed before reaching `k` packets is sent without parity.
+    /// a block flushed before reaching `k` packets is sent without parity
+    /// unless the peer advertised partial-block parity support.
     pub fn flush(&mut self) -> Option<EncodedBlock> {
-        if self.pending.is_empty() {
-            return None;
-        }
-        self.emit(false, None)
+        self.flush_with_parity(0)
     }
 
     /// Emits a partial block with randomized shard padding.
@@ -156,22 +155,65 @@ impl FecEncoder {
     /// Behaves like [`Self::flush`] but includes the extra `0..=31` random
     /// bytes described on [`Self::push_with_rng`].
     pub fn flush_with_rng(&mut self, rng: &mut impl RngCore) -> Option<EncodedBlock> {
+        self.flush_with_parity_rng(0, rng)
+    }
+
+    /// Emits the packets accumulated so far as a partial block with parity.
+    ///
+    /// `parity` is clamped to the configured `m`, so a caller can request the
+    /// full parity count without knowing whether the encoder was built for a
+    /// `k + m` shape. The emitted block uses `k' = pending`, `m' = parity` and
+    /// carries `k'` data shards followed by `m'` parity shards encoded for
+    /// exactly that `(k', m')` code. `parity == 0` is equivalent to
+    /// [`Self::flush`].
+    pub fn flush_with_parity(&mut self, parity: u8) -> Option<EncodedBlock> {
         if self.pending.is_empty() {
             return None;
         }
-        self.emit(false, Some(rng))
+        self.emit(usize::from(parity), None)
     }
 
-    fn emit(
+    /// Emits a partial block with parity and randomized shard padding.
+    ///
+    /// Behaves like [`Self::flush_with_parity`] but includes the extra
+    /// `0..=31` random bytes described on [`Self::push_with_rng`].
+    pub fn flush_with_parity_rng(
         &mut self,
-        with_parity: bool,
-        mut rng: Option<&mut dyn RngCore>,
+        parity: u8,
+        rng: &mut impl RngCore,
     ) -> Option<EncodedBlock> {
+        if self.pending.is_empty() {
+            return None;
+        }
+        self.emit(usize::from(parity), Some(rng))
+    }
+
+    fn emit(&mut self, parity: usize, mut rng: Option<&mut dyn RngCore>) -> Option<EncodedBlock> {
         let Ok(code) = &self.code else {
             return None;
         };
-        let k = code.k();
-        let m = code.m();
+        let config_k = code.k();
+        let config_m = code.m();
+        let k = self.pending.len();
+        if k == 0 || k > config_k {
+            return None;
+        }
+        let mut m = parity.min(config_m);
+        // A full block reuses the encoder's code; a partial block has a
+        // different `k`, so its systematic coefficient matrix is built for
+        // `(k, m)`. If that ever fails, fall back to the legacy data-only
+        // form instead of dropping the queued packets.
+        let partial_code = if m > 0 && (k != config_k || m != config_m) {
+            match RSCode::try_new(k, m) {
+                Ok(partial) => Some(partial),
+                Err(_) => {
+                    m = 0;
+                    None
+                }
+            }
+        } else {
+            None
+        };
         let base_len = self
             .pending
             .iter()
@@ -184,7 +226,7 @@ impl FecEncoder {
         };
         let shard_len = base_len.saturating_add(extra);
         let shard_len = shard_len.min(self.max_shard_len).min(usize::from(u16::MAX));
-        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(if with_parity { k + m } else { k });
+        let mut shards: Vec<Vec<u8>> = Vec::with_capacity(k + m);
         for packet in &self.pending {
             let mut shard = vec![0u8; shard_len];
             let packet_len = packet.len() as u16;
@@ -195,7 +237,8 @@ impl FecEncoder {
             }
             shards.push(shard);
         }
-        if with_parity {
+        if m > 0 {
+            let code = partial_code.as_ref().unwrap_or(code);
             for row in 0..m {
                 let mut parity = vec![0u8; shard_len];
                 for (column, data) in shards.iter().take(k).enumerate() {
@@ -204,19 +247,10 @@ impl FecEncoder {
                 shards.push(parity);
             }
         }
-        let data_count = u8::try_from(self.pending.len()).unwrap_or(u8::MAX);
         let block = EncodedBlock {
             block_id: self.block_id,
-            k: if with_parity {
-                self.config.data_shards
-            } else {
-                data_count
-            },
-            m: if with_parity {
-                self.config.parity_shards
-            } else {
-                0
-            },
+            k: k as u8,
+            m: m as u8,
             shard_len: shard_len as u16,
             shards,
         };
@@ -303,6 +337,84 @@ mod tests {
         assert_eq!(block.shard_len, 32);
         assert_eq!(encoder.flush(), None);
         assert_eq!(encoder.block_id(), 1);
+    }
+
+    #[test]
+    fn partial_flush_with_parity_uses_the_partial_shape() {
+        let mut encoder = FecEncoder::new(config(4, 2), 1500);
+        assert_eq!(encoder.flush_with_parity(2), None);
+        assert_eq!(encoder.push(&[1u8; 20]).unwrap(), None);
+        let block = encoder.flush_with_parity(2).expect("partial block");
+        assert_eq!(block.k, 1);
+        assert_eq!(block.m, 2);
+        assert_eq!(block.shards.len(), 3);
+        assert_eq!(block.shard_len, 22);
+        assert_eq!(encoder.block_id(), 1);
+        assert_eq!(encoder.flush_with_parity(2), None);
+    }
+
+    #[test]
+    fn partial_flush_clamps_parity_to_the_local_m() {
+        let mut encoder = FecEncoder::new(config(2, 1), 64);
+        assert_eq!(encoder.push(&[7u8; 4]).unwrap(), None);
+        let block = encoder.flush_with_parity(u8::MAX).expect("partial block");
+        assert_eq!(block.k, 1);
+        assert_eq!(block.m, 1, "m' must never exceed the local m");
+        assert_eq!(block.shards.len(), 2);
+    }
+
+    #[test]
+    fn partial_blocks_with_parity_restore_a_lost_data_shard() {
+        use crate::{FecDecoder, FecShard};
+        for (pending, parity) in [(1usize, 1u8), (1, 2), (2, 1), (2, 2)] {
+            let config = config(4, 2);
+            let mut encoder = FecEncoder::new(config, 1500);
+            let packets: Vec<Vec<u8>> = (0..pending)
+                .map(|index| vec![u8::try_from(index).unwrap(); 24])
+                .collect();
+            for packet in &packets {
+                assert!(encoder.push(packet).unwrap().is_none());
+            }
+            let block = encoder.flush_with_parity(parity).expect("partial block");
+            assert_eq!(usize::from(block.k), pending);
+            assert_eq!(usize::from(block.m), usize::from(parity).min(config.m()));
+            assert_eq!(block.shards.len(), pending + usize::from(block.m));
+
+            let mut decoder = FecDecoder::new(config);
+            let now = std::time::Instant::now();
+            let mut decoded = Vec::new();
+            // Lose data shard 0; every parity shard must be able to restore it
+            // with the advertised `(k', m')` shape.
+            for index in 1..block.shards.len() {
+                decoded.extend(
+                    decoder
+                        .push_at(
+                            FecShard {
+                                block_id: block.block_id,
+                                index: u8::try_from(index).unwrap(),
+                                k: block.k,
+                                m: block.m,
+                                shard_len: block.shard_len,
+                                payload: &block.shards[index],
+                            },
+                            now,
+                        )
+                        .unwrap(),
+                );
+            }
+            assert_eq!(decoded.len(), 1, "pending={pending} parity={parity}");
+            assert_eq!(decoded[0].packets, packets);
+            assert_eq!(decoded[0].recovered, 1);
+        }
+    }
+
+    #[test]
+    fn partial_blocks_without_parity_keep_the_legacy_shape() {
+        let mut encoder = FecEncoder::new(config(4, 2), 1500);
+        assert_eq!(encoder.push(&[1u8; 20]).unwrap(), None);
+        let block = encoder.flush_with_parity(0).expect("partial block");
+        assert_eq!((block.k, block.m), (1, 0));
+        assert_eq!(block.shards.len(), 1);
     }
 
     #[test]

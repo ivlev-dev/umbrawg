@@ -63,6 +63,13 @@ impl CapsFlags {
     pub const FEC: Self = Self(1 << 2);
     /// Peer wants adaptive FEC.
     pub const FEC_ADAPTIVE: Self = Self(1 << 3);
+    /// Peer accepts partial blocks that carry parity shards.
+    ///
+    /// A partial block (`k' < k`) is otherwise sent with `m' = 0`, so a single
+    /// lost shard loses the whole block. With this flag the sender may emit
+    /// `k'` data shards plus up to `m` parity shards, and the receiver decodes
+    /// the block with its advertised `(k', m')` shape.
+    pub const FEC_PARTIAL: Self = Self(1 << 4);
 
     /// Creates flags from the wire value.
     #[must_use]
@@ -386,7 +393,7 @@ mod tests {
     #[test]
     fn caps_round_trip() {
         let caps = Caps {
-            flags: CapsFlags::ACK | CapsFlags::BBR | CapsFlags::FEC,
+            flags: CapsFlags::ACK | CapsFlags::BBR | CapsFlags::FEC | CapsFlags::FEC_PARTIAL,
             ack_interval_packets: 2,
             fec_k: 10,
             fec_m: 2,
@@ -396,6 +403,18 @@ mod tests {
         assert_eq!(written, 20);
         assert_eq!(Caps::decode(&buffer).unwrap(), caps);
         assert_eq!(extension_kind(&buffer), Some(ControlKind::Caps));
+    }
+
+    #[test]
+    fn fec_partial_flag_has_its_own_bit() {
+        // Wire contract: bit 4 is FEC_PARTIAL and every existing bit is kept.
+        assert_eq!(CapsFlags::FEC_PARTIAL.bits(), 1 << 4);
+        assert_eq!(
+            (CapsFlags::FEC | CapsFlags::FEC_ADAPTIVE | CapsFlags::FEC_PARTIAL).bits(),
+            (1 << 2) | (1 << 3) | (1 << 4)
+        );
+        assert!(!CapsFlags::FEC.contains(CapsFlags::FEC_PARTIAL));
+        assert!((CapsFlags::FEC | CapsFlags::FEC_PARTIAL).contains(CapsFlags::FEC_PARTIAL));
     }
 
     #[test]

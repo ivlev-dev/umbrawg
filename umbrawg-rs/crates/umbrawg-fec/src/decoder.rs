@@ -118,10 +118,10 @@ impl FecDecoder {
         shard: FecShard<'_>,
         now: Instant,
     ) -> Result<Vec<DecodedBlock>, FecError> {
-        self.validate(&shard)?;
         if let Err(error) = &self.code {
             return Err(*error);
         }
+        self.validate(&shard)?;
         let Some(seq) = self.clock.extend(shard.block_id) else {
             return Ok(Vec::new());
         };
@@ -177,10 +177,23 @@ impl FecDecoder {
             if block.m == 0 {
                 block.packets = Some(extract_packets(&block.shards, data_shards));
                 block.recovered = 0;
-            } else if let Ok(code) = &self.code {
-                if let Some((packets, recovered)) = decode_block(code, &mut block.shards) {
-                    block.packets = Some(packets);
-                    block.recovered = recovered;
+            } else {
+                // The shard header carries the block shape. A partial block
+                // uses its own `(k', m')` code, which differs from the local
+                // profile, so its matrix is built for that shape.
+                let block_shape = (usize::from(block.k), usize::from(block.m));
+                let partial_code;
+                let code = if block_shape == (self.config.k(), self.config.m()) {
+                    self.code.as_ref().ok()
+                } else {
+                    partial_code = RSCode::try_new(block_shape.0, block_shape.1).ok();
+                    partial_code.as_ref()
+                };
+                if let Some(code) = code {
+                    if let Some((packets, recovered)) = decode_block(code, &mut block.shards) {
+                        block.packets = Some(packets);
+                        block.recovered = recovered;
+                    }
                 }
             }
         }
@@ -200,12 +213,19 @@ impl FecDecoder {
     }
 
     fn validate(&self, shard: &FecShard<'_>) -> Result<(), FecError> {
-        let k_matches = shard.k == self.config.data_shards
-            || (shard.m == 0 && shard.k >= 1 && shard.k <= self.config.data_shards);
-        if !k_matches || (shard.m != self.config.parity_shards && shard.m != 0) {
+        let config_k = self.config.data_shards;
+        let config_m = self.config.parity_shards;
+        // A full block carries exactly the local profile. A partial block may
+        // be narrower: `m' = 0` is the legacy form, `m' > 0` carries parity
+        // and is only accepted from peers that negotiated partial parity.
+        let k_matches = shard.k >= 1 && shard.k <= config_k;
+        let m_matches = shard.m <= config_m;
+        let total_matches =
+            u16::from(shard.k) + u16::from(shard.m) <= u16::from(config_k) + u16::from(config_m);
+        if !k_matches || !m_matches || !total_matches {
             return Err(FecError::ConfigMismatch {
-                expected_k: self.config.data_shards,
-                expected_m: self.config.parity_shards,
+                expected_k: config_k,
+                expected_m: config_m,
                 actual_k: shard.k,
                 actual_m: shard.m,
             });
@@ -493,5 +513,62 @@ mod tests {
     #[test]
     fn inversion_of_zero_matrix_is_none() {
         assert_eq!(invert(&[0, 0, 0, 0], 2), None);
+    }
+
+    fn shard(k: u8, m: u8, index: u8, payload: &[u8]) -> FecShard<'_> {
+        FecShard {
+            block_id: 0,
+            index,
+            k,
+            m,
+            shard_len: u16::try_from(payload.len()).unwrap(),
+            payload,
+        }
+    }
+
+    #[test]
+    fn accepts_full_partial_and_legacy_shapes() {
+        let now = Instant::now();
+        let payload = [0u8, 0u8];
+        for (k, m, index) in [(4u8, 2u8, 0u8), (3, 2, 4), (3, 0, 2), (4, 0, 3)] {
+            let mut decoder = FecDecoder::new(FecConfig::new(4, 2).unwrap());
+            assert!(
+                decoder.push_at(shard(k, m, index, &payload), now).is_ok(),
+                "k={k} m={m} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_shapes_wider_than_the_local_profile() {
+        let now = Instant::now();
+        let payload = [0u8, 0u8];
+        for (k, m) in [
+            (5u8, 2u8), // k' > k
+            (4, 3),     // m' > m
+            (0, 0),     // k' == 0
+            (2, 255),   // sum/parity overflow in the header
+            (5, 0),     // legacy partial still bounded by k
+        ] {
+            let mut decoder = FecDecoder::new(FecConfig::new(4, 2).unwrap());
+            assert!(
+                matches!(
+                    decoder.push_at(shard(k, m, 0, &payload), now),
+                    Err(FecError::ConfigMismatch { .. })
+                ),
+                "k={k} m={m} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_indices_outside_a_partial_shape() {
+        let now = Instant::now();
+        let payload = [0u8, 0u8];
+        let mut decoder = FecDecoder::new(FecConfig::new(4, 2).unwrap());
+        assert!(matches!(
+            decoder.push_at(shard(3, 2, 5, &payload), now),
+            Err(FecError::InvalidIndex { .. })
+        ));
     }
 }

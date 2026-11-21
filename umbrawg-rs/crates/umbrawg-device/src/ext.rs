@@ -301,7 +301,7 @@ impl ExtConfig {
             flags = flags | CapsFlags::ACK;
         }
         if self.fec != FecMode::Off {
-            flags = flags | CapsFlags::FEC;
+            flags = flags | CapsFlags::FEC | CapsFlags::FEC_PARTIAL;
             if self.fec == FecMode::Adaptive {
                 flags = flags | CapsFlags::FEC_ADAPTIVE;
             }
@@ -1120,10 +1120,11 @@ impl PeerExtension {
     /// keypair, so a reconfiguration or a keypair switch does not silently
     /// drop a partially filled block.
     fn flush_encoder_frames(&mut self) {
+        let parity = self.partial_parity();
         let block = self
             .fec_tx
             .as_mut()
-            .and_then(|encoder| encoder.flush_with_rng(&mut self.jitter));
+            .and_then(|encoder| encoder.flush_with_parity_rng(parity, &mut self.jitter));
         if let Some(block) = block {
             self.fec_stats.blocks_encoded = self.fec_stats.blocks_encoded.saturating_add(1);
             self.queue_fec_frames(&block);
@@ -1178,6 +1179,23 @@ impl PeerExtension {
             && self.fec_tx.is_some()
             && self.peer_caps.contains(CapsFlags::FEC)
             && self.fec_profile_matches()
+    }
+
+    /// Parity shards to attach to a partial block sent to this peer.
+    ///
+    /// Partial parity is only emitted when the peer advertised both
+    /// [`CapsFlags::FEC`] and [`CapsFlags::FEC_PARTIAL`]; otherwise the legacy
+    /// `m = 0` form keeps the wire compatible. The local `m` is returned as-is
+    /// and clamped by the encoder, so a mismatch cannot exceed the negotiated
+    /// profile.
+    fn partial_parity(&self) -> u8 {
+        if !self
+            .peer_caps
+            .contains(CapsFlags::FEC | CapsFlags::FEC_PARTIAL)
+        {
+            return 0;
+        }
+        self.config.fec_profile().map_or(0, |(_, m)| m)
     }
 
     /// Feeds one received counter to the adaptive loss estimator.
@@ -1263,11 +1281,12 @@ impl PeerExtension {
             return None;
         }
         self.fec_deadline = None;
+        let parity = self.partial_parity();
         let jitter = &mut self.jitter;
         let block = self
             .fec_tx
             .as_mut()
-            .and_then(|encoder| encoder.flush_with_rng(jitter));
+            .and_then(|encoder| encoder.flush_with_parity_rng(parity, jitter));
         if block.is_some() {
             self.fec_stats.blocks_encoded = self.fec_stats.blocks_encoded.saturating_add(1);
         }
@@ -1527,7 +1546,10 @@ impl PeerExtension {
             self.caps_warn_last = Some(now);
         }
         caps.flags = CapsFlags::from_bits(
-            caps.flags.bits() & !(CapsFlags::FEC.bits() | CapsFlags::FEC_ADAPTIVE.bits()),
+            caps.flags.bits()
+                & !(CapsFlags::FEC.bits()
+                    | CapsFlags::FEC_ADAPTIVE.bits()
+                    | CapsFlags::FEC_PARTIAL.bits()),
         );
         caps.fec_k = 0;
         caps.fec_m = 0;
@@ -2777,6 +2799,132 @@ mod tests {
     }
 
     #[test]
+    fn partial_block_carries_parity_when_the_peer_supports_it() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 12,
+            max_shard_len: 1900,
+        });
+        ext.handle_caps(
+            caps(
+                CapsFlags::FEC | CapsFlags::FEC_PARTIAL | CapsFlags::ACK,
+                2,
+                1,
+            ),
+            base,
+        );
+        assert!(ext.fec_tx_active());
+
+        assert!(ext.fec_push(&[9u8; 20], base).unwrap().is_none());
+        let block = ext
+            .fec_flush_due(base + Duration::from_millis(5))
+            .expect("partial block is due");
+        assert_eq!((block.k, block.m), (1, 1));
+        assert_eq!(block.shards.len(), 2);
+        assert!(usize::from(block.shard_len) >= 22);
+
+        // The parity shard alone restores the packet: the decoder accepts the
+        // partial `(1, 1)` shape although the local profile is `2:1`.
+        let block_id = block.block_id;
+        let shard_len = block.shard_len;
+        let packets = ext.fec_decode(
+            FecShard {
+                block_id,
+                index: 1,
+                k: block.k,
+                m: block.m,
+                shard_len,
+                payload: &block.shards[1],
+            },
+            base,
+        );
+        assert_eq!(packets, vec![vec![9u8; 20]]);
+        assert_eq!(ext.fec_stats().unwrap().packets_recovered, 1);
+
+        // A `k' = 2` partial block is still narrower than the local `4:2`
+        // profile and must be decoded with its own shape.
+        let mut wide = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 4, m: 2 },
+            ack_interval: 12,
+            max_shard_len: 1900,
+        });
+        wide.handle_caps(
+            caps(
+                CapsFlags::FEC | CapsFlags::FEC_PARTIAL | CapsFlags::ACK,
+                4,
+                2,
+            ),
+            base,
+        );
+        assert!(wide.fec_push(&[1u8; 20], base).unwrap().is_none());
+        assert!(wide.fec_push(&[2u8; 20], base).unwrap().is_none());
+        let block = wide
+            .fec_flush_due(base + Duration::from_millis(5))
+            .expect("partial block is due");
+        assert_eq!((block.k, block.m), (2, 2));
+        assert_eq!(block.shards.len(), 4);
+        let packets = wide.fec_decode(
+            FecShard {
+                block_id: block.block_id,
+                index: 0,
+                k: block.k,
+                m: block.m,
+                shard_len: block.shard_len,
+                payload: &block.shards[0],
+            },
+            base,
+        );
+        assert!(packets.is_empty());
+        let packets = wide.fec_decode(
+            FecShard {
+                block_id: block.block_id,
+                index: 2,
+                k: block.k,
+                m: block.m,
+                shard_len: block.shard_len,
+                payload: &block.shards[2],
+            },
+            base,
+        );
+        assert_eq!(packets, vec![vec![1u8; 20], vec![2u8; 20]]);
+    }
+
+    #[test]
+    fn partial_parity_requires_the_peer_flag() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(ExtConfig {
+            bbr: BbrMode::Off,
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ack_interval: 12,
+            max_shard_len: 1900,
+        });
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
+        assert_eq!(ext.partial_parity(), 0);
+        assert!(ext.fec_push(&[9u8; 20], base).unwrap().is_none());
+        let block = ext
+            .fec_flush_due(base + Duration::from_millis(5))
+            .expect("partial block is due");
+        assert_eq!((block.k, block.m), (1, 0), "no flag keeps the legacy m=0");
+
+        ext.handle_caps(
+            caps(
+                CapsFlags::FEC | CapsFlags::FEC_PARTIAL | CapsFlags::ACK,
+                2,
+                1,
+            ),
+            base,
+        );
+        assert_eq!(ext.partial_parity(), 1);
+
+        // The bit is only meaningful together with FEC, like the kernel.
+        ext.handle_caps(caps(CapsFlags::FEC_PARTIAL | CapsFlags::ACK, 2, 1), base);
+        assert_eq!(ext.partial_parity(), 0);
+    }
+
+    #[test]
     fn ack_flag_is_advertised_whenever_feedback_is_needed() {
         let disabled = ExtConfig::default();
         assert_eq!(disabled.local_caps().bits(), 0);
@@ -2788,6 +2936,7 @@ mod tests {
         };
         let flags = fec_only.local_caps();
         assert!(flags.contains(CapsFlags::FEC));
+        assert!(flags.contains(CapsFlags::FEC_PARTIAL));
         assert!(flags.contains(CapsFlags::ACK));
         assert!(!flags.contains(CapsFlags::BBR));
 
@@ -3018,8 +3167,19 @@ mod tests {
         assert_eq!((ext.peer_fec_k, ext.peer_fec_m), (0, 0));
         assert!(!ext.fec_tx_active());
 
-        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 3), base);
+        ext.handle_caps(
+            caps(
+                CapsFlags::FEC | CapsFlags::FEC_PARTIAL | CapsFlags::ACK,
+                2,
+                3,
+            ),
+            base,
+        );
         assert!(!ext.peer_caps.contains(CapsFlags::FEC));
+        assert!(
+            !ext.peer_caps.contains(CapsFlags::FEC_PARTIAL),
+            "an invalid profile must drop every FEC capability"
+        );
         assert_eq!((ext.peer_fec_k, ext.peer_fec_m), (0, 0));
 
         ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::ACK, 2, 1), base);
