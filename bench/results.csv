@@ -1,9 +1,0 @@
-impl,mode,proto,conns,loss,obf,peers,mbit,extra
-rust,1c,tcp,1,0,0,1,516.0,197
-rust,1c,udp,1,0,0,1,999.8,48.948
-rust,1c,tcp,1,0,1,1,352.6,113
-rust,1c,udp,1,0,1,1,999.8,55.891
-rust,3c,tcp,1,0,0,1,822.4,399
-rust,3c,udp,1,0,0,1,999.9,5.439
-rust,3c,tcp,1,0,1,1,550.4,278
-rust,3c,udp,1,0,1,1,999.8,25.46

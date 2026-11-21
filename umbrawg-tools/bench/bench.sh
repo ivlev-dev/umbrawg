@@ -2,8 +2,15 @@
 set -euo pipefail
 
 BENCH_DIR=${BENCH_DIR:-$(cd "$(dirname "$0")" && pwd)}
-REPO_ROOT=$(cd "$BENCH_DIR/.." && pwd)
-WORKSPACE_ROOT=${WORKSPACE_ROOT:-$(cd "$REPO_ROOT/.." && pwd)}
+PARENT_DIR=$(cd "$BENCH_DIR/.." && pwd)
+if [ -d "$PARENT_DIR/umbrawg-rs" ] || [ -d "$PARENT_DIR/umbrawg-tools" ] ||
+    [ -d "$PARENT_DIR/umbrawg-linux-kernel-module" ]; then
+    REPO_ROOT=$PARENT_DIR
+    WORKSPACE_ROOT=$PARENT_DIR
+else
+    REPO_ROOT=$PARENT_DIR
+    WORKSPACE_ROOT=$(cd "$PARENT_DIR/.." && pwd)
+fi
 . "$BENCH_DIR/bench-lib.sh"
 
 RUSTDIR=${RUSTDIR:-$(first_existing_dir "$WORKSPACE_ROOT/umbrawg-rs" "$WORKSPACE_ROOT/rust")}
@@ -16,7 +23,7 @@ RESULT=${RESULT:-$BENCH_DIR/results.csv}
 REPORT_PY=${REPORT_PY:-$BENCH_DIR/bench-report.py}
 DIAG_USER=${DIAG:-}
 UNDERLAY_MTU=${UNDERLAY_MTU:-9000}
-GSO_SEGMENTS=${GSO_SEGMENTS:-}
+GSO_SEGMENTS=${GSO_SEGMENTS:-${UMBRAWG_GSO_SEGMENTS:-}}
 RUST_RX_SCHED=${RUST_RX_SCHED:-peer}
 RUST_PARALLEL=${RUST_PARALLEL:-0}
 TUN_MTU=${TUN_MTU:-1420}
@@ -87,6 +94,10 @@ fi
 
 RESULT_HEADER="impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total"
 
+CAPTURE_DIR=${CAPTURE_DIR:-}
+CAPTURE_PACKETS=${CAPTURE_PACKETS:-100000}
+CAPTURE_PIDS=()
+
 DAEMON_PIDS=()
 WE_INSMOD_UMBRAWG=0
 WE_MODPROBE_AMNEZIAWG=0
@@ -107,6 +118,10 @@ fi
 cleanup() {
     set +e
     local p
+    for p in ${CAPTURE_PIDS[@]+"${CAPTURE_PIDS[@]}"}; do
+        kill "$p" 2>/dev/null
+    done
+    CAPTURE_PIDS=()
     for p in ${DAEMON_PIDS[@]+"${DAEMON_PIDS[@]}"}; do
         kill "$p" 2>/dev/null
     done
@@ -509,6 +524,30 @@ start_iperf_server() {
     return 1
 }
 
+start_capture() {
+    local name=$1
+    [ -n "$CAPTURE_DIR" ] || return 0
+    mkdir -p "$CAPTURE_DIR"
+    ip netns exec "$NS0" tcpdump -i "$V0" -n -s 128 -c "$CAPTURE_PACKETS" -U \
+        -w "$CAPTURE_DIR/$name-a.pcap" udp >/dev/null 2>&1 &
+    CAPTURE_PIDS+=($!)
+    ip netns exec "$NS1" tcpdump -i "$V1" -n -s 128 -c "$CAPTURE_PACKETS" -U \
+        -w "$CAPTURE_DIR/$name-b.pcap" udp >/dev/null 2>&1 &
+    CAPTURE_PIDS+=($!)
+    sleep 0.2
+}
+
+stop_capture() {
+    local p
+    for p in ${CAPTURE_PIDS[@]+"${CAPTURE_PIDS[@]}"}; do
+        kill -INT "$p" 2>/dev/null
+    done
+    for p in ${CAPTURE_PIDS[@]+"${CAPTURE_PIDS[@]}"}; do
+        wait "$p" 2>/dev/null
+    done
+    CAPTURE_PIDS=()
+}
+
 run_iperf() {
     local proto=$1
     local conns=$2
@@ -668,12 +707,16 @@ for impl in $IMPL_LIST; do
                                     frag_before=$(( $(frag_total "$NS0") + $(frag_total "$NS1") ))
                                     cpu_snap_before=$(mktemp)
                                     proc_stat_snapshot "$cpu_snap_before" || true
+                                    capture_name="${impl}-${mode}-${proto}-c${conns}-obf${obf}-r${repeat}"
+                                    start_capture "$capture_name"
                                     if ! out=$(run_iperf "$proto" "$conns" "$rate"); then
+                                        stop_capture
                                         rm -f "$cpu_snap_before"
                                         echo "IPERF_FAILED impl=$impl mode=$mode proto=$proto conns=$conns rate=$rate obf=$obf" | tee -a "$DIAG" >&2
                                         emit_row "$impl" "$mode" "$proto" "$conns" "$loss" "$obf" "$peers" FAIL 0 - "$rate" "$udp_mode" "$streams" "$repeat" -1 - -
                                         continue
                                     fi
+                                    stop_capture
                                     cpu_snap_after=$(mktemp)
                                     proc_stat_snapshot "$cpu_snap_after" || true
                                     cpu_line=$(cpu_busy_summary "$cpu_snap_before" "$cpu_snap_after" "$CPU_HOT_PCT" || true)

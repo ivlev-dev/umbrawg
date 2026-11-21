@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
 
-IMPLEMENTATIONS: tuple[str, ...] = ("kernel-umbrawg", "kernel-amneziawg", "rust", "go")
+IMPLEMENTATIONS: tuple[str, ...] = ("kernel-umbrawg", "kernel-amneziawg", "rust", "rust-par", "go")
 KERNEL_REFERENCE = "kernel-amneziawg"
 USERSPACE_REFERENCE = "go"
 STREAM_SINGLE = "single"
@@ -348,7 +348,9 @@ def stream_sections(stats: dict[tuple[str, CellKey], Stat], impls: Sequence[str]
 
 
 def family_reference(impl: str, present: set[str]) -> str | None:
-    if impl.startswith("kernel-"):
+    if impl == "rust-par":
+        reference = "rust"
+    elif impl.startswith("kernel-"):
         reference = KERNEL_REFERENCE
     else:
         reference = USERSPACE_REFERENCE

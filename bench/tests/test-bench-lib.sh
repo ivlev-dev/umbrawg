@@ -53,6 +53,20 @@ check_eq "cpu_mask 0-5" "3f" "$(cpu_mask "0-5")"
 check_eq "cpu_mask 3" "8" "$(cpu_mask "3")"
 check_eq "all_cpus_mask" "$(cpu_mask "0-$(( $(nproc) - 1 ))")" "$(all_cpus_mask)"
 
+mkdir -p "$tmp/dirs/a" "$tmp/dirs/b"
+: > "$tmp/file-a"
+: > "$tmp/file-b"
+check_eq "first_existing_dir первый" "$tmp/dirs/a" "$(first_existing_dir "$tmp/dirs/a" "$tmp/dirs/b")"
+check_eq "first_existing_dir второй" "$tmp/dirs/b" "$(first_existing_dir "$tmp/missing" "$tmp/dirs/b")"
+check_eq "first_existing_dir нет" "" "$(first_existing_dir "$tmp/missing")"
+check_rc "first_existing_dir нет rc" 0 first_existing_dir "$tmp/missing"
+check_eq "first_existing_dir файл не каталог" "" "$(first_existing_dir "$tmp/file-a")"
+check_eq "first_existing_file первый" "$tmp/file-a" "$(first_existing_file "$tmp/file-a" "$tmp/file-b")"
+check_eq "first_existing_file второй" "$tmp/file-b" "$(first_existing_file "$tmp/missing" "$tmp/file-b")"
+check_eq "first_existing_file нет" "" "$(first_existing_file "$tmp/missing")"
+check_rc "first_existing_file нет rc" 0 first_existing_file "$tmp/missing"
+check_eq "first_existing_file каталог не файл" "" "$(first_existing_file "$tmp/dirs/a")"
+
 cat > "$tmp/obf-full.conf" <<'EOF'
 [Interface]
 PrivateKey = x
@@ -151,6 +165,22 @@ proc_stat_snapshot "$tmp/real-a"
 sleep 0.1
 proc_stat_snapshot "$tmp/real-b"
 check_eq "cpu_busy_summary реальный /proc/stat" "ok" "$(cpu_busy_summary "$tmp/real-a" "$tmp/real-b" 80 | awk '{ if ($0 ~ /^per_cpu=[0-9]+(,[0-9]+)* hot_cpus=[0-9]+ total=[0-9]+$/) print "ok"; else print $0 }')"
+
+plan_out=$(PLAN_ONLY=1 FORCE=1 IMPL_LIST="" RESULT="$tmp/plan.csv" bash "$HERE/../bench.sh" 2>&1)
+plan_rc=$?
+check_eq "bench.sh PLAN_ONLY rc" "0" "$plan_rc"
+check_contains "bench.sh PLAN_ONLY RESULTS" "RESULTS=$tmp/plan.csv" "$plan_out"
+check_contains "bench.sh PLAN_ONLY PATHS" "PATHS bench_dir=" "$plan_out"
+check_eq "bench.sh PLAN_ONLY csv header" "impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total" "$(head -1 "$tmp/plan.csv")"
+legacy_root="/root/""umbrawg"
+if printf '%s' "$plan_out" | grep -qF "$legacy_root"; then
+    total=$((total + 1))
+    echo "FAIL bench.sh PLAN_ONLY без жёстких путей: в выводе путь старого стенда"
+    fails=$((fails + 1))
+else
+    total=$((total + 1))
+    echo "ok   bench.sh PLAN_ONLY без жёстких путей"
+fi
 
 cat > "$tmp/obf-template.conf" <<'EOF'
 # профиль: секретов нет

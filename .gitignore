@@ -17,8 +17,11 @@ bench/keys.env
 bench/.t/
 bench/.conf-*
 bench/.obf-lines.txt
-bench/matrix/conf-*
-bench/matrix/keys.env
+bench/results*.csv
+bench/results*.md
+bench/results*.agg.csv
+bench/*.diag
+bench/matrix/
 bench/results/
 bench/tmp/
 bench/zed/
@@ -39,5 +42,4 @@ go/*.exe
 *.swp
 .idea/
 .vscode/
-bench/matrix/profile/*.data
 .local/

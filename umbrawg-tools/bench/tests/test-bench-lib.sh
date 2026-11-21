@@ -172,9 +172,10 @@ check_eq "bench.sh PLAN_ONLY rc" "0" "$plan_rc"
 check_contains "bench.sh PLAN_ONLY RESULTS" "RESULTS=$tmp/plan.csv" "$plan_out"
 check_contains "bench.sh PLAN_ONLY PATHS" "PATHS bench_dir=" "$plan_out"
 check_eq "bench.sh PLAN_ONLY csv header" "impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total" "$(head -1 "$tmp/plan.csv")"
-if printf '%s' "$plan_out" | grep -q '/root/umbrawg'; then
+legacy_root="/root/""umbrawg"
+if printf '%s' "$plan_out" | grep -qF "$legacy_root"; then
     total=$((total + 1))
-    echo "FAIL bench.sh PLAN_ONLY без жёстких путей: в выводе /root/umbrawg"
+    echo "FAIL bench.sh PLAN_ONLY без жёстких путей: в выводе путь старого стенда"
     fails=$((fails + 1))
 else
     total=$((total + 1))

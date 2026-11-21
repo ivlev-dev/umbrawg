@@ -28,9 +28,10 @@ python3 bench/bench-report.py results-20261116-120000.csv --md report.md --agg a
 
 ## Пути
 
-Значения по умолчанию выводятся из расположения `bench.sh`; если соседние
-репозитории лежат иначе (например, стенд развёрнут в `/root/umbrawg/bench`),
-достаточно задать переменные окружения.
+Значения по умолчанию выводятся из расположения `bench.sh`: корневой
+`bench/` видит компоненты монорепозитория рядом, а `umbrawg-tools/bench/`
+поднимается на уровень выше. Если деревья лежат в другой раскладке
+(worktree, отдельная копия), достаточно задать переменные окружения.
 
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
@@ -50,12 +51,10 @@ python3 bench/bench-report.py results-20261116-120000.csv --md report.md --agg a
 Пример для развёрнутого стенда:
 
 ```bash
-RUSTDIR=/root/umbrawg/rust \
-MODDIR=/root/umbrawg/module/src \
-UWG=/root/umbrawg/tools/target/release/uwg \
-DAEMON=/root/umbrawg/rust/target/release/umbrawg \
-OBF=/root/umbrawg/bench/obf-params.conf \
-RESULT=/root/umbrawg/bench/results.csv \
+RUSTDIR=/path/to/umbrawg-rs \
+MODDIR=/path/to/umbrawg-linux-kernel-module/src \
+UWG=/path/to/umbrawg-tools/target/release/uwg \
+DAEMON=/path/to/umbrawg-rs/target/release/umbrawg \
 bash bench.sh
 ```
 
@@ -265,8 +264,8 @@ UDP 1G, `obf=0/1`, `mode=1c/3c` — 16 ячеек, примерно 6–8 мин
 
 ```bash
 # нужен root; обе сборки уже собраны (в src лежит umbrawg.ko)
-MASTER=/root/umbrawg/module-master/src \
-WAKEUP=/root/umbrawg/module-wakeup/src \
+MASTER=$WORKSPACE_ROOT/module-master/src \
+WAKEUP=$WORKSPACE_ROOT/module-wakeup/src \
 bash bench/wakeup-ab.sh --rounds 5
 python3 bench/wakeup-analysis.py bench/results/wakeup-ab
 ```

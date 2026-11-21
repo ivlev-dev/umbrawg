@@ -2,18 +2,30 @@
 set -euo pipefail
 
 BENCH_DIR=${BENCH_DIR:-$(cd "$(dirname "$0")" && pwd)}
+PARENT_DIR=$(cd "$BENCH_DIR/.." && pwd)
+if [ -d "$PARENT_DIR/umbrawg-rs" ] || [ -d "$PARENT_DIR/umbrawg-tools" ] ||
+    [ -d "$PARENT_DIR/umbrawg-linux-kernel-module" ]; then
+    REPO_ROOT=$PARENT_DIR
+    WORKSPACE_ROOT=$PARENT_DIR
+else
+    REPO_ROOT=$PARENT_DIR
+    WORKSPACE_ROOT=$(cd "$PARENT_DIR/.." && pwd)
+fi
 . "$BENCH_DIR/bench-lib.sh"
 
-RUSTDIR=${RUSTDIR:-/root/umbrawg/rust}
-MODDIR=${MODDIR:-/root/umbrawg/module/src}
-UWG=${UWG:-/root/umbrawg/tools/target/release/uwg}
-DAEMON=${DAEMON:-$RUSTDIR/target/release/umbrawg}
-GO_BASELINE=${GO_BASELINE:-/opt/baseline/amneziawg-go}
+RUSTDIR=${RUSTDIR:-$(first_existing_dir "$WORKSPACE_ROOT/umbrawg-rs" "$WORKSPACE_ROOT/rust")}
+MODDIR=${MODDIR:-${MODULE_DIR:-$(first_existing_dir "$WORKSPACE_ROOT/umbrawg-linux-kernel-module/src" "$WORKSPACE_ROOT/module/src")}}
+UWG=${UWG:-$(first_existing_file "$REPO_ROOT/target/release/uwg" "$WORKSPACE_ROOT/umbrawg-tools/target/release/uwg" "$WORKSPACE_ROOT/tools/target/release/uwg")}
+DAEMON=${DAEMON:-$(first_existing_file "$RUSTDIR/target/release/umbrawg" "$RUSTDIR/umbrawg")}
+GO_BASELINE=${GO_BASELINE:-$(first_existing_file /opt/baseline/amneziawg-go /usr/local/bin/amneziawg-go /usr/bin/amneziawg-go)}
 OBF=${OBF:-$BENCH_DIR/obf-params.conf}
 RESULT=${RESULT:-$BENCH_DIR/results.csv}
 REPORT_PY=${REPORT_PY:-$BENCH_DIR/bench-report.py}
 DIAG_USER=${DIAG:-}
 UNDERLAY_MTU=${UNDERLAY_MTU:-9000}
+GSO_SEGMENTS=${GSO_SEGMENTS:-${UMBRAWG_GSO_SEGMENTS:-}}
+RUST_RX_SCHED=${RUST_RX_SCHED:-peer}
+RUST_PARALLEL=${RUST_PARALLEL:-0}
 TUN_MTU=${TUN_MTU:-1420}
 OVERHEAD_BASE=${OVERHEAD_BASE:-80}
 SMOKE=${SMOKE:-0}
@@ -69,6 +81,9 @@ PEERS_LIST=${PEERS_LIST-$DEF_PEERS_LIST}
 CONNS_LIST=${CONNS_LIST-$DEF_CONNS_LIST}
 LOSS_LIST=${LOSS_LIST-$DEF_LOSS_LIST}
 OBF_LIST=${OBF_LIST-$DEF_OBF_LIST}
+if [ "$RUST_PARALLEL" = "1" ]; then
+    DEF_IMPL_LIST="$DEF_IMPL_LIST rust-par"
+fi
 IMPL_LIST=${IMPL_LIST-$DEF_IMPL_LIST}
 MODE_LIST=${MODE_LIST-$DEF_MODE_LIST}
 PROTO_LIST=${PROTO_LIST-$DEF_PROTO_LIST}
@@ -261,6 +276,35 @@ idle_guard() {
     exit 3
 }
 
+require_tools() {
+    local missing="" impl cmd
+    [ -f "$OBF" ] || missing="$missing obf=$OBF"
+    if [ -n "$IMPL_LIST" ]; then
+        [ -x "$UWG" ] || missing="$missing uwg=$UWG"
+        for cmd in ip iperf3 python3 ping; do
+            command -v "$cmd" >/dev/null 2>&1 || missing="$missing cmd:$cmd"
+        done
+    fi
+    for impl in $IMPL_LIST; do
+        case "$impl" in
+            kernel-umbrawg)
+                [ -f "$MODDIR/umbrawg.ko" ] || missing="$missing kernel-umbrawg=$MODDIR/umbrawg.ko"
+                ;;
+            rust|rust-par)
+                [ -x "$DAEMON" ] || missing="$missing rust=$DAEMON"
+                ;;
+            go)
+                [ -x "$GO_BASELINE" ] || missing="$missing go=$GO_BASELINE"
+                ;;
+        esac
+    done
+    if [ -n "$missing" ]; then
+        echo "REQUIRE_FAILED:$missing" >&2
+        echo "REQUIRE_HINT: задай UWG, MODDIR (MODULE_DIR), DAEMON, GO_BASELINE, OBF; пути по умолчанию — см. bench/README.md" >&2
+        exit 5
+    fi
+}
+
 uwg_ns() {
     local ns=$1
     shift
@@ -316,7 +360,7 @@ make_configs() {
     local peers=$2
     local out0=$3
     local out1=$4
-    local k0 k1 p0 p1 obfblock extra0 extra1 i
+    local k0 k1 p0 p1 obfblock extra0 extra1 i cipherblock
     k0=$("$UWG" genkey)
     k1=$("$UWG" genkey)
     p0=$(printf '%s' "$k0" | "$UWG" pubkey)
@@ -324,6 +368,10 @@ make_configs() {
     obfblock=""
     if [ "$obf" = "1" ]; then
         obfblock=$(obf_block_from_conf "$OBF" "$UWG" genkey)
+    fi
+    cipherblock=""
+    if [ -n "${CIPHER:-}" ]; then
+        cipherblock="Cipher = $CIPHER"
     fi
     extra0=""
     extra1=""
@@ -344,10 +392,10 @@ PublicKey = $pk0
 AllowedIPs = 10.98.$i.0/24"
         i=$((i + 1))
     done
-    printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.2:%s\nPersistentKeepalive = 5\n%s\n' \
-        "$k0" "$PORT0" "$obfblock" "$p1" "$PORT1" "$extra0" > "$out0"
-    printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.1:%s\nPersistentKeepalive = 5\n%s\n' \
-        "$k1" "$PORT1" "$obfblock" "$p0" "$PORT0" "$extra1" > "$out1"
+    printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.2:%s\nPersistentKeepalive = 5\n%s\n%s\n' \
+        "$k0" "$PORT0" "$obfblock" "$p1" "$PORT1" "$cipherblock" "$extra0" > "$out0"
+    printf '[Interface]\nPrivateKey = %s\nListenPort = %s\n%s\n\n[Peer]\nPublicKey = %s\nAllowedIPs = 10.9.0.0/24\nEndpoint = 192.168.77.1:%s\nPersistentKeepalive = 5\n%s\n%s\n' \
+        "$k1" "$PORT1" "$obfblock" "$p0" "$PORT0" "$cipherblock" "$extra1" > "$out1"
 }
 
 bring_up_addrs() {
@@ -395,17 +443,13 @@ start_impl() {
             ;;
         rust|rust-par)
             if [ "$impl" = "rust-par" ]; then
-                rx_env="UMBRAWG_PARALLEL_RX=1 UMBRAWG_RX_SCHED=${RUST_RX_SCHED:-peer}"
+                rx_env="UMBRAWG_PARALLEL_RX=1 UMBRAWG_RX_SCHED=$RUST_RX_SCHED"
             else
                 rx_env="UMBRAWG_PARALLEL_RX=0"
             fi
-            gso_env="UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU"
-            if [ -n "${UMBRAWG_GSO_SEGMENTS:-}" ]; then
-                gso_env="$gso_env UMBRAWG_GSO_SEGMENTS=$UMBRAWG_GSO_SEGMENTS"
-            fi
-            env $rx_env $gso_env UMBRAWG_THREADS=$threads ip netns exec "$NS0" taskset -c "$cpus" "$DAEMON" --foreground "$IF0" >/tmp/bench-$IF0.log 2>&1 &
+            env $rx_env UMBRAWG_THREADS=$threads UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU ${GSO_SEGMENTS:+UMBRAWG_GSO_SEGMENTS=$GSO_SEGMENTS} ip netns exec "$NS0" taskset -c "$cpus" "$DAEMON" --foreground "$IF0" >/tmp/bench-$IF0.log 2>&1 &
             DAEMON_PIDS+=($!)
-            env $rx_env $gso_env UMBRAWG_THREADS=$threads ip netns exec "$NS1" taskset -c "$cpus" "$DAEMON" --foreground "$IF1" >/tmp/bench-$IF1.log 2>&1 &
+            env $rx_env UMBRAWG_THREADS=$threads UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU ${GSO_SEGMENTS:+UMBRAWG_GSO_SEGMENTS=$GSO_SEGMENTS} ip netns exec "$NS1" taskset -c "$cpus" "$DAEMON" --foreground "$IF1" >/tmp/bench-$IF1.log 2>&1 &
             DAEMON_PIDS+=($!)
             for _ in $(seq 1 50); do
                 [ -S "/var/run/umbrawg/$IF0.sock" ] && [ -S "/var/run/umbrawg/$IF1.sock" ] && break
@@ -579,12 +623,12 @@ idle_guard
 HARNESS_STARTED=1
 init_result
 
-mkdir -p /var/run/umbrawg
-
 echo "RUN_ID=$RUN_ID"
 echo "RESULT=$RESULT"
 echo "DIAG=$DIAG"
+echo "PATHS bench_dir=$BENCH_DIR uwg=$UWG moddir=$MODDIR rustdir=$RUSTDIR daemon=$DAEMON go_baseline=$GO_BASELINE obf=$OBF"
 echo "PLAN impls=[$IMPL_LIST] modes=[$MODE_LIST] protos=[$PROTO_LIST] conns=[$CONNS_LIST] obf=[$OBF_LIST] peers=[$PEERS_LIST] repeats=$REPEATS cpu_hot_pct=$CPU_HOT_PCT iperf_cpu=$IPERF_CPU tunnel_cpus_1=$TUNNEL_CPUS_1 tunnel_cpus_3=$TUNNEL_CPUS_3"
+echo "ENV UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU UMBRAWG_GSO_SEGMENTS=${GSO_SEGMENTS:-} RUST_PARALLEL=$RUST_PARALLEL RUST_RX_SCHED=$RUST_RX_SCHED"
 
 if [ "$PLAN_ONLY" = "1" ]; then
     echo "PLAN_ONLY: прогоны не запускаются"
@@ -593,6 +637,9 @@ if [ "$PLAN_ONLY" = "1" ]; then
     echo "DIAG=$DIAG"
     exit 0
 fi
+
+require_tools
+mkdir -p /var/run/umbrawg
 
 for impl in $IMPL_LIST; do
     for mode in $MODE_LIST; do

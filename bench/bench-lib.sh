@@ -1,5 +1,27 @@
 #!/bin/bash
 
+first_existing_dir() {
+    local p
+    for p in "$@"; do
+        if [ -d "$p" ]; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    printf '%s' ""
+}
+
+first_existing_file() {
+    local p
+    for p in "$@"; do
+        if [ -f "$p" ]; then
+            printf '%s' "$p"
+            return 0
+        fi
+    done
+    printf '%s' ""
+}
+
 cpu_mask() {
     local list=$1 mask=0 b i s e
     for b in ${list//,/ }; do
