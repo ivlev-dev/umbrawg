@@ -1,4 +1,4 @@
-.TH UWG-QUICK 8 "2026-11-16" "UmbraWG" "System Administration"
+.TH UWG-QUICK 8 "2026-11-21" "UmbraWG" "System Administration"
 
 .SH NAME
 uwg-quick \- set up a UmbraWG interface from a configuration file
@@ -60,6 +60,10 @@ when available.
 \fBMTU\fP
 Explicit MTU. If omitted, the MTU is derived from the route to the first
 peer endpoint or from the system default route, minus the tunnel overhead.
+While FEC is enabled the MTU derived by \fBuwg setconf\fP is preserved: the
+automatic or explicit value never raises it. With \fBUnderlayMTU = 1500\fP
+this keeps 1368 bytes on the kernel backend and 1352 bytes on the userspace
+backend.
 .TP
 \fBTable\fP
 Routing table for added routes. \fBauto\fP (default) uses the main table and
@@ -74,6 +78,12 @@ interface name. Each key may appear multiple times and runs in order.
 .TP
 \fBSaveConfig\fP
 If \fBtrue\fP, the interface configuration is saved on \fBdown\fP.
+.TP
+\fBFEC\fP, \fBUnderlayMTU\fP
+Accepted from
+.BR uwg (8)
+and applied to both the kernel and the userspace backend. They select the FEC
+mode and the MTU of the path between the peers respectively.
 
 .SH ENVIRONMENT
 .TP
@@ -88,6 +98,9 @@ Passed through to
 .B WG_HIDE_KEYS
 Passed through to
 .BR uwg (8).
+.PP
+The deprecated \fBUWG_COLOR_MODE\fP and \fBUWG_HIDE_KEYS\fP spellings are
+accepted as fallbacks; \fBWG_*\fP takes precedence.
 
 .SH FILES
 .TP

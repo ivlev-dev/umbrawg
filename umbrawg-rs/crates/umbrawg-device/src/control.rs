@@ -179,6 +179,9 @@ fn fec_stats(device: &Device) -> UapiFecStats {
         stats.dropped_disabled = stats
             .dropped_disabled
             .saturating_add(peer_stats.dropped_disabled);
+        stats.dropped_control = stats
+            .dropped_control
+            .saturating_add(peer_stats.dropped_control);
     }
     stats
 }

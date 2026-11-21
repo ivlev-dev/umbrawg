@@ -168,12 +168,22 @@ fn write_config(directory: &Path, peers: &[(&str, &str)]) -> PathBuf {
 }
 
 fn run(directory: &Path, arguments: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_uwg"))
+    run_env(directory, arguments, &[])
+}
+
+fn run_env(directory: &Path, arguments: &[&str], environment: &[(&str, &str)]) -> Output {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_uwg"));
+    command
         .env("UWG_RUNTIME_DIR", directory)
         .env_remove("WG_COLOR_MODE")
-        .args(arguments)
-        .output()
-        .expect("run uwg")
+        .env_remove("UWG_COLOR_MODE")
+        .env_remove("WG_HIDE_KEYS")
+        .env_remove("UWG_HIDE_KEYS")
+        .args(arguments);
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    command.output().expect("run uwg")
 }
 
 fn stderr(output: &Output) -> String {
@@ -575,7 +585,7 @@ fn show_reports_daemon_bbr_and_fec_stats() {
                     bbr_round_lost=8\nbbr_peers=1\n\
                     fec_stats=1\nfec_blocks_encoded=10\nfec_shards_sent=12\n\
                     fec_blocks_decoded=9\nfec_packets_recovered=1\nfec_decode_fail=2\n\
-                    fec_dropped_bounds=3\nfec_dropped_disabled=4\nerrno=0\n\n";
+                    fec_dropped_bounds=3\nfec_dropped_disabled=4\nfec_dropped_control=5\nerrno=0\n\n";
     let _fake = FakeUapi::start(&directory, response.to_owned());
 
     let output = run(&directory, &["show", "uwg0", "bbr-stats"]);
@@ -591,8 +601,49 @@ fn show_reports_daemon_bbr_and_fec_stats() {
     assert_eq!(
         String::from_utf8(output.stdout).expect("utf-8"),
         "blocks_encoded=10\nshards_sent=12\nblocks_decoded=9\npackets_recovered=1\n\
-         decode_fail=2\ndropped_bounds=3\ndropped_disabled=4\n"
+         decode_fail=2\ndropped_bounds=3\ndropped_disabled=4\ndropped_control=5\n"
     );
+}
+
+#[test]
+fn legacy_uwg_environment_names_are_honored() {
+    let directory = runtime_dir();
+    let _fake = FakeUapi::start(&directory, get_response());
+
+    let output = run_env(
+        &directory,
+        &["show", "uwg0"],
+        &[("UWG_COLOR_MODE", "always")],
+    );
+    let stdout = String::from_utf8(output.stdout.clone()).expect("utf-8");
+    assert!(stdout.contains('\u{1b}'), "legacy color mode was ignored");
+
+    let output = run_env(
+        &directory,
+        &["show", "uwg0"],
+        &[("UWG_COLOR_MODE", "always"), ("WG_COLOR_MODE", "never")],
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(
+        !stdout.contains('\u{1b}'),
+        "WG_COLOR_MODE must win over the legacy name"
+    );
+
+    let directory = runtime_dir();
+    let response = "private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n\
+                    errno=0\n\n";
+    let _fake = FakeUapi::start(&directory, response.to_owned());
+    let output = run_env(&directory, &["show", "uwg0"], &[("UWG_HIDE_KEYS", "never")]);
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(!stdout.contains("private key: (hidden)"), "{stdout}");
+
+    let output = run_env(
+        &directory,
+        &["show", "uwg0"],
+        &[("UWG_HIDE_KEYS", "never"), ("WG_HIDE_KEYS", "always")],
+    );
+    let stdout = String::from_utf8(output.stdout).expect("utf-8");
+    assert!(stdout.contains("private key: (hidden)"), "{stdout}");
 }
 
 #[test]
@@ -606,6 +657,21 @@ fn show_all_without_interfaces_succeeds_with_empty_output() {
 
     let output = run(&directory, &["show", "interfaces"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+}
+
+#[test]
+fn show_all_without_runtime_directory_fails() {
+    let directory = runtime_dir();
+    let missing = directory.join("missing");
+
+    let output = run(&missing, &["show", "all"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("runtime directory"),
+        "{}",
+        stderr(&output)
+    );
     assert!(output.stdout.is_empty(), "{:?}", output.stdout);
 }
 
@@ -664,6 +730,9 @@ fn show_rejects_unknown_parameters() {
 fn run_without_runtime(arguments: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_uwg"))
         .env_remove("WG_COLOR_MODE")
+        .env_remove("UWG_COLOR_MODE")
+        .env_remove("WG_HIDE_KEYS")
+        .env_remove("UWG_HIDE_KEYS")
         .args(arguments)
         .output()
         .expect("run uwg")

@@ -1,9 +1,41 @@
 use std::net::SocketAddr;
 
-use netlink_packet_umbrawg::{BbrStats, FecStats};
+use netlink_packet_umbrawg::BbrStats;
 use umbrawg_config::{
     AllowedIp, Cipher, Config, DeviceConfig, Key, ObfuscationConfig, PeerConfig, U16Range,
 };
+
+/// Device-wide FEC counters.
+///
+/// Matches the kernel netlink aggregate and adds the userspace-only
+/// `dropped_control` counter reported by the daemon UAPI. The kernel never
+/// produces that field, so it stays zero for kernel interfaces.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FecStats {
+    pub blocks_encoded: u64,
+    pub shards_sent: u64,
+    pub blocks_decoded: u64,
+    pub packets_recovered: u64,
+    pub decode_fail: u64,
+    pub dropped_bounds: u64,
+    pub dropped_disabled: u64,
+    pub dropped_control: u64,
+}
+
+impl From<netlink_packet_umbrawg::FecStats> for FecStats {
+    fn from(stats: netlink_packet_umbrawg::FecStats) -> Self {
+        Self {
+            blocks_encoded: stats.blocks_encoded,
+            shards_sent: stats.shards_sent,
+            blocks_decoded: stats.blocks_decoded,
+            packets_recovered: stats.packets_recovered,
+            decode_fail: stats.decode_fail,
+            dropped_bounds: stats.dropped_bounds,
+            dropped_disabled: stats.dropped_disabled,
+            dropped_control: 0,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TimeSpec {
@@ -292,6 +324,19 @@ mod tests {
         );
         assert_eq!(config.peers[0].advanced_security, Some(true));
         assert_eq!(config.peers[0].cipher, Some(Cipher::Aes256Gcm));
+    }
+
+    #[test]
+    fn kernel_fec_stats_have_no_dropped_control() {
+        let stats = netlink_packet_umbrawg::FecStats {
+            blocks_encoded: 1,
+            dropped_disabled: 2,
+            ..netlink_packet_umbrawg::FecStats::default()
+        };
+        let converted = FecStats::from(stats);
+        assert_eq!(converted.blocks_encoded, 1);
+        assert_eq!(converted.dropped_disabled, 2);
+        assert_eq!(converted.dropped_control, 0);
     }
 
     #[test]

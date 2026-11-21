@@ -424,7 +424,9 @@ impl DeviceBuilder {
                     self.device.underlay_mtu = Some(*value);
                 }
                 UmbrawgAttribute::BbrStats(value) => self.device.bbr_stats = Some(*value),
-                UmbrawgAttribute::FecStats(value) => self.device.fec_stats = Some(*value),
+                UmbrawgAttribute::FecStats(value) => {
+                    self.device.fec_stats = Some((*value).into());
+                }
                 UmbrawgAttribute::Fwmark(value) => self.device.fwmark = *value,
                 UmbrawgAttribute::JC(value) => self.device.obfuscation.jc = Some(*value),
                 UmbrawgAttribute::Jmin(value) => self.device.obfuscation.jmin = Some(*value),
@@ -1281,7 +1283,7 @@ mod tests {
 
     #[test]
     fn reads_fec_and_bbr_stats() {
-        let fec = crate::FecStats {
+        let kernel_fec = netlink_packet_umbrawg::FecStats {
             blocks_encoded: 1,
             shards_sent: 2,
             blocks_decoded: 3,
@@ -1303,12 +1305,18 @@ mod tests {
         let mut builder = DeviceBuilder::new("test0");
         builder
             .apply(&[
-                UmbrawgAttribute::FecStats(fec),
+                UmbrawgAttribute::FecStats(kernel_fec),
                 UmbrawgAttribute::BbrStats(bbr),
             ])
             .expect("apply");
         let device = builder.finish();
-        assert_eq!(device.fec_stats, Some(fec));
+        let expected = crate::FecStats::from(kernel_fec);
+        assert_eq!(device.fec_stats, Some(expected));
+        assert_eq!(
+            device.fec_stats.expect("stats").dropped_control,
+            0,
+            "the kernel has no dropped_control counter"
+        );
         assert_eq!(device.bbr_stats, Some(bbr));
     }
 

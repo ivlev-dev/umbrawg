@@ -1,4 +1,4 @@
-.TH UWG 8 "2026-11-20" "UmbraWG" "System Administration"
+.TH UWG 8 "2026-11-21" "UmbraWG" "System Administration"
 
 .SH NAME
 uwg \- set and retrieve configuration of UmbraWG interfaces
@@ -85,19 +85,18 @@ Forward error correction mode, applied to both kernel and userspace
 interfaces. \fBadaptive\fP uses a 2:1 profile that is enabled after measured
 loss above 1% and disabled after five seconds below 0.2%; \fBK:M\fP uses
 \fIK\fP data and \fIM\fP parity shards. Both peers must use the same
-\fIK\fP:\fIM\fP profile. The kernel data plane accepts \fIK\fP from 1 to 8
-and \fIM\fP from 1 to 2; values outside these ranges are rejected with
-\fBEINVAL\fP. The userspace daemon accepts up to 255 total shards, but only
-the kernel ranges interoperate with the module.
+\fIK\fP:\fIM\fP profile. Both backends accept \fIK\fP from 1 to 8 and
+\fIM\fP from 1 to 2; values outside these ranges are rejected with
+\fBEINVAL\fP.
 .TP
 \fBunderlay-mtu\fP \fI<mtu>\fP
 MTU of the path between the peers, from 576 to 65535; the default is 1500.
 While FEC is enabled the interface MTU is lowered so that a full-size packet
 plus the shard overhead still fits one underlay datagram, and restored when
 FEC is turned off. With the default 1500 byte path and the default 1420 byte
-interface MTU this lowers the interface to 1368 bytes. A manual
-\fBip link set mtu\fP is adopted as the new base by the next change that
-recomputes the policy.
+interface MTU this lowers the kernel interface to 1368 bytes and the userspace
+interface to 1352 bytes. A manual \fBip link set mtu\fP is adopted as the new
+base by the next change that recomputes the policy.
 .TP
 \fBprivate-key\fP \fI<file>\fP
 Reads the private key from a file. A device or empty file removes the key.
@@ -206,8 +205,9 @@ from the bench directory to estimate DPI-resistance before deploying.
 FEC transmits a packet as a shard only when it fits one underlay datagram.
 While FEC is enabled the kernel lowers the interface MTU to the largest inner
 packet that fits, so full-size TCP segments are protected too and stay below
-the underlay path MTU. With \fBunderlay-mtu 1500\fP the interface MTU becomes
-1368 bytes; raise \fBunderlay-mtu\fP if the path can carry larger datagrams.
+the underlay path MTU. With \fBunderlay-mtu 1500\fP the kernel interface MTU
+becomes 1368 bytes and the userspace interface 1352 bytes; raise
+\fBunderlay-mtu\fP if the path can carry larger datagrams.
 Packets above the shard budget still fall back to the legacy path.
 
 Adaptive FEC estimates loss from the incoming direction and assumes
@@ -224,6 +224,9 @@ loss.
 .B WG_HIDE_KEYS
 When set to \fBnever\fP, private and preshared keys are printed in
 \fBshow\fP output; by default they are hidden.
+.PP
+The deprecated \fBUWG_COLOR_MODE\fP and \fBUWG_HIDE_KEYS\fP spellings are
+still accepted as fallbacks; the \fBWG_*\fP variables take precedence.
 .TP
 .B UWG_RUNTIME_DIR
 Directory containing userspace UAPI sockets. Defaults to

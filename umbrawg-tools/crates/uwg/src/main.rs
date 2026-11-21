@@ -104,6 +104,16 @@ async fn run_show(args: &ShowArgs) -> CommandResult {
 
     let color = output::color_enabled();
     if args.interface == "all" {
+        // An empty but present runtime directory is a successful empty
+        // listing. A missing or inaccessible one is a real configuration
+        // error, which `list_interfaces` alone deliberately treats as empty.
+        let runtime_dir = umbrawg_ctl::socket_dir();
+        if !runtime_dir.is_dir() {
+            return Err(format!(
+                "Unable to list interfaces: runtime directory `{}` is missing or inaccessible",
+                runtime_dir.display()
+            ));
+        }
         let interfaces = umbrawg_ctl::list_interfaces()
             .await
             .map_err(|error| format!("Unable to list interfaces: {error}"))?;

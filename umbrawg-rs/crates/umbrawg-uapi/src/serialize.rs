@@ -144,6 +144,7 @@ fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
         write_field(output, "fec_decode_fail", stats.decode_fail);
         write_field(output, "fec_dropped_bounds", stats.dropped_bounds);
         write_field(output, "fec_dropped_disabled", stats.dropped_disabled);
+        write_field(output, "fec_dropped_control", stats.dropped_control);
     }
 }
 
@@ -277,6 +278,7 @@ fec_packets_recovered=1
 fec_decode_fail=2
 fec_dropped_bounds=3
 fec_dropped_disabled=4
+fec_dropped_control=5
 public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 preshared_key=606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f
 protocol_version=1
@@ -320,6 +322,7 @@ errno=0
             response.contains("fec_stats=1\nfec_blocks_encoded=0\n"),
             "{response}"
         );
+        assert!(response.contains("fec_dropped_control=0\n"), "{response}");
     }
 
     #[test]
@@ -435,6 +438,7 @@ errno=0
                 decode_fail: 2,
                 dropped_bounds: 3,
                 dropped_disabled: 4,
+                dropped_control: 5,
             }),
             obfuscation: ObfuscationSnapshot {
                 jc: 4,

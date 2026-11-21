@@ -10,7 +10,8 @@
 //!   (`umbrawg` by default);
 //! * `WG_COLOR_MODE` and `WG_HIDE_KEYS` are read by `uwg show` and are
 //!   inherited by every `uwg` subprocess, exactly like the shell
-//!   implementation passes them to `awg`.
+//!   implementation passes them to `awg`. The former `UWG_COLOR_MODE` and
+//!   `UWG_HIDE_KEYS` spellings are still accepted as deprecated fallbacks.
 
 pub mod command;
 pub mod commands;
@@ -50,8 +51,14 @@ pub const ENV_USERSPACE_IMPLEMENTATION: &str = "UWG_QUICK_USERSPACE_IMPLEMENTATI
 /// Environment variable consumed by `uwg show` (passed through).
 pub const ENV_COLOR_MODE: &str = "WG_COLOR_MODE";
 
+/// Deprecated fallback for [`ENV_COLOR_MODE`].
+pub const ENV_COLOR_MODE_LEGACY: &str = "UWG_COLOR_MODE";
+
 /// Environment variable consumed by `uwg show` (passed through).
 pub const ENV_HIDE_KEYS: &str = "WG_HIDE_KEYS";
+
+/// Deprecated fallback for [`ENV_HIDE_KEYS`].
+pub const ENV_HIDE_KEYS_LEGACY: &str = "UWG_HIDE_KEYS";
 
 /// First routing table used for a default route when no fwmark exists.
 pub const DEFAULT_ROUTE_TABLE_START: u32 = 51820;

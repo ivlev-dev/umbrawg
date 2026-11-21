@@ -2,13 +2,13 @@ use std::fmt::Write as _;
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Path, PathBuf};
 
-use netlink_packet_umbrawg::{BbrStats, FecStats};
+use netlink_packet_umbrawg::BbrStats;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use umbrawg_config::{format_endpoint, parse_endpoint, AllowedIp, Cipher, Key, U16Range, U32Range};
 
 use crate::error::Error;
-use crate::model::{Device, Peer, SetDevice};
+use crate::model::{Device, FecStats, Peer, SetDevice};
 
 pub const DEFAULT_SOCKET_DIR: &str = "/var/run/umbrawg";
 pub const SOCKET_SUFFIX: &str = ".sock";
@@ -390,6 +390,12 @@ fn apply_device_line(device: &mut Device, key: &str, value: &str) -> Result<(), 
                 .get_or_insert_with(FecStats::default)
                 .dropped_disabled = parse_u64(key, value)?;
         }
+        "fec_dropped_control" => {
+            device
+                .fec_stats
+                .get_or_insert_with(FecStats::default)
+                .dropped_control = parse_u64(key, value)?;
+        }
         "jc" => device.obfuscation.jc = Some(parse_u16(key, value)?),
         "jmin" => device.obfuscation.jmin = Some(parse_u16(key, value)?),
         "jmax" => device.obfuscation.jmax = Some(parse_u16(key, value)?),
@@ -692,6 +698,7 @@ fec_packets_recovered=1
 fec_decode_fail=2
 fec_dropped_bounds=3
 fec_dropped_disabled=4
+fec_dropped_control=5
 public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 preshared_key=606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f
 protocol_version=1
@@ -785,6 +792,7 @@ errno=0
                 decode_fail: 2,
                 dropped_bounds: 3,
                 dropped_disabled: 4,
+                dropped_control: 5,
             })
         );
         assert_eq!(device.obfuscation.jc, Some(4));
@@ -826,10 +834,14 @@ errno=0
         let device =
             parse_get_response("bbr_stats=1\nbbr_mode=on\nerrno=0\n\n", "test0").expect("valid");
         assert_eq!(device.bbr_stats.expect("bbr stats").mode, 2);
-        let device =
-            parse_get_response("fec_stats=1\nfec_dropped_disabled=9\nerrno=0\n\n", "test0")
-                .expect("valid");
-        assert_eq!(device.fec_stats.expect("fec stats").dropped_disabled, 9);
+        let device = parse_get_response(
+            "fec_stats=1\nfec_dropped_disabled=9\nfec_dropped_control=7\nerrno=0\n\n",
+            "test0",
+        )
+        .expect("valid");
+        let stats = device.fec_stats.expect("fec stats");
+        assert_eq!(stats.dropped_disabled, 9);
+        assert_eq!(stats.dropped_control, 7);
     }
 
     #[test]

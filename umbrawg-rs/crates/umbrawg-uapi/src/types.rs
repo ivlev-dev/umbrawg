@@ -574,6 +574,10 @@ pub struct FecStats {
     pub dropped_bounds: u64,
     /// Shards dropped because FEC was not negotiated or is disabled.
     pub dropped_disabled: u64,
+    /// Control frames dropped by the peer extension, for example because the
+    /// control queue overflowed or encryption failed (userspace only; the
+    /// kernel does not report this counter).
+    pub dropped_control: u64,
 }
 
 /// Complete device state returned by [`DeviceControl::snapshot`].

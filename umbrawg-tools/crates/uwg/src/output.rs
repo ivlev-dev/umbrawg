@@ -12,11 +12,31 @@ const FG_YELLOW: &str = "\x1b[33m";
 const FG_CYAN: &str = "\x1b[36m";
 const FG_RED: &str = "\x1b[31m";
 
+const COLOR_MODE_ENV: &str = "WG_COLOR_MODE";
+const COLOR_MODE_ENV_LEGACY: &str = "UWG_COLOR_MODE";
+const HIDE_KEYS_ENV: &str = "WG_HIDE_KEYS";
+const HIDE_KEYS_ENV_LEGACY: &str = "UWG_HIDE_KEYS";
+
+/// Reads an environment variable, falling back to its deprecated `UWG_*`
+/// spelling. `WG_*` always wins when both are set.
+fn env_value(primary: &str, legacy: &str) -> Option<String> {
+    std::env::var(primary)
+        .ok()
+        .or_else(|| std::env::var(legacy).ok())
+}
+
 pub fn color_enabled() -> bool {
-    match std::env::var("WG_COLOR_MODE").as_deref() {
-        Ok("always") => true,
-        Ok("never") => false,
-        _ => std::io::stdout().is_terminal(),
+    color_mode(
+        env_value(COLOR_MODE_ENV, COLOR_MODE_ENV_LEGACY).as_deref(),
+        std::io::stdout().is_terminal(),
+    )
+}
+
+fn color_mode(value: Option<&str>, is_terminal: bool) -> bool {
+    match value {
+        Some("always") => true,
+        Some("never") => false,
+        _ => is_terminal,
     }
 }
 
@@ -731,10 +751,15 @@ fn compare_peers(left: &Peer, right: &Peer) -> std::cmp::Ordering {
 }
 
 fn masked_key(key: &Key) -> String {
-    match std::env::var("WG_HIDE_KEYS").as_deref() {
-        Ok("never") => key.to_base64(),
-        _ => "(hidden)".to_owned(),
+    if hide_keys(env_value(HIDE_KEYS_ENV, HIDE_KEYS_ENV_LEGACY).as_deref()) {
+        "(hidden)".to_owned()
+    } else {
+        key.to_base64()
     }
+}
+
+fn hide_keys(value: Option<&str>) -> bool {
+    value != Some("never")
 }
 
 fn maybe_key(key: Option<&Key>) -> String {
@@ -790,6 +815,7 @@ fn fec_stats_text(stats: &FecStats, prefix: &str) -> String {
         ("decode_fail", stats.decode_fail),
         ("dropped_bounds", stats.dropped_bounds),
         ("dropped_disabled", stats.dropped_disabled),
+        ("dropped_control", stats.dropped_control),
     ] {
         let _ = writeln!(output, "{prefix}{name}={value}");
     }
@@ -923,6 +949,7 @@ mod tests {
             decode_fail: 2,
             dropped_bounds: 3,
             dropped_disabled: 4,
+            dropped_control: 5,
         });
         device.obfuscation.jc = Some(4);
         device.obfuscation.jmin = Some(40);
@@ -993,11 +1020,11 @@ mod tests {
         );
         assert_eq!(
             ugly(&device, "fec-stats", false).expect("valid"),
-            "blocks_encoded=10\nshards_sent=12\nblocks_decoded=9\npackets_recovered=1\ndecode_fail=2\ndropped_bounds=3\ndropped_disabled=4\n"
+            "blocks_encoded=10\nshards_sent=12\nblocks_decoded=9\npackets_recovered=1\ndecode_fail=2\ndropped_bounds=3\ndropped_disabled=4\ndropped_control=5\n"
         );
         assert_eq!(
             ugly(&device, "fec-stats", true).expect("valid"),
-            "uwg0\tblocks_encoded=10\nuwg0\tshards_sent=12\nuwg0\tblocks_decoded=9\nuwg0\tpackets_recovered=1\nuwg0\tdecode_fail=2\nuwg0\tdropped_bounds=3\nuwg0\tdropped_disabled=4\n"
+            "uwg0\tblocks_encoded=10\nuwg0\tshards_sent=12\nuwg0\tblocks_decoded=9\nuwg0\tpackets_recovered=1\nuwg0\tdecode_fail=2\nuwg0\tdropped_bounds=3\nuwg0\tdropped_disabled=4\nuwg0\tdropped_control=5\n"
         );
 
         let mut device = sample_device();
@@ -1204,6 +1231,17 @@ mod tests {
         assert_eq!(bytes(1024 * 1024, false), "1.00 MiB");
         assert_eq!(bytes(1024 * 1024 * 1024, false), "1.00 GiB");
         assert_eq!(bytes(1024 * 1024 * 1024 * 1024, false), "1.00 TiB");
+    }
+
+    #[test]
+    fn env_value_helpers_accept_both_spellings() {
+        assert!(color_mode(Some("always"), false));
+        assert!(!color_mode(Some("never"), true));
+        assert!(color_mode(None, true));
+        assert!(!color_mode(None, false));
+        assert!(hide_keys(None));
+        assert!(hide_keys(Some("always")));
+        assert!(!hide_keys(Some("never")));
     }
 
     #[test]
