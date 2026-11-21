@@ -125,11 +125,31 @@ func (d SendDirection) String() string {
 	return "pong"
 }
 
+// testTransitTimeout bounds how long one packet may take to cross the tunnel.
+// The first packet normally triggers a handshake. If a handshake datagram is
+// lost it is retransmitted after RekeyTimeout (5s) plus up to
+// RekeyTimeoutJitterMaxMs (334ms) of jitter, and a loaded CI machine may need
+// more than one retry. 30s leaves room for about five retries, while a truly
+// broken tunnel still fails the test in reasonable time.
+const testTransitTimeout = 30 * time.Second
+
 func (pair *testPair) Send(
 	tb testing.TB,
 	ping SendDirection,
 	done chan struct{},
 ) {
+	tb.Helper()
+	pair.sendWithTimeout(tb, ping, done, testTransitTimeout)
+}
+
+// sendWithTimeout injects a ping and waits up to timeout for it to arrive on
+// the other side. It reports how long the packet took and whether it transited.
+func (pair *testPair) sendWithTimeout(
+	tb testing.TB,
+	ping SendDirection,
+	done chan struct{},
+	timeout time.Duration,
+) (time.Duration, bool) {
 	tb.Helper()
 	p0, p1 := pair[0], pair[1]
 	if !ping {
@@ -139,7 +159,8 @@ func (pair *testPair) Send(
 
 	msg := tuntest.Ping(p0.ip, p1.ip)
 	p1.tun.Outbound <- msg
-	timer := time.NewTimer(6 * time.Second)
+	start := time.Now()
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	var err error
 	select {
@@ -151,22 +172,84 @@ func (pair *testPair) Send(
 		err = fmt.Errorf("%s did not transit", ping)
 	case <-done:
 	}
+	elapsed := time.Since(start)
 	if err != nil {
 		// The error may have occurred because the test is done.
 		select {
 		case <-done:
-			return
+			return elapsed, false
 		default:
 		}
 		// Real error.
+		pair.logState(tb, ping.String(), elapsed, timeout)
 		tb.Error(err)
+		return elapsed, false
 	}
+	return elapsed, true
+}
+
+// logState dumps the state that matters when a packet does not transit, so a
+// CI failure contains enough context to be diagnosed without a rerun.
+func (pair *testPair) logState(tb testing.TB, what string, elapsed, timeout time.Duration) {
+	tb.Helper()
+	tb.Logf("%s did not transit: elapsed=%v timeout=%v", what, elapsed.Round(time.Millisecond), timeout)
+	for i := range pair {
+		dev := pair[i].dev
+		tb.Logf("dev%d: ip=%v state=%v up=%v s4=%d h4=%v",
+			i, pair[i].ip, dev.deviceState(), dev.isUp(),
+			dev.paddings.transport.Load(), dev.headers.transport.Load().ToString(),
+		)
+		dev.peers.RLock()
+		for pub, peer := range dev.peers.keyMap {
+			peer.endpoint.Lock()
+			endpoint := "<none>"
+			if peer.endpoint.val != nil {
+				endpoint = peer.endpoint.val.DstToString()
+			}
+			peer.endpoint.Unlock()
+
+			peer.keypairs.RLock()
+			current, previous := peer.keypairs.current, peer.keypairs.previous
+			next := peer.keypairs.next.Load()
+			peer.keypairs.RUnlock()
+			initiator := current != nil && current.isInitiator
+
+			lastHandshake := "never"
+			if n := peer.lastHandshakeNano.Load(); n != 0 {
+				lastHandshake = time.Since(time.Unix(0, n)).Round(time.Millisecond).String() + " ago"
+			}
+			tb.Logf("dev%d: peer(%s…): endpoint=%s tx=%d rx=%d keypair current=%v next=%v previous=%v initiator=%v lastHandshake=%s",
+				i, hex.EncodeToString(pub[:2]), endpoint,
+				peer.txBytes.Load(), peer.rxBytes.Load(),
+				current != nil, next != nil, previous != nil, initiator, lastHandshake,
+			)
+		}
+		dev.peers.RUnlock()
+	}
+}
+
+// testPairOptions customizes genTestPair for tests that need to observe or
+// interleave with device startup. Nil fields are ignored.
+type testPairOptions struct {
+	// wrapTUN, if set, wraps the ChannelTUN before it is handed to NewDevice.
+	wrapTUN func(i int, dev tun.Device) tun.Device
+	// beforeIpcSet, if set, runs after NewDevice and before IpcSet.
+	beforeIpcSet func(i int, dev *Device)
 }
 
 // genTestPair creates a testPair.
 func genTestPair(
 	tb testing.TB,
 	realSocket bool,
+	extraCfg ...string,
+) testPair {
+	return genTestPairWith(tb, realSocket, testPairOptions{}, extraCfg...)
+}
+
+func genTestPairWith(
+	tb testing.TB,
+	realSocket bool,
+	opts testPairOptions,
 	extraCfg ...string,
 ) (pair testPair) {
 	var cfg, endpointCfg [2]string
@@ -187,7 +270,14 @@ func genTestPair(
 		if _, ok := tb.(*testing.B); ok && !testing.Verbose() {
 			level = LogLevelError
 		}
-		p.dev = NewDevice(p.tun.TUN(), binds[i], NewLogger(level, fmt.Sprintf("dev%d: ", i)))
+		tunDevice := p.tun.TUN()
+		if opts.wrapTUN != nil {
+			tunDevice = opts.wrapTUN(i, tunDevice)
+		}
+		p.dev = NewDevice(tunDevice, binds[i], NewLogger(level, fmt.Sprintf("dev%d: ", i)))
+		if opts.beforeIpcSet != nil {
+			opts.beforeIpcSet(i, p.dev)
+		}
 		if err := p.dev.IpcSet(cfg[i]); err != nil {
 			tb.Errorf("failed to configure device %d: %v", i, err)
 			p.dev.Close()
@@ -224,10 +314,75 @@ func TestTwoDevicePing(t *testing.T) {
 	})
 }
 
+// readNotifyTUN reports when the device's TUN reader enters Read. The reader
+// samples per-packet configuration (such as the transport padding) before
+// calling Read, so tests can use this to observe the "sampled, then blocked"
+// state and only then change the configuration.
+type readNotifyTUN struct {
+	tun.Device
+	started chan struct{}
+	once    sync.Once
+}
+
+func (t *readNotifyTUN) Read(packets [][]byte, sizes []int, offset int) (int, error) {
+	t.once.Do(func() { close(t.started) })
+	return t.Device.Read(packets, sizes, offset)
+}
+
+// TestAWGTransportPaddingConfiguredAfterDeviceStart is a regression test for
+// the transport padding being sampled before the blocking TUN read. The device
+// and its reader exist first, s4 is configured afterwards, and the very first
+// packet must already use the configured padding. With the old behaviour the
+// packet went out with padding 0, the peer dropped it as an unknown message
+// type and recovery required a rekey retry (RekeyTimeout, 5s).
+func TestAWGTransportPaddingConfiguredAfterDeviceStart(t *testing.T) {
+	goroutineLeakCheck(t)
+
+	readStarted := make(chan struct{})
+	pair := genTestPairWith(t, true, testPairOptions{
+		wrapTUN: func(i int, dev tun.Device) tun.Device {
+			if i != 1 {
+				return dev
+			}
+			// Device 1 sends the first packet (Ping), so its TUN reader is the
+			// one that must have sampled s4 before the configuration arrives.
+			return &readNotifyTUN{Device: dev, started: readStarted}
+		},
+		beforeIpcSet: func(i int, _ *Device) {
+			if i != 1 {
+				return
+			}
+			// Give the freshly started reader a chance to reach Read; if it
+			// never does, the pre-condition of this test is gone.
+			timer := time.NewTimer(testTransitTimeout)
+			defer timer.Stop()
+			select {
+			case <-readStarted:
+			case <-timer.C:
+				t.Fatalf("TUN reader of dev1 did not enter Read")
+			}
+		},
+	}, "s4", "25")
+
+	const firstPacketDeadline = 2 * time.Second
+	elapsed, ok := pair.sendWithTimeout(t, Ping, nil, firstPacketDeadline)
+	if !ok {
+		t.Fatalf("first packet after configuring s4 did not transit within %v (elapsed %v)",
+			firstPacketDeadline, elapsed.Round(time.Millisecond))
+	}
+	if elapsed >= firstPacketDeadline {
+		t.Fatalf("first packet after configuring s4 took %v, want < %v", elapsed.Round(time.Millisecond), firstPacketDeadline)
+	}
+	t.Logf("first packet after configuring s4 transited in %v", elapsed.Round(time.Millisecond))
+}
+
 // Run test with -race=false to avoid the race for setting the default msgTypes 2 times
 func TestAWGDevicePing(t *testing.T) {
 	goroutineLeakCheck(t)
 
+	// A full AWG profile is intentionally exercised: junk packets of
+	// 500..1000 bytes (sent in one batch, so they add no delay), per-message
+	// padding s1..s4 and obfuscated header ranges h1..h4.
 	pair := genTestPair(t, true,
 		"jc", "5",
 		"jmin", "500",
@@ -241,6 +396,7 @@ func TestAWGDevicePing(t *testing.T) {
 		"h3", "123123-123200",
 		"h4", "32345-32350",
 	)
+
 	t.Run("ping 1.0.0.1", func(t *testing.T) {
 		pair.Send(t, Ping, nil)
 	})

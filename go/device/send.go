@@ -333,6 +333,25 @@ func (device *Device) RoutineReadFromTUN() {
 
 		// read packets
 		count, readErr = device.tun.device.Read(bufs, sizes, offset)
+
+		// The TUN read needs the padding up front to know how much headroom to
+		// leave for the transport header, but that padding was sampled before
+		// blocking in Read. If the configuration changed while we were blocked
+		// (for example, s4 was set with IpcSet right after the device was
+		// created), the packets just read sit at the old offset and would be
+		// encrypted with stale padding, which the peer drops as an unknown
+		// message type. Move them to the offset of the current configuration.
+		// This runs at most until the read loop has caught up with a config
+		// change; the extra atomic load on the hot path is negligible.
+		if currentPadding := device.paddings.transport.Load(); currentPadding != padding {
+			currentOffset := MessageTransportHeaderSize + int(currentPadding)
+			for i := 0; i < count; i++ {
+				copy(bufs[i][currentOffset:], bufs[i][offset:offset+sizes[i]])
+			}
+			padding = currentPadding
+			offset = currentOffset
+		}
+
 		for i := 0; i < count; i++ {
 			if sizes[i] < 1 {
 				continue
