@@ -209,13 +209,26 @@ static inline int uwg_queue_enqueue_per_device_and_peer(
 
 	/* Then we queue it up in the device queue, which consumes the
 	 * packet as soon as it can.
+	 *
+	 * The ring is the one of the CPU that produced the chain, not a
+	 * round-robin pick. Spreading a single peer's traffic over every
+	 * per-CPU ring leaves each ring holding one short chain, so a worker
+	 * is woken for almost every chain, the batch stays tiny, and the skb
+	 * is encrypted or decrypted on a CPU that will never touch it again.
+	 * At 50 peers that tripled the context-switch rate, pushed the
+	 * softirq backlog into ksoftirqd and left the CPUs idle between
+	 * wakeups. A TCP flow is emitted from one CPU, so staying local lets
+	 * a worker wake once and drain a real batch with warm cachelines.
 	 */
-	cpu = uwg_cpumask_next_online(&device_queue->last_cpu);
+	cpu = get_cpu();
 	worker = per_cpu_ptr(device_queue->worker, cpu);
 	queue = worker->ptr;
-	if (unlikely(ptr_ring_produce_bh(&queue->ring, skb)))
+	if (unlikely(ptr_ring_produce_bh(&queue->ring, skb))) {
+		put_cpu();
 		return -EPIPE;
+	}
 	uwg_queue_wakeup_arm(worker, cpu, wq);
+	put_cpu();
 	return 0;
 }
 

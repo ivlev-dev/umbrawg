@@ -31,8 +31,14 @@ struct multicore_worker {
 };
 
 struct crypt_queue {
+	/* Holds skb chains (up to MAX_STAGED_PACKETS each), not single skbs. */
 	struct ptr_ring ring;
 	struct multicore_worker __percpu *worker;
+	/* Round-robin cursor for the shared handshake queue only.
+	 * The per-CPU crypt queues must not use it: their ring is chosen by
+	 * the producing CPU (uwg_queue_enqueue_per_device_and_peer()), and
+	 * spreading a flow over rings destroys worker batching.
+	 */
 	int last_cpu;
 };
 

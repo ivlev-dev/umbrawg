@@ -55,8 +55,8 @@ int uwg_packet_queue_init_percpu(struct crypt_queue *queue,
 	struct crypt_queue *q;
 	int cpu, ret = 0;
 
+	/* last_cpu stays zero: it belongs to the shared handshake queue. */
 	memset(queue, 0, sizeof(*queue));
-	queue->last_cpu = -1;
 	queue->worker = alloc_percpu(struct multicore_worker);
 	if (!queue->worker)
 		return -ENOMEM;
@@ -73,7 +73,6 @@ int uwg_packet_queue_init_percpu(struct crypt_queue *queue,
 			ret = -ENOMEM;
 			goto err;
 		}
-		q->last_cpu = cpu;
 		ret = ptr_ring_init(&q->ring, len, GFP_KERNEL);
 		if (ret) {
 			kfree(q);

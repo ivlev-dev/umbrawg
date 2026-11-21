@@ -28,6 +28,40 @@
 #include <net/ip_tunnels.h>
 #include <net/addrconf.h>
 
+/*
+ * Device-wide in-flight budget for the crypt queues, split between the
+ * per-CPU rings. A ring slot holds a chain of skbs (up to
+ * MAX_STAGED_PACKETS), not one packet, and the producer enqueues on the
+ * CPU that produced the chain -- see uwg_queue_enqueue_per_device_and_peer().
+ * Handing every CPU a full MAX_QUEUED_PACKETS ring therefore multiplied
+ * both the allocated memory and the amount of traffic the tunnel buffers
+ * by nr_cpus. TCP sees those buffers as extra RTT: at 50 peers the
+ * queueing delay reached ~130 ms and cost the flows their fairness long
+ * before the CPUs were saturated.
+ *
+ * The budget is divided by num_possible_cpus(), not num_online_cpus(), so
+ * bringing CPUs online later never grows the allocation past the budget.
+ * It is read when an interface is created; existing interfaces keep the
+ * ring size they were built with.
+ *
+ * The default (MAX_QUEUED_PACKETS / 2) keeps the added delay at a couple
+ * of milliseconds at 50 peers, which is what lets TCP fairness hold. This
+ * is a policy knob: a larger budget tolerates longer crypto stalls at the
+ * cost of bufferbloat.
+ *
+ * Enqueueing on the producing CPU has one accepted cost: a single flow is
+ * encrypted/decrypted on one CPU instead of being spread over all of
+ * them, which measured ~8.5% lower single-flow throughput. That is the
+ * intended trade-off -- parallelising a single flow buys little, while
+ * splitting every flow over every CPU is exactly what broke the 50-peer
+ * case.
+ */
+static unsigned int crypt_queue_budget = MAX_QUEUED_PACKETS / 2;
+module_param(crypt_queue_budget, uint, 0644);
+MODULE_PARM_DESC(crypt_queue_budget,
+		 "Device-wide in-flight budget (skb chains) for the per-CPU crypt queues, "
+		 "split across possible CPUs, 64..8192; applied when an interface is created");
+
 static LIST_HEAD(device_list);
 
 static int uwg_open(struct net_device *dev)
@@ -342,6 +376,11 @@ static int uwg_newlink(struct net_device *dev,
 {
 	struct net *link_net = rtnl_newlink_link_net(params);
 	struct uwg_device *uwg = netdev_priv(dev);
+	unsigned int budget = clamp_t(unsigned int,
+				      READ_ONCE(crypt_queue_budget), 64,
+				      MAX_QUEUED_PACKETS);
+	unsigned int queue_len = max_t(unsigned int, 128,
+				       budget / num_possible_cpus());
 	int ret = -ENOMEM, i;
 
 	rcu_assign_pointer(uwg->creating_net, link_net);
@@ -380,13 +419,13 @@ static int uwg_newlink(struct net_device *dev,
 
 	ret = uwg_packet_queue_init_percpu(&uwg->encrypt_queue,
 					   uwg_packet_encrypt_worker,
-					   MAX_QUEUED_PACKETS);
+					   queue_len);
 	if (ret < 0)
 		goto err_destroy_packet_crypt;
 
 	ret = uwg_packet_queue_init_percpu(&uwg->decrypt_queue,
 					   uwg_packet_decrypt_worker,
-					   MAX_QUEUED_PACKETS);
+					   queue_len);
 	if (ret < 0)
 		goto err_free_encrypt_queue;
 

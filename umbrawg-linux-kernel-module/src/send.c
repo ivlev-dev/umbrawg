@@ -1001,8 +1001,15 @@ static void uwg_packet_create_data(struct uwg_peer *peer, struct sk_buff *first)
 
 	ret = uwg_queue_enqueue_per_device_and_peer(&uwg->encrypt_queue, &peer->tx_queue, first,
 						   uwg->packet_crypt_wq);
-	if (unlikely(ret == -EPIPE))
+	if (unlikely(ret == -EPIPE)) {
+		/* The per-CPU ring is full: the chain will be dropped by the
+		 * tx worker, so account for it where the drop happens.
+		 */
+		DEV_STATS_INC(uwg->dev, tx_dropped);
+		net_dbg_ratelimited("%s: encrypt queue full, dropping chain\n",
+				    uwg->dev->name);
 		uwg_queue_enqueue_per_peer_tx(first, PACKET_STATE_DEAD);
+	}
 err:
 	rcu_read_unlock_bh();
 	if (likely(!ret || ret == -EPIPE))
