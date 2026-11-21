@@ -11,8 +11,8 @@ cargo fmt --all -- --check
 ```
 
 Тесты с userspace-сетью (требуют `CAP_NET_ADMIN`/userns) запускаются отдельно
-согласно CI (`ci.yml`, job `userns`). Параллельный приём включается
-`UMBRAWG_PARALLEL_RX=1`.
+согласно CI (`rs-ci.yml`, job `data-plane e2e`). Параллельный приём
+включается `UMBRAWG_PARALLEL_RX=1`.
 
 Минимальная поддерживаемая версия Rust — 1.88 (`rust-version` в манифесте).
 Только Linux (зависимости `libc`, `rustix`, `tokio`).

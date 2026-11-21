@@ -6,10 +6,9 @@
 cargo install cargo-fuzz
 ```
 
-Запуск:
+Запуск (из `netlink-packet-umbrawg/fuzz`):
 
 ```sh
-cd /root/umbrawg/netlink/fuzz
 cargo fuzz run parse_message
 cargo fuzz run parse_range
 ```

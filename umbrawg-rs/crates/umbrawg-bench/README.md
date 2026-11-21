@@ -4,10 +4,9 @@ Criterion-бенчмарки горячего пути UmbraWG.
 
 ## Запуск
 
-На сервере сборки:
+На сервере сборки (из корня `umbrawg-rs`):
 
 ```sh
-cd /root/umbrawg/rust
 cargo bench -p umbrawg-bench --no-run
 cargo bench -p umbrawg-bench
 ```

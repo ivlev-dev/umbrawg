@@ -9,6 +9,9 @@
 underlay 1500 + `S4=60` и data-plane e2e сняты следом на том же стенде.
 final4, final3 и final2 сохранены ниже как история.
 
+> Пути вида `/root/umbrawg/...` ниже — это каталоги тестового сервера, где
+> лежат сырые CSV/pcap и worktree'ы замеров; в репозитории их нет.
+
 Реализации в матрице: `kernel-umbrawg` (модуль ядра), `kernel-amneziawg`
 (модуль AmneziaWG для сравнения), `rust` (демон `umbrawg`), `rust-par` (тот же
 демон с `UMBRAWG_PARALLEL_RX=1 UMBRAWG_RX_SCHED=peer`), `go` (эталонный

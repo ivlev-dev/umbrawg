@@ -3,6 +3,50 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.1] — 2026-11-21
+
+### FEC
+
+- Adaptive: settle-окно 1 с, EWMA засевается первым sample, reorder не
+  армит parity; окно сбрасывается по keypair.
+- GSO-группа FEC-шардов ограничена `m`: `2:1` не агрегируется, `8:2` —
+  не более двух шардов; хвост блока — PRF от `block_id`, чтобы длины
+  шардов совпадали.
+- `block_id` переживает reconfigure и смену MTU; RX принимает шард своего
+  профиля до CAPS; профиль пира вне `8:2` санитизируется.
+- Лимиты `K=1..8`, `M=1..2` в конфигурации, UAPI и CLI; библиотечный
+  кодек по-прежнему допускает до 255 суммарных шардов, но через настройку
+  это недостижимо.
+
+### CAPS и control-очередь
+
+- Отзыв нулевым CAPS (rate-limit 2 с), только при свидетельствах
+  extension-трафика; all-off CAPS не считается доказательством.
+- Ответ на изменённый профиль откладывается минимум на 200 мс; на
+  идентичный повтор ядро отвечает не больше двух раз на эпоху, Rust — один.
+- Единая lease-очередь control-кадров (лимит 16) с возвратом хвоста при
+  аварии; `fec_dropped_control` виден и при `fec=off`.
+
+### BBR
+
+- Watermark и `on_drop`/`on_drop_bytes` учитываются как потери/возврат;
+  ring 8192 × 32 байта, привязан к keypair.
+- Loss-порог 20% раунда (как в ядре), потери ниже порога не режут окно.
+- `cwnd`-гейт после loss-cut, floor `pacing_rate × 5 мс`, аварийный выход
+  через 5 мс; пейсинг только при `ACK` в CAPS пира.
+- Poll по ближайшему дедлайну (1..10 мс), control-флаш 250 мс, немедленный
+  handshake после конфигурации пира.
+
+### UAPI и демон
+
+- `underlay_mtu` в UAPI (`set=1`/`get=1`), `uwg set/show/setconf/showconf`;
+  runtime-смена пересоздаёт сокеты с новыми GSO-лимитами и сохраняет
+  эфемерный порт.
+- Секции `bbr_stats`/`fec_stats` в UAPI и `uwg show <if> bbr-stats|fec-stats`.
+- `extra_ports` default 0, `dropped_control` в статистике FEC.
+- `UMBRAWG_SOCKET_BUFFER` default 8 МиБ, `UMBRAWG_GSO_SEGMENTS` default 64.
+- Интеграционные тесты CAPS/adaptive/BBR/rekey и e2e data-plane.
+
 ## [0.4.0] — 2026-11-20
 
 ### Безопасность обфускации
@@ -85,7 +129,8 @@
   раньше. Если `TUN MTU + 32 + S4` больше MTU подложки, демон один раз
   предупреждает при старте и при применении конфигурации.
 - `UMBRAWG_GSO_SEGMENTS` — потолок сегментов в одной GSO-супер-датаграмме
-  (1…64, по умолчанию 32): ограничивает цену потери одной датаграммы в сети.
+  (1…64, по умолчанию 32 в 0.3.0; с 0.4.1 — 64): ограничивает цену потери
+  одной датаграммы в сети.
 - `UMBRAWG_SOCKET_BUFFER` — размер `SO_RCVBUF`/`SO_SNDBUF` UDP-сокета в байтах:
   от 212 КиБ до 64 МиБ, по умолчанию 4 МиБ. После открытия сокета демон читает
   фактический размер через `getsockopt` и предупреждает, если ядро урезало
@@ -200,7 +245,7 @@ Userspace-демон UmbraWG на Rust: протокол WireGuard-совмес�
 
 ### CI и сборка
 
-- `.github/workflows/ci.yml`:
+- `.github/workflows/rs-ci.yml`:
   - `test stable` — `fmt --check`, `clippy -D warnings`, тесты workspace,
     `cargo doc` с `-D warnings`;
   - `msrv 1.88` — сборка и компиляция тестов на минимальной версии тулчейна;
@@ -209,7 +254,7 @@ Userspace-демон UmbraWG на Rust: протокол WireGuard-совмес�
     кросс-линкеры `gcc-aarch64-linux-gnu`/`gcc-arm-linux-gnueabihf` и
     `libc6-dev-*-cross`, проверка архитектуры через `file`/`readelf`,
     запуск бинарника и unit-тестов под `qemu-user-static`, упаковка `tar.gz`;
-  - `GitHub Release` — на тег `v*` публикует архивы и `SHA256SUMS`.
+  - `GitHub Release` — на тег `rs-v*` публикует архивы и `SHA256SUMS`.
 - В манифесте объявлена минимальная версия Rust — `rust-version = "1.88"`.
 - Артефакт: `umbrawg-<version>-<target>.tar.gz` с `usr/bin/umbrawg`,
   документацией в `usr/share/doc/umbrawg/` и `systemd/*.service`, если каталог

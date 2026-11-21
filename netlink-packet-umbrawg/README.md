@@ -6,6 +6,8 @@
 
 A Rust crate for parsing and emitting **Umbra WireGuard** generic netlink packets on Linux.
 
+Версия крейта — `0.4.0`, версия `0.4.1` готовится (2026-11-21).
+
 This is a specialized fork focused specifically on **UmbraWG** kernel module support.  
 For plain WireGuard, use the original [`netlink-packet-wireguard`](https://crates.io/crates/netlink-packet-wireguard) crate.
 
@@ -19,7 +21,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-netlink-packet-umbrawg = "0.3"
+netlink-packet-umbrawg = "0.4"
 ```
 
 ## Quick Start
@@ -146,8 +148,19 @@ In addition to standard WireGuard attributes (`PrivateKey`, `PublicKey`, `Peers`
 | `I1` … `I5` | Intermediate header descriptors (`String`)|
 | `HeaderProtectionKey` | UmbraWG 3.0 header protection key (32 bytes) |
 | `ContentPaddingAddition`, `RekeyAfterTime`, `RekeyTimeout`, `RejectAfterTime`, `KeepaliveTimeout`, `MaxHandshakeAttempts` | UmbraWG 3.0 tuning knobs (`u32`) |
-| `Bbr` | BBR congestion control mode (`u8`): `0` off, `1` monitor, `2` on. Builders use `BbrMode` |
-| `Fec` | Forward error correction (`u32`): `0` off, `1` adaptive, otherwise `(K << 8)` \| `M`. Builders use `FecMode` |
+| `RandomTrailers(bool)` | `UWGDEVICE_A_RANDOM_TRAILERS` (33): случайный хвост data-пакетов до MTU-бюджета |
+| `DisableCookies(bool)` | `UWGDEVICE_A_DISABLE_COOKIES` (34): не отправлять cookie-ответы; rate limit инициаций сохраняется |
+| `ExtraPorts(u8)` | `UWGDEVICE_A_EXTRA_PORTS` (35): число дополнительных внешних UDP-портов, `0..=8`, по умолчанию `0` |
+| `Bbr(u8)` | `UWGDEVICE_A_BBR` (36): `0` off, `1` monitor, `2` on. Builders use `BbrMode` |
+| `Fec(u32)` | `UWGDEVICE_A_FEC` (37): `0` off, `1` adaptive, иначе `(K << 8) \| M` с `1 <= K <= 8`, `1 <= M <= 2`. Builders use `FecMode` |
+| `UnderlayMtu(u16)` | `UWGDEVICE_A_UNDERLAY_MTU` (40): MTU пути, `576..=65535`, по умолчанию `1500`; при FEC из него выводятся MTU интерфейса и бюджет шарда |
+| `FecStats(FecStats)` | `UWGDEVICE_A_FEC_STATS` (38, nested): `blocks_encoded`, `shards_sent`, `blocks_decoded`, `packets_recovered`, `decode_fail`, `dropped_bounds`, `dropped_disabled` |
+| `BbrStats(BbrStats)` | `UWGDEVICE_A_BBR_STATS` (39, nested): `mode`, `cwnd`, `inflight`, `pacing_rate`, `btl_bw`, `min_rtt_ns`, `round_lost`, `peers` |
+
+`FecStats`/`BbrStats` приходят только в ответе `GET_DEVICE` и не
+отправляются в `SET_DEVICE`. `ExtraPorts = 0` — дефолт: один сокет на
+воркера; включайте дополнительные порты только в сетях без
+port-restricted NAT.
 
 Peer attributes: `PersistentKeepalive(u16)` is the pre-3.0 wire format, while
 UmbraWG 3.0 sends a `u32` (packed `u16` range), parsed into
@@ -185,11 +198,12 @@ so use the preflight when you need a trustworthy result.
 | `arch` | `archlinux:latest` | `makepkg -f --noconfirm --nodeps` for `contrib/arch/rust-netlink-packet-umbrawg-git`, then checks `/usr/share/cargo/registry/netlink-packet-umbrawg-<version>/` (`Cargo.toml`, `src/*.rs`, `LICENSE`, `.cargo-checksum.json`) and compiles a probe crate **offline** from that directory through `[source.crates-io] replace-with` |
 | `crate` | `ubuntu-latest` | `cargo package --locked`, the `.crate` is uploaded as an artifact |
 | `publish dry-run` | `ubuntu-latest` | `cargo publish --dry-run --locked` — catches packaging mistakes without a registry token |
-| `релиз` | `ubuntu-latest` | on a `v*` tag: `.pkg.tar.zst`, `.crate` and `SHA256SUMS` in the GitHub Release |
+| `релиз` | `ubuntu-latest` | on a `netlink-v*` tag: `.pkg.tar.zst`, `.crate` and `SHA256SUMS` in the GitHub Release |
 
 Release mechanics:
 
-- the tag has to match `v<version>` from `Cargo.toml` (`v0.4.0` right now);
+- the tag has to match `netlink-v<version>` from `Cargo.toml` (`0.4.0` in
+  the manifest right now; the next release is `netlink-v0.4.1`);
   otherwise the `версия` job fails before anything is built;
 - `workflow_dispatch` takes an optional `version` input for a manual dry check;
 - no secrets are required: nothing is pushed to crates.io or the AUR. Publishing

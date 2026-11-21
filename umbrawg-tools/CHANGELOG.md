@@ -3,6 +3,33 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
+## [0.4.1] — 2026-11-21
+
+### Добавлено
+
+- `underlay-mtu` для userspace-демона: UAPI `underlay_mtu=`, `uwg set/show/
+  setconf/showconf`. `uwg-quick` сохраняет FEC-MTU (1368 kernel / 1352
+  Rust при underlay 1500) и не сбрасывает его при перезапуске.
+- `uwg show <if> bbr-stats|fec-stats` для обоих бэкендов; в UAPI демона —
+  секции `bbr_stats`/`fec_stats`, включая `fec_dropped_control`
+  (у модуля ядра поле равно 0).
+- `uwg show all` различает пустой runtime-dir и отсутствующий каталог,
+  завершаясь кодом 0 при отсутствии интерфейсов.
+
+### Изменено
+
+- Fixed-профили FEC ограничены `K=1..8`, `M=1..2` в конфиге, netlink- и
+  UAPI-клиенте; ограничение в 255 суммарных шардов убрано из клиентской
+  валидации.
+- `ExtraPorts` по умолчанию `0` (было ошибочно задокументировано как 4).
+- `WG_COLOR_MODE`/`WG_HIDE_KEYS` — основные имена, `UWG_*` — deprecated
+  fallback; при наличии обоих побеждает `WG_*`.
+- Клиентские тесты и man-страницы приведены к `8:2`, FEC-MTU 1368/1352 и
+  `underlay-mtu` для обоих бэкендов.
+- CI/стенд: профильная регрессия (`2:1`/`8:2`/`off`/`adaptive`), GSO-aware
+  `detect.py`, repo-relative пути стенда и удаление мёртвых скриптов;
+  `PLAN_ONLY` прогоняет все 8 кейсов без трафика.
+
 ## [0.4.0] — 2026-11-20
 
 ### Добавлено

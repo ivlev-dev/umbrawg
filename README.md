@@ -7,6 +7,7 @@
 [![Go](https://github.com/ivlev-dev/umbrawg/actions/workflows/go-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/go-ci.yml)
 
 Монорепозиторий UmbraWG — VPN-протокола на базе WireGuard с обфускацией трафика.
+Версии в манифестах — 0.4.0; 0.4.1 готовится (2026-11-21).
 
 ## Что внутри
 
@@ -22,6 +23,16 @@
 
 Компоненты сохраняют собственные `README`, `docs/`, `CHANGELOG` и системы
 сборки; общими являются только корневые правила и CI.
+
+### Значения по умолчанию (userspace-демон)
+
+| Параметр | Значение | Комментарий |
+|---|---|---|
+| `UMBRAWG_SOCKET_BUFFER` | 8 МиБ (`8388608`) | было 4 МиБ в 0.3.0; меньше — только если ядро урезает `rmem_max`/`wmem_max` |
+| `UMBRAWG_GSO_SEGMENTS` | 64 | было 32 в 0.3.0; диапазон 1..64 |
+| `ExtraPorts` | 0 | дополнительные UDP-порты выключены; на стенде включали 4 |
+| `bbr` / `fec` | `off` / `off` | при обоих `off` extension-заголовков нет |
+| `underlay-mtu` | 1500 | MTU пути; при FEC из него выводятся MTU TUN и лимит шарда |
 
 ## Сборка и проверка
 
@@ -61,7 +72,10 @@ cd go && go build ./... && go test ./...
 - CI запускается по `paths`-фильтрам: изменения в `bench/` или `docs/` не
   пересобирают модуль.
 - Упаковка (Arch, RPM, DEB, DKMS, `.crate`) запускается тегом компонента или
-  вручную через `workflow_dispatch`.
+  вручную через `workflow_dispatch`. Для готовящегося 0.4.1 это
+  `kernel-v0.4.1`, `netlink-v0.4.1`, `tools-v0.4.1`, `rs-v0.4.1` — каждый
+  workflow реагирует только на свой префикс; сначала версия поднимается в
+  манифесте компонента.
 
 Подробности миграции и правила монорепо — [`docs/MONOREPO.md`](docs/MONOREPO.md).
 
@@ -72,11 +86,14 @@ cd go && go build ./... && go test ./...
 - Состояние BBRv3/FEC, финальные замеры и ограничения —
   [`docs/BBR-FEC-STATUS.md`](docs/BBR-FEC-STATUS.md).
 - Производительность и отклонённые эксперименты —
-  `umbrawg-linux-kernel-module/docs/PERFORMANCE.md`.
-- Дизайн шардирования — `umbrawg-linux-kernel-module/docs/PEER-SHARDING.md`
-  (S1/S2) и `umbrawg-linux-kernel-module/docs/PEER-PATH-SHARDING.md` (S3).
-- Стенд и методика — `bench/README.md`; результаты замеров хранятся на
-  тестовом сервере, а не в репозитории.
+  [`umbrawg-linux-kernel-module/docs/PERFORMANCE.md`](umbrawg-linux-kernel-module/docs/PERFORMANCE.md).
+- Полная матрица TCP/UDP, data-plane e2e и сравнение реализаций —
+  [`umbrawg-tools/docs/RESULTS.md`](umbrawg-tools/docs/RESULTS.md).
+- Дизайн шардирования — [`umbrawg-linux-kernel-module/docs/PEER-SHARDING.md`](umbrawg-linux-kernel-module/docs/PEER-SHARDING.md)
+  (S1/S2) и [`umbrawg-linux-kernel-module/docs/PEER-PATH-SHARDING.md`](umbrawg-linux-kernel-module/docs/PEER-PATH-SHARDING.md) (S3).
+- Стенд и методика — [`bench/README.md`](bench/README.md). Сырые CSV и
+  pcap-дампы остаются на тестовом сервере; в репозитории — скрипты, конфиги
+  и небольшие эталонные CSV (`umbrawg-tools/bench/baselines/`).
 
 ## Лицензии
 

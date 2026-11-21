@@ -5,6 +5,8 @@
 > [!IMPORTANT]
 > UmbraWG requires Linux 7.0 or newer. Older kernels are not supported.
 
+Версия в `src/version.h` — `0.4.0`; версия `0.4.1` готовится (2026-11-21).
+
 The module uses only the in-kernel cryptography API (`chacha20poly1305`,
 `aes-gcm`, `blake2s`, `curve25519`, `chacha`) and builds against the kernel
 headers of the running kernel. AES-256-GCM uses Crypto API `gcm(aes)`
@@ -77,9 +79,9 @@ You may need to install kernel headers and/or build essentials packages before r
     Or on a capable system you may want to use DKMS for this:
     ```shell
     sudo make dkms-install
-    sudo dkms add -m umbrawg -v 1.0.0
-    sudo dkms build -m umbrawg -v 1.0.0
-    sudo dkms install -m umbrawg -v 0.3.0
+    sudo dkms add -m umbrawg -v 0.4.0
+    sudo dkms build -m umbrawg -v 0.4.0
+    sudo dkms install -m umbrawg -v 0.4.0
     ```
 
     > [!NOTE]
@@ -100,6 +102,7 @@ sources or the workflow itself change (`umbrawg-linux-kernel-module/**`,
 | `release` | `archlinux:latest` | installs `base-devel git clang llvm lld bc linux-headers kmod`, builds `src/umbrawg.ko`, checks `modinfo` (name and vermagic) and uploads the module with its `modinfo` output |
 | `debug` | `archlinux:latest` | builds `make -C src module-debug` with `V=1`, fails on any `warning:`, uploads the full build log |
 | `netlink parity` | `archlinux:latest` | builds `uwg` from `umbrawg-tools/` (в том же монорепо, без второго checkout) and runs `src/tests/netlink-parity.sh` if the module can be loaded |
+| `FEC profile change` | `archlinux:latest` | loads the built module and runs `src/tests/fec-profile-change.sh`: смена `2:1`/`8:2`/`off`/`adaptive` на ходу, rekey, отсутствие чёрной дыры и `-EINVAL` вне `8:2` |
 
 Requirements and behaviour:
 
@@ -129,30 +132,30 @@ Requirements and behaviour:
 
 ## Packages and releases
 
-`.github/workflows/packaging.yml` builds the DKMS packages:
+`.github/workflows/kernel-packaging.yml` builds the DKMS packages:
 
 | Job | Image | Contents |
 |---|---|---|
-| `версия` | `ubuntu-latest` | reads `UMBRAWG_VERSION` from `src/version.h` (`0.3.0`), derives the RPM-safe form (`0.3.0`) and requires the tag to be `v<version>` |
+| `версия` | `ubuntu-latest` | reads `UMBRAWG_VERSION` from `src/version.h` (`0.4.0`), derives the RPM-safe form (`0.4.0`) and requires the tag to be `kernel-v<version>` |
 | `arch` | `archlinux:latest` | `makepkg -f --noconfirm --nodeps` for `contrib/arch/umbrawg-dkms-git`, verifies `/usr/src/umbrawg-<pkgver>/` (`dkms.conf` with `PACKAGE_VERSION` and the `MAKE="make LLVM=1 …"` line, `version.h`, `uapi/umbrawg.h`, sources) and compiles the module from the **packaged** sources |
 | `rpm` | `fedora:latest` | builds the source tarball from the checkout, replaces `Version:` in `umbrawg-dkms.spec` with the RPM-safe version, runs `rpmbuild -ba` and checks `rpm -qlp` for the same file set |
 | `deb` | `debian:trixie` | `dpkg-buildpackage -b -us -uc` and checks the `/usr/src/umbrawg-*` payload of the `.deb` |
-| `релиз` | `ubuntu-latest` | on a `v*` tag: `.pkg.tar.zst`, `.rpm`, `.deb` and `SHA256SUMS` |
+| `релиз` | `ubuntu-latest` | on a `kernel-v*` tag: `.pkg.tar.zst`, `.rpm`, `.deb` and `SHA256SUMS` |
 
 Notes:
 
 - no secrets are needed; nothing is uploaded to the AUR or Copr, both stay
   manual;
-- the tag must be `v0.3.0` (no tag exists yet). `workflow_dispatch`
-  accepts an optional `version` input for a manual check;
+- the next tag will be `kernel-v0.4.1` (манифест поднимается вместе с ним);
+  `workflow_dispatch` accepts an optional `version` input for a manual check;
 - the `deb` job installs `dh-dkms` on top of `dkms`: on Debian trixie the
   `--with dkms` debhelper addon is a separate package, without it
   `dpkg-buildpackage` fails in `dh clean`;
-- `debian/changelog` и `umbrawg-dkms.spec` несут версию `0.3.0`
-  (`0.3.0` в RPM-поле `Version`), поэтому `.deb` называется
-  `umbrawg-dkms_0.3.0_all.deb` и ставит
-  `/usr/src/umbrawg-0.3.0`; `src/Makefile` и `src/dkms.conf`
-  по умолчанию содержат `0.3.0`, упаковщики переопределяют их;
+- `debian/changelog` и `umbrawg-dkms.spec` несут версию `0.4.0`
+  (`0.4.0` в RPM-поле `Version`), поэтому `.deb` называется
+  `umbrawg-dkms_0.4.0_all.deb` и ставит
+  `/usr/src/umbrawg-0.4.0`; `src/Makefile` и `src/dkms.conf`
+  по умолчанию содержат `0.4.0`, упаковщики переопределяют их;
 - the DKMS packages ship sources only, so building them on the target machine
   needs kernel headers (`linux-headers`, `kernel-devel`, `linux-headers-$(uname -r)`)
   and a toolchain; `dkms` is the only hard dependency;
@@ -179,6 +182,27 @@ Notes:
 - H1/H2/H3/H4 — must be unique among each other; recommended range is from 5 to 2147483647 inclusive
 
 `* Assuming a basic internet connection with an MTU value of 1280.`
+
+### BBRv3 и FEC
+
+По умолчанию обе функции выключены (`bbr=off`, `fec=off`), накладных
+расходов нет. Настраиваются через netlink и `uwg`:
+
+- `uwg set <if> bbr off|monitor|on` — `UWGDEVICE_A_BBR` (36, `u8`);
+- `uwg set <if> fec off|adaptive|K:M` — `UWGDEVICE_A_FEC` (37, `u32`,
+  `(K<<8)|M`); data-plane принимает только `K=1..8`, `M=1..2`, иначе
+  `-EINVAL`;
+- `uwg set <if> underlay-mtu N` — `UWGDEVICE_A_UNDERLAY_MTU` (40, `u16`,
+  576..65535, по умолчанию 1500). При включённом FEC MTU интерфейса
+  понижается до `underlay − 132 − S4` (1500 → 1368, при `S4=28` → 1340)
+  и восстанавливается при выключении FEC;
+- `uwg show <if> bbr-stats|fec-stats` — вложенные `UWGDEVICE_A_BBR_STATS`
+  (39) и `UWGDEVICE_A_FEC_STATS` (38).
+
+`bbr=on` нужно включать на обеих сторонах. Модуль не анонсирует BBR в
+CAPS и не проверяет `ACK` пира перед пейсингом, поэтому с пиром без
+extension фидбека не будет. Формат расширения — в
+[`../docs/PROTOCOL-EXT.md`](../docs/PROTOCOL-EXT.md).
 
 ## Performance
 
@@ -224,7 +248,8 @@ contract, per-flow limits, the pool lifecycle, risks and the test plan are in
 
 - One peer is limited by its own threaded NAPI (~2.2–2.4 Gbit/s TCP); several
   connections to the same peer do not add throughput. Throughput scales with
-  the number of peers: four peers reach 4.1–4.8 Gbit/s TCP.
+  the number of peers: four peers reach 4.65–4.99 Gbit/s TCP (final4,
+  obf0/obf1).
 - Threaded NAPI cannot be disabled: turning it off costs 11–13% TCP.
 - GSO aggregation is part of the send path: the module builds standard UDP GSO
   skbs (up to 23 KB) and the kernel segments them before they hit the wire, so

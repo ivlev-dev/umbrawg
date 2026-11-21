@@ -1,4 +1,17 @@
 # Changelog
+## [0.4.1] — 2026-11-21
+### Fixes
+ - FEC limits now match the kernel data path: `FecMode`/`fec_pack` accept only
+   `1 <= K <= 8` and `1 <= M <= 2`, so `K + M <= 255` is no longer the
+   contract. `FEC_MAX_SHARDS` is `10`; larger fixed profiles are rejected
+   instead of being emitted and refused by the kernel.
+ - `ExtraPorts` documentation now states the actual default `0`, not `4`.
+
+### Added
+ - `UnderlayMtu` (40), `FecStats` (38) and `BbrStats` (39) are covered by the
+   attribute table and UAPI-parity check; `FecStats`/`BbrStats` are emitted
+   only in `GET_DEVICE` replies.
+
 ## [0.4.0] — 2026-11-20
 ### Added
  - `UWGDEVICE_A_UNDERLAY_MTU` (40) device attribute.

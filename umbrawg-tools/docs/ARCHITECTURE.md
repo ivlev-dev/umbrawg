@@ -91,7 +91,7 @@ flowchart LR
 |---|---|---|
 | Байты на проводе | Noise IK + обфускация 3.1: заголовки H1–H4, junk S1–S4, Jc/Jmin/Jmax, I1–I5, padding контента (`ContentPaddingAddition`), trailers, header protection (ChaCha20) | Модуль: `src/junk.c`, `src/header_protection.c`, `src/send.c`, `src/receive.c`, `src/noise.c`. Демон: `crates/umbrawg-proto`, `crates/umbrawg-noise`, `DESIGN.md` (раздел «Обфускация 3.1»). Эталон поведения: `legacy-c/` (tools) и `legacy/go` (rust, в истории git) |
 | Netlink-атрибуты | Generic netlink, команды `GetDevice=0`/`SetDevice=1`, атрибуты `UWGDEVICE_A_*`/`UWGPEER_A_*`/`UWGALLOWEDIP_A_*`, u32/u64 счётчики, packed ranges (например `UWGPEER_A_PERSISTENT_KEEPALIVE_INTERVAL`: u16 в genl v2, u32 с упакованным диапазоном в модуле 3.x) | `netlink-packet-umbrawg/src/constants.rs`, `src/attribute.rs`, `src/range.rs`, `src/message.rs`; паритет с заголовком: `scripts/check-uapi-parity.sh` и `src/uapi/umbrawg.h` (модуль) |
-| UAPI текстовый | Unix-сокет `/var/run/umbrawg/<iface>.sock`, команды `get=1`/`set=1`, формат ответов совместим с Go-версией | Демон: `crates/umbrawg-uapi`. Tools: `crates/umbrawg-ctl`. Права/путь: `UWG_RUNTIME_DIR` |
+| UAPI текстовый | Unix-сокет `/var/run/umbrawg/<iface>.sock`, команды `get=1`/`set=1`, формат ответов совместим с Go-версией; дополнительно `underlay_mtu`, `bbr=`, `fec=`, секции `bbr_stats`/`fec_stats` | Демон: `crates/umbrawg-uapi`. Tools: `crates/umbrawg-ctl`. Права/путь: `UWG_RUNTIME_DIR` |
 | Конфиг INI | `/etc/umbrawg/<iface>.conf`, ключи UmbraWG 3.1 (`H1..H4`, `S1..S4`, `Jc/Jmin/Jmax`, `I1..I5`, `HeaderProtectionKey`, …) | Tools: `crates/umbrawg-config`, `DESIGN.md` (tools). Пример профиля: `bench/obf-params.conf` |
 
 Инварианты совместимости (из `rust-parallel-rx/DESIGN.md` и `tools/DESIGN.md`):

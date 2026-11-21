@@ -1,8 +1,9 @@
 # umbrawg-tools
 
-![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
+![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.4.1-blue.svg)
 
 Rust-утилиты для настройки UmbraWG: `uwg` и `uwg-quick`.
+Версия 0.4.1 готовится; в `Cargo.toml` пока `0.4.0`.
 
 Работают с обоими бэкендами:
 
@@ -56,7 +57,8 @@ checkout, поэтому path-зависимость `../netlink-packet-umbrawg`
 Кроме fmt/clippy/test в `tools-ci.yml` есть:
 
 - `deny` — `cargo deny check --all-features` (политика зависимостей, `deny.toml`);
-- `bench` — `bash -n` стенда, тесты хелперов (62) и тесты отчёта (17 из 47);
+- `bench` — `bash -n` стенда, тесты хелперов (72) и тесты отчёта/сравнения
+  прогонов;
 - `e2e-daemon` — сборка `uwg` и демона `umbrawg`, прогон
   `scripts/test-daemon-e2e.sh` (автоскип без бинарей/TUN);
 - `packaging` — `scripts/check-packaging.sh`: версии `Cargo.toml` /
@@ -141,7 +143,7 @@ lintian dist/umbrawg-tools_*.deb
 
 | Job | Образ | Шаги |
 |---|---|---|
-| `meta` | `ubuntu-latest` | версия из `Cargo.toml`, сверка с тегом `v*` или с input `version` |
+| `meta` | `ubuntu-latest` | версия из `Cargo.toml`, сверка с тегом `tools-v*` или с input `version` |
 | `deb` | `debian:trixie` | `build-essential cargo rustc dpkg-dev debhelper`, затем `scripts/package/build-deb.sh` |
 | `rpm` | `fedora:latest` | `rpm-build cargo rust gcc make systemd-rpm-macros`, затем `scripts/package/build-rpm.sh` |
 | `arch` | `archlinux:latest` | `base-devel git rust cargo`, затем `makepkg -f --noconfirm --nodeps` |
@@ -149,12 +151,12 @@ lintian dist/umbrawg-tools_*.deb
 
 Триггеры:
 
-- push тега `v*` — сборка и публикация в GitHub Release;
+- push тега `tools-v*` — сборка и публикация в GitHub Release;
 - `workflow_dispatch` — только артефакты, без релиза; необязательный input
-  `version` (без префикса `v`) сверяется с `Cargo.toml`:
+  `version` (без префикса `tools-v`) сверяется с `Cargo.toml`:
 
   ```sh
-  gh workflow run packaging.yml -f version=0.3.0
+  gh workflow run tools-packaging.yml -f version=X.Y.Z
   ```
 
 Каждый build-job выкладывает артефакт со сроком хранения 14 дней:
@@ -179,7 +181,7 @@ lintian dist/umbrawg-tools_*.deb
   из lock или обновите `Cargo.lock`.
 - Arch `-git` PKGBUILD тянет исходники сам: `master` tools и `main` netlink из
   GitHub, локальный checkout для него не используется. Пакет поэтому
-  VCS-снимок (`pkgver` вида `0.3.0.r<N>.g<хэш>`), а job дополнительно проверяет,
+  VCS-снимок (`pkgver` вида `0.4.0.r<N>.g<хэш>`), а job дополнительно проверяет,
   что версия в имени файла начинается с версии из `Cargo.toml`: тег должен
   указывать на HEAD той ветки, которую клонирует PKGBUILD.
 - Стабильный Arch-пакет собирается только если в
@@ -217,16 +219,18 @@ lintian dist/umbrawg-tools_*.deb
 | `umbrawg-daemon`, `umbrawg-daemon-git` | `umbrawg-rs` |
 | `rust-netlink-packet-umbrawg`, `rust-netlink-packet-umbrawg-git` | `netlink-packet-umbrawg` |
 
-Корни ищутся в `/root/umbrawg/<repo>` и рядом с этим репозиторием. Явно они
-задаются переменными `UMBRAWG_TOOLS_DIR`, `UMBRAWG_MODULE_DIR`,
-`UMBRAWG_RUST_DIR`, `UMBRAWG_NETLINK_DIR` или флагом `--source-root`
-(можно повторять; пакет ищется в первом корне, где есть
-`contrib/arch/<пакет>`).
+Корни ищутся рядом с checkout'ом монорепозитория (`../umbrawg-...`) и в
+каталоге, где лежат `umbrawg-tools`, `umbrawg-linux-kernel-module`,
+`umbrawg-rs` и `netlink-packet-umbrawg`. Явно они задаются переменными
+`UMBRAWG_TOOLS_DIR`, `UMBRAWG_MODULE_DIR`, `UMBRAWG_RUST_DIR`,
+`UMBRAWG_NETLINK_DIR` или флагом `--source-root` (можно повторять; пакет
+ищется в первом корне, где есть `contrib/arch/<пакет>`).
 
 ### Подготовка
 
-1. Поставить теги `v*`: стабильный `umbrawg-tools` требует тега в tools и в
-   netlink. `-git`-пакеты собираются с веток `master`/`main`.
+1. Поставить компонентные теги: стабильный `umbrawg-tools` требует тега
+   `tools-v*` и `netlink-v*`. `-git`-пакеты собираются с веток
+   `master`/`main`.
 2. Для стабильного пакета обновить `pkgver`, `pkgrel` и версии источников,
    затем пересчитать суммы: `updpkgsums` (`pacman-contrib`). Заглушка
    `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` остаётся только до первого тега.
@@ -308,6 +312,10 @@ uwg setconf uwg0 /etc/umbrawg/uwg0.conf
 uwg addconf uwg0 /etc/umbrawg/uwg0.conf
 uwg syncconf uwg0 <(uwg-quick strip uwg0)
 uwg set uwg0 listen-port 51820
+uwg set uwg0 underlay-mtu 9000
+uwg show uwg0 underlay-mtu
+uwg show uwg0 bbr-stats
+uwg show uwg0 fec-stats
 uwg-quick up uwg0
 uwg-quick down uwg0
 uwg-quick strip uwg0
@@ -325,6 +333,8 @@ Usage и диагностика печатаются в stderr, как в legacy
 - `UWG_RUNTIME_DIR` — каталог UAPI-сокетов (по умолчанию `/var/run/umbrawg`);
 - `UWG_QUICK_USERSPACE_IMPLEMENTATION` — демон для `uwg-quick up` (по умолчанию `umbrawg`);
 - `WG_COLOR_MODE` (`always`/`never`), `WG_HIDE_KEYS` — оформление вывода.
+  Legacy-имена `UWG_COLOR_MODE`/`UWG_HIDE_KEYS` принимаются как deprecated
+  fallback; если заданы оба, побеждает `WG_*`.
 
 ## Параметры обфускации
 
@@ -366,16 +376,17 @@ Markdown. Подробности и методика — [bench/README.md](bench
 ```sh
 SMOKE=1 bash bench/bench.sh                        # быстрый прогон (нужен root)
 PLAN_ONLY=1 FORCE=1 bash bench/bench.sh             # план без трафика, без root
-bash bench/tests/test-bench-lib.sh                  # 62 проверки хелперов
-python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отчёта и сравнения прогонов
-python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнение двух прогонов, регрессииscripts/check-packaging.sh                          # man/systemd/completions/версии
+bash bench/tests/test-bench-lib.sh                  # 72 проверки хелперов
+python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отчёта, сравнения и detect
+python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнение двух прогонов, регрессии
+scripts/check-packaging.sh                          # man/systemd/completions/версии
 ```
 
 Пути не зашиты в скрипт: `BENCH_DIR` — каталог `bench.sh`, `REPO_ROOT` — этот
 репозиторий (бинарник `target/release/uwg`), `WORKSPACE_ROOT` — каталог
 соседних репозиториев. Переопределяются `RUSTDIR`, `MODDIR` (он же
 `MODULE_DIR`), `UWG`, `DAEMON`, `GO_BASELINE`, `OBF`, `RESULT`, `REPORT_PY`.
-Если стенд развёрнут отдельно (например, `/root/umbrawg/bench`), достаточно
+Если стенд развёрнут отдельно (вне checkout'а монорепозитория), достаточно
 задать эти переменные — см. таблицу в [bench/README.md](bench/README.md).
 
 Матрица: `IMPL_LIST`, `MODE_LIST`, `PROTO_LIST`, `CONNS_LIST`, `LOSS_LIST`,
@@ -412,6 +423,6 @@ python3 bench/bench-compare.py baseline.csv candidate.csv     # сравнени
 
 ## Результаты замеров
 
-Итоговые результаты финального стенда (final3, 2026-11-17): условия, TCP- и
-UDP-матрицы, сравнение с final2, multi-peer ёмкость, CPU-вердикты, data-plane
+Итоговые результаты финального стенда (final5, 2026-11-17): условия, TCP- и
+UDP-матрицы, сравнение с final4, multi-peer ёмкость, CPU-вердикты, data-plane
 e2e и выводы — в [docs/RESULTS.md](docs/RESULTS.md).

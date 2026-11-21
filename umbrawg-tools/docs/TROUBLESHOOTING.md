@@ -325,13 +325,16 @@ TUN MTU 1420 и `S4=28` равна `28 + 16 + 1420 + 16 = 1480`, что боль
 1. Посчитать безопасный TUN MTU по формуле стенда:
 
    ```text
-   TUN_MTU <= UNDERLAY_MTU - (OVERHEAD_BASE + S4),  OVERHEAD_BASE = 80
+   без FEC:  TUN_MTU <= UNDERLAY_MTU - (OVERHEAD_BASE + S4),  OVERHEAD_BASE = 80
+   с FEC:    ядро  — underlay - 132 - S4
+             Rust  — underlay - 148 - S4
    ```
 
-   Для underlay 1500 и `S4=28` предел — **1392**; в `bench/README.md`
-   рекомендуется консервативное значение **1380**. Альтернатива из
-   `docs/RESULTS.md`: underlay не меньше **1508**, тогда TUN 1420 помещается.
-   Для underlay 9000 TUN 1420 безопасен.
+   Для underlay 1500 и `S4=28` без FEC предел — **1392**; в `bench/README.md`
+   рекомендуется консервативное значение **1380**. С включённым FEC MTU
+   выставляется автоматически (1340 для ядра, 1324 для Rust при `S4=28`).
+   Альтернатива из `docs/RESULTS.md`: underlay не меньше **1508**, тогда
+   TUN 1420 помещается. Для underlay 9000 TUN 1420 безопасен.
 
 2. Задать MTU явно. `uwg-quick` при отсутствии `MTU` считает
    `MTU = MTU маршрута до endpoint − 80`; при underlay 1500 это 1420, то есть
@@ -455,13 +458,13 @@ ip -s link show dev uwg0
 
 ```text
 SO_RCVBUF was clamped by the kernel: effective 212992 bytes,
-requested 4194304 bytes; raise net.core.rmem_max or lower UMBRAWG_SOCKET_BUFFER
+requested 8388608 bytes; raise net.core.rmem_max or lower UMBRAWG_SOCKET_BUFFER
 ```
 
 Под нагрузкой `obf=1` растут потери, хотя CPU и туннель не перегружены.
 
 **Причина.** Демон запрашивает `SO_RCVBUF`/`SO_SNDBUF` размером
-`UMBRAWG_SOCKET_BUFFER` (по умолчанию 4 МиБ), но ядро молча урезает запрос до
+`UMBRAWG_SOCKET_BUFFER` (по умолчанию 8 МиБ), но ядро молча урезает запрос до
 `net.core.rmem_max`/`wmem_max` (часто 212992). Маленький приёмный буфер теряет
 всплески до обработки.
 
@@ -767,10 +770,10 @@ makepkg -si
 ```
 
 До появления тегов используйте `umbrawg-tools-git`; для него `updpkgsums` не
-нужен (суммы `SKIP`). Стабильный пакет собирается только после тегов: его
-`source` — архивы `v0.2.0` tools и `v0.3.0` netlink. Аналогично для
-`umbrawg-dkms` и `umbrawg-daemon`: стабильные пакеты ждут тегов и
-`updpkgsums`, `-git` работает без них.
+нужен (суммы `SKIP`). Стабильный пакет собирается только после компонентных
+тегов: его `source` — архивы `tools-v0.4.0` tools и `netlink-v0.4.0`
+netlink. Аналогично для `umbrawg-dkms` и `umbrawg-daemon`: стабильные пакеты
+ждут тегов и `updpkgsums`, `-git` работает без них.
 
 **Как проверить.** `makepkg -si` завершился, `pacman -Ql umbrawg-tools-git`
 показывает `/usr/bin/uwg`, `uwg --version` запускается из установленного

@@ -1,9 +1,10 @@
 # UmbraWG userspace (Rust)
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.4.1-blue.svg)
 
 Userspace daemon for the UmbraWG protocol (WireGuard-compatible Noise IK with
 UmbraWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
+Версия 0.4.1 готовится; в `Cargo.toml` пока `0.4.0`.
 
 ## Workspace
 
@@ -107,17 +108,17 @@ duplicate the `tar.gz` archives from `rs-ci.yml`:
 | Job | Image | Contents |
 |---|---|---|
 | `arch` | `archlinux:latest` | `makepkg -f --noconfirm --nodeps` for `contrib/arch/umbrawg-daemon-git` (runs the PKGBUILD `check()`), then verifies the package: `/usr/bin/umbrawg`, `usr/lib/systemd/system/umbrawg@.service`, `usr/lib/tmpfiles.d/umbrawg.conf` (`d /run/umbrawg 0700 root root -`), `/etc/umbrawg` mode `0700`, and `umbrawg --version` executed straight from the unpacked tree |
-| `релиз` | `ubuntu-latest` | on a `v*` tag: `.pkg.tar.zst` and `SHA256SUMS.pkg` in the GitHub Release |
+| `релиз` | `ubuntu-latest` | on a `rs-v*` tag: `.pkg.tar.zst` and `SHA256SUMS.pkg` in the GitHub Release |
 
 Release mechanics:
 
-- the tag has to match `v<version>` from `Cargo.toml` (`v0.3.0` right now);
+- the tag has to match `rs-<version>` from `Cargo.toml` (`rs-v0.4.1` for
+  the upcoming release; the manifests currently say `0.4.0`);
   `workflow_dispatch` takes an optional `version` input for a manual check;
 - no secrets are needed — the AUR upload stays manual;
 - the release job uses `concurrency: release-<ref>` with `cancel-in-progress:
-  false`. The `GitHub Release` job in `rs-ci.yml` still has no concurrency group,
-  so a single tag can start both release steps at once; adding the same group
-  there is tracked in `TODO.md`;
+  false`; `rs-ci.yml` uses its own `rs-ci-<ref>` group, so a build and a
+  release do not overwrite each other's assets;
 - checksum files are kept apart: `rs-ci.yml` publishes `SHA256SUMS` for the
   `tar.gz` archives, `rs-packaging.yml` publishes `SHA256SUMS.pkg` for the Arch
   package, so neither step overwrites the other's asset;
@@ -158,7 +159,7 @@ same CLI and configuration format).
 > однопоточного rust на 6.2–16.2% на одном пире в 5 из 8 ячеек матрицы final5
 > (в 3c c=10 он быстрее на +8.0%/+9.8%, в 3c c=1 obf=1 — на +2.4%) и на
 > 11.2%/11.7% в multi-peer (obf=0/1); см. раздел «Производительность» и
-> [tools/docs/RESULTS.md](tools/docs/RESULTS.md). Цели +30%/+60% не достигнуты,
+> [../umbrawg-tools/docs/RESULTS.md](../umbrawg-tools/docs/RESULTS.md). Цели +30%/+60% не достигнуты,
 > но 3c c=10 — уже аргумент включать его на многоядерных хабах.
 > **Не рекомендуется включать по умолчанию** (`default-on`); режим остаётся
 > opt-in для multi-peer сценариев и замеров.
@@ -293,7 +294,7 @@ cargo build --release --example initiation_flood -p umbrawg-device
 ## Производительность
 
 Финальные замеры (final5, сервер 6 vCPU, MTU 9000, 3 повтора) — полная матрица
-и методика в [tools/docs/RESULTS.md](tools/docs/RESULTS.md). К final4 фиксы
+и методика в [../umbrawg-tools/docs/RESULTS.md](../umbrawg-tools/docs/RESULTS.md). К final4 фиксы
 per-byte Poly1305, буферов сокетов и флуд-детектора дали +18.4…+27.5% на всех
 TCP-ячейках и +30…+40% в multi-peer; GSO-фикс обфускации (final3→final4) до
 этого ускорил `obf=1` в 1.8–2.8 раза.
@@ -365,8 +366,9 @@ IP-фрагментации: 27.9 млн фрагментов за 24 прого
 числом syscall и ценой потери. Замеры на underlay 9000 (S4=60, obf=1, 3 повтора)
 не показали систематического выигрыша 32/64 сегментов относительно прежних 44
 (разница в пределах шума ±5%), а 8 сегментов теряли 8% на 3c c=1. По умолчанию
-32: паритет со старым поведением при меньшем худшем случае потери одной
-супер-датаграммы; 16 (прежний кандидат) на 0.5–4% ниже 44 в 3 из 4 ячеек.
+64: на jumbo-underlay это меньше syscall на гигабит при том же худшем случае
+потери одной супер-датаграммы (64 сегмента — это один `sendmsg`, а не 64);
+16 (прежний кандидат) на 0.5–4% ниже 44 в 3 из 4 ячеек.
 
 Параллельный приём (`UMBRAWG_PARALLEL_RX=1`) — экспериментальный: на одном пире
 он медленнее обычного rust на 6.2–16.2% в 5 из 8 ячеек матрицы final5
@@ -374,7 +376,7 @@ IP-фрагментации: 27.9 млн фрагментов за 24 прого
 11.2%/11.7% в multi-peer; цели +30%/+60% не достигнуты. Рекомендуется
 оставлять выключенным по умолчанию; включать для многоядерных хабов (3c c=10)
 и замеров. Подробнее — раздел «Параллельный приём» и
-[tools/docs/RESULTS.md](tools/docs/RESULTS.md).
+[../umbrawg-tools/docs/RESULTS.md](../umbrawg-tools/docs/RESULTS.md).
 
 Ядро (`kernel-umbrawg`) на c=1 достигло +33.5% (1c obf=0), +33.9% (1c obf=1),
 +32.2%/+31.6% (3c) к `kernel-amneziawg`.
@@ -491,7 +493,7 @@ IPv6 не обслуживаются. TUN и обработка пакетов �
 ### Буферы UDP-сокета
 
 Каждый сокет запрашивает `SO_RCVBUF` и `SO_SNDBUF` размером
-`UMBRAWG_SOCKET_BUFFER` (по умолчанию 4 МиБ, допустимо 212 КиБ..64 МиБ,
+`UMBRAWG_SOCKET_BUFFER` (по умолчанию 8 МиБ, допустимо 212 КиБ..64 МиБ,
 значение в байтах). Большой буфер нужен, чтобы входящий всплеск трафика не
 терялся до обработки: с дефолтными `net.core.rmem_max=212992` ядро молча
 урезает запрос примерно до 208 КиБ (212 992 Б), и `obf=1` деградирует под
@@ -505,7 +507,7 @@ IPv6 не обслуживаются. TUN и обработка пакетов �
 
 ```text
 SO_RCVBUF was clamped by the kernel: effective 212992 bytes,
-requested 4194304 bytes; raise net.core.rmem_max or lower UMBRAWG_SOCKET_BUFFER
+requested 8388608 bytes; raise net.core.rmem_max or lower UMBRAWG_SOCKET_BUFFER
 ```
 
 Поднять лимит на хосте (systemd-sysctl или `sysctl.conf`):
@@ -539,10 +541,11 @@ sysctl -w net.core.rmem_max=16777216 net.core.wmem_max=16777216
 по CPU через RPS. Параллельный приём остаётся opt-in для профилей, где
 крипто-нагрузка важнее сетевой.
 
-Дополнительные порты (4 по умолчанию) открываются на каждого воркера,
-поэтому память растёт как `воркеры × (порты + 1) × 2 × буфер`. При
-3 воркерах, 5 портах и буфере 8 МиБ это заметный объём (ядро учитывает
-`SO_RCVBUF` и `SO_SNDBUF` с двойным запасом); `ExtraPorts = 0` возвращает
+Дополнительные порты (на стенде включали 4; по умолчанию `ExtraPorts = 0`)
+открываются на каждого воркера, поэтому память растёт как
+`воркеры × (порты + 1) × 2 × буфер`. При 3 воркерах, 4 дополнительных портах
+(5 сокетов на воркера) и буфере 8 МиБ это заметный объём (ядро учитывает
+`SO_RCVBUF` и `SO_SNDBUF` с двойным запасом); `ExtraPorts = 0` оставляет
 один сокет на воркера.
 
 ## UAPI: `extra_ports`
@@ -558,6 +561,32 @@ UDP-портов устройства (0…8, по умолчанию 0 — вы
 ответы уходят с другого source-порта, и такой NAT их отбрасывает. В
 обычном режиме каждый воркер открывает свой набор, поэтому сокетов
 `воркеры × (N + 1)`; в `UMBRAWG_PARALLEL_RX=1` набор один на устройство.
+
+## UAPI: `underlay_mtu`, `bbr`, `fec` и статистика
+
+Демон принимает в `set=1` и возвращает в `get=1`:
+
+- `underlay_mtu=576..65535` — MTU пути между пирами. Меняется на ходу:
+  пересчитываются TUN MTU, лимит FEC-шарда и GSO-лимиты сокетов; при
+  выключении FEC MTU возвращается к базовой величине. Изменение через UAPI
+  переживает перезапуск воркера и не требует перезапуска демона.
+- `bbr=off|monitor|on` и `fec=off|adaptive|K:M` с теми же пределами, что у
+  ядра: `K=1..8`, `M=1..2`; вне диапазона — ошибка UAPI, а не молчаливый
+  clamp.
+- `bbr_stats=1` — секция `bbr_mode`, `bbr_cwnd`, `bbr_inflight`,
+  `bbr_pacing_rate`, `bbr_btl_bw`, `bbr_min_rtt_ns`, `bbr_round_lost`,
+  `bbr_peers`.
+- `fec_stats=1` — секция `fec_blocks_encoded`, `fec_shards_sent`,
+  `fec_blocks_decoded`, `fec_packets_recovered`, `fec_decode_fail`,
+  `fec_dropped_bounds`, `fec_dropped_disabled`, `fec_dropped_control`.
+  `fec_dropped_control` считает control-кадры, отброшенные при переполнении
+  очереди; ядро отдаёт для него `0` (у него другой путь очереди).
+
+`uwg show <if> bbr-stats|fec-stats`, `uwg show <if> underlay-mtu` и
+`uwg set <if> underlay-mtu N` работают и с демоном, и с модулем ядра;
+`uwg showconf` сохраняет FEC-MTU (1368 для ядра, 1352 для Rust при
+underlay 1500 без `S4`), чтобы `uwg-quick` не сбрасывал его при
+перезапуске.
 
 ## UAPI: `advanced_security`
 

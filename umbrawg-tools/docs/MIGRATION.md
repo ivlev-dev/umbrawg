@@ -175,14 +175,17 @@ sudo systemctl enable --now 'uwg-quick@uwg0' 2>/dev/null || true
   clang (CachyOS, часть Fedora), обязателен `make LLVM=1`. См.
   [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md), §3.1.
 - **MTU/S4/underlay.** Junk/padding/trailers увеличивают датаграмму:
-  `TUN_MTU ≤ UNDERLAY_MTU - (80 + S4)` (`OVERHEAD_BASE = 80`).
-  `uwg-quick` при отсутствии `MTU` считает `MTU = MTU маршрута − 80` и не
-  учитывает `S4`; для профиля с `S4=28` задайте `MTU = 1380` (или ниже) в
-  `[Interface]`. См. [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md), §2.1.
+  `TUN_MTU ≤ UNDERLAY_MTU - (80 + S4)` (`OVERHEAD_BASE = 80`) — это
+  формула без FEC. С включённым FEC бюджет другой: ядро поднимает MTU до
+  `underlay − 132 − S4` (1500 и `S4=28` → 1340), Rust — до
+  `underlay − 148 − S4` (1500 и `S4=28` → 1324); см.
+  [`../../docs/PROTOCOL-EXT.md`](../../docs/PROTOCOL-EXT.md), §4.
+  `uwg-quick` при отсутствии `MTU` не учитывает `S4`; для профиля с
+  `S4=28` задайте `MTU` явно. См. [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md), §2.1.
 - **rmem_max / UMBRAWG_SOCKET_BUFFER.** Демон запрашивает буфер сокета
-  `UMBRAWG_SOCKET_BUFFER` (по умолчанию 4 МиБ); ядро урезает до
-  `net.core.rmem_max`/`wmem_max`. Поднимите лимиты или уменьшите переменную.
-  См. [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md), §2.3.
+  `UMBRAWG_SOCKET_BUFFER` (по умолчанию 8 МиБ, GSO — 64 сегмента); ядро
+  урезает до `net.core.rmem_max`/`wmem_max`. Поднимите лимиты или уменьшите
+  переменную. См. [docs/TROUBLESHOOTING.md](TROUBLESHOOTING.md), §2.3.
 - **AdvancedSecurity в userspace — informational.** Реализован только в модуле
   ядра; на демоне флаг хранится и отражается, но не применяется.
 - **Разные имена unit'ов systemd.** В tools поставляются `uwg-quick@.service`,

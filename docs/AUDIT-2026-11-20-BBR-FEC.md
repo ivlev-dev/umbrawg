@@ -39,7 +39,7 @@ Wire-формат CAPS/ACK/FEC_SHARD совпадает байт-в-байт м�
    oops на ARM/MIPS без unaligned-fixup.
 8. **Секреты в репозитории.** `bench/matrix/conf-*`, `bench/.t/*.conf`,
    `bench/obf-params.conf`: приватные ключи и `HeaderProtectionKey`.
-9. **Netlink принимает неподдерживаемые режимы.** `k+m <= 255` в netlink,
+9. **Netlink принимает неподдерживаемые режимы.** до 255 суммарных шардов в netlink,
    data-plane умеет `k<=8, m<=2`: `uwg set fec 10:2` «успешно» применяется и
    молча не работает.
 10. **BBR без подтверждения ACK.** Ядро включает пейсинг по локальному режиму,
