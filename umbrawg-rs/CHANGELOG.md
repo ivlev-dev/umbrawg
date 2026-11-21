@@ -7,6 +7,12 @@
 
 ### FEC
 
+- FEC RTT: partial deadline **100–300 мкс** плюс solo flush — пакет,
+  открывший блок после паузы ≥2 мс, уходит сразу. RTT `2:1` снизился с
+  3.7–3.9 до **0.343 мс**; без FEC — 0.327, mixed kernel↔Rust — 0.727 мс.
+- RX-таймаут блока — скользящий **2 мс** от последнего шарда с потолком
+  `first_seen + 20 мс`; библиотечный `umbrawg-fec` default остаётся 5 мс.
+  Скользящий дедлайн не режет растянутый `8:2`-блок на медленном канале.
 - Adaptive: settle-окно 1 с, EWMA засевается первым sample, reorder не
   армит parity; окно сбрасывается по keypair.
 - GSO-группа FEC-шардов ограничена `m`: `2:1` не агрегируется, `8:2` —
@@ -62,6 +68,8 @@
 - `extra_ports` default 0, `dropped_control` в статистике FEC.
 - `UMBRAWG_SOCKET_BUFFER` default 8 МиБ, `UMBRAWG_GSO_SEGMENTS` default 64.
 - Интеграционные тесты CAPS/adaptive/BBR/rekey и e2e data-plane.
+- `cargo test --workspace` — 764 passed; `cargo clippy --workspace
+  --all-targets -- -D warnings` и `cargo fmt --check` — чисто.
 
 ## [0.4.0] — 2026-11-20
 
