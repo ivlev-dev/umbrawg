@@ -11,6 +11,9 @@
  - `UnderlayMtu` (40), `FecStats` (38) and `BbrStats` (39) are covered by the
    attribute table and UAPI-parity check; `FecStats`/`BbrStats` are emitted
    only in `GET_DEVICE` replies.
+ - `BbrStats::peers_no_ack` and `UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK` (9):
+   peers that do not advertise ACK in CAPS; BBR does not shape them and their
+   state is excluded from the BBR aggregates.
 
 ## [0.4.0] — 2026-11-20
 ### Added

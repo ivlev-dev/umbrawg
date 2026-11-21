@@ -577,12 +577,21 @@ UDP-портов устройства (0…8, по умолчанию 0 — вы
   clamp.
 - `bbr_stats=1` — секция `bbr_mode`, `bbr_cwnd`, `bbr_inflight`,
   `bbr_pacing_rate`, `bbr_btl_bw`, `bbr_min_rtt_ns`, `bbr_round_lost`,
-  `bbr_peers`.
+  `bbr_peers`. Поля `peers_no_ack` в UAPI демона пока нет: оно есть в
+  kernel-netlink (`bbr_stats`, вложенный атрибут 9) и относится к пирам,
+  которые не подтвердили `ACK` в CAPS.
 - `fec_stats=1` — секция `fec_blocks_encoded`, `fec_shards_sent`,
   `fec_blocks_decoded`, `fec_packets_recovered`, `fec_decode_fail`,
   `fec_dropped_bounds`, `fec_dropped_disabled`, `fec_dropped_control`.
   `fec_dropped_control` считает control-кадры, отброшенные при переполнении
   очереди; ядро отдаёт для него `0` (у него другой путь очереди).
+
+Partial FEC parity: при включённом FEC демон анонсирует `FEC_PARTIAL`
+(бит 4 вместе с `FEC`) и для неполного блока шлёт `k' = n`, `m' = m`.
+Пир без флага получает legacy `m' = 0`; полные блоки не меняются.
+Sparse ping с `FEC_PARTIAL` защищается, но платит `2×`/`3×` шардов для
+`k' = 1` при `2:1`/`8:2`. BBR-пейсинг и `cwnd` в демоне включаются только
+при `ACK` в CAPS пира — так же, как в ядре.
 
 `uwg show <if> bbr-stats|fec-stats`, `uwg show <if> underlay-mtu` и
 `uwg set <if> underlay-mtu N` работают и с демоном, и с модулем ядра;

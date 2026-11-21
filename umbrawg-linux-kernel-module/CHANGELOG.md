@@ -11,6 +11,12 @@
   агрегируются, при `8:2` — не более двух в группе. Супер-датаграмма
   теряется целиком, поэтому группа больше `m` сделала бы блок
   невосстановимым.
+- `FEC_PARTIAL` (CAPS бит 4): partial-блок при поддержке пира кодируется
+  `k' = n`, `m' = m` (data + parity), без флага остаётся legacy `m' = 0`.
+  RX принимает `k' <= k`, `m' <= m`, `k' + m' <= k + m`; полные блоки не
+  меняются. Sparse ping 10 pps + 2% потерь: 3–6% → 0–0.5%.
+  Модульный параметр `fec_partial=0` выключает флаг для проверки
+  совместимости.
 - Adaptive: окно оценки ждёт 1 секунду оседания, поэтому reorder не
   армит parity; оценщик сбрасывается по keypair (counter начинается с нуля
   на rekey).
@@ -38,20 +44,26 @@
 
 ### BBR
 
+- BBR-пейсинг, учёт `inflight` и `cwnd`-гейт включаются только при `ACK`
+  в CAPS пира; без ACK трафик не шейпится, `inflight`/pacing не растут.
+  При потере ACK накопленный `inflight` сбрасывается.
 - `cwnd` работает как ACK-clocked гейт после loss-cut
   (`full_bw_reached && inflight_hi < cwnd`); floor `pacing_rate × 5 мс`
   (потолок 4 MiB) и аварийный выход через 5 мс без ACK.
 - Watermark и `on_drop` учитываются как потеря/возврат байтов; ring
   привязан к keypair, ACK чужого keypair игнорируется.
 - Loss-порог — 20% раунда; потери ниже порога не режут окно.
+- `bbr_stats` получил `peers_no_ack` (вложенный атрибут 9): пиры без ACK
+  в CAPS; BBR к ним не применяется, в агрегаты они не входят.
 
 ### UAPI и тесты
 
 - `UWGDEVICE_A_FEC_STATS`/`BBR_STATS` в GET_DEVICE, `UWGDEVICE_A_UNDERLAY_MTU`
   (40), `UWGDEVICE_A_FEC` с проверкой `K=1..8/M=1..2`.
-- Init-селфтесты FEC/EXT/BBR/adaptive/MTU (1..36) проверяют раскладку
-  заголовков, бюджет `1340` при `S4=28`, floor `min(576, base)`,
-  квантование, пейсинг/ретрай CAPS и отзыв.
+- Init-селфтесты FEC/EXT/BBR/adaptive/MTU проверяют раскладку заголовков,
+  бюджет `1340` при `S4=28`, floor `min(576, base)`, квантование,
+  пейсинг/ретрай CAPS, отзыв и границы partial-блока `k'`/`m'`.
+- Добавлены `tests/fec-partial.sh` и `tests/bbr-ack-gate.sh`.
 - Тест потери CAPS в `tests/fec-profile-change.sh` проверяет рост
   `blocks_encoded`/`blocks_decoded` на обеих сторонах после потери пары
   кадров.

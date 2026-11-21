@@ -32,6 +32,7 @@
 | `UMBRAWG_GSO_SEGMENTS` | 64 | было 32 в 0.3.0; диапазон 1..64 |
 | `ExtraPorts` | 0 | дополнительные UDP-порты выключены; на стенде включали 4 |
 | `bbr` / `fec` | `off` / `off` | при обоих `off` extension-заголовков нет |
+| `FEC_PARTIAL` | включён при `fec != off` | partial-блок с parity (`k' = n`, `m' = m`); у ядра отключается `fec_partial=0` |
 | `underlay-mtu` | 1500 | MTU пути; при FEC из него выводятся MTU TUN и лимит шарда |
 
 ## Сборка и проверка
