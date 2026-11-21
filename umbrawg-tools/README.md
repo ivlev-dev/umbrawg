@@ -3,7 +3,7 @@
 ![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.4.1-blue.svg)
 
 Rust-утилиты для настройки UmbraWG: `uwg` и `uwg-quick`.
-Версия 0.4.1 готовится; в `Cargo.toml` пока `0.4.0`.
+Версия 0.4.1 — 2026-11-21.
 
 Работают с обоими бэкендами:
 
@@ -181,7 +181,7 @@ lintian dist/umbrawg-tools_*.deb
   из lock или обновите `Cargo.lock`.
 - Arch `-git` PKGBUILD тянет исходники сам: `master` tools и `main` netlink из
   GitHub, локальный checkout для него не используется. Пакет поэтому
-  VCS-снимок (`pkgver` вида `0.4.0.r<N>.g<хэш>`), а job дополнительно проверяет,
+  VCS-снимок (`pkgver` вида `0.4.1.r<N>.g<хэш>`), а job дополнительно проверяет,
   что версия в имени файла начинается с версии из `Cargo.toml`: тег должен
   указывать на HEAD той ветки, которую клонирует PKGBUILD.
 - Стабильный Arch-пакет собирается только если в
@@ -306,6 +306,7 @@ uwg version
 uwg -v
 uwg help
 uwg show uwg0
+uwg show all
 uwg show uwg0 advanced-security
 uwg showconf uwg0
 uwg setconf uwg0 /etc/umbrawg/uwg0.conf
@@ -322,6 +323,11 @@ uwg-quick strip uwg0
 ```
 
 Конфиги: `/etc/umbrawg/<iface>.conf`. Runtime: `/var/run/umbrawg/`.
+
+`uwg show all` перечисляет kernel-интерфейсы через rtnetlink и userspace —
+через runtime-каталог. На kernel-only хосте без `/run/umbrawg` это не ошибка:
+команда печатает kernel-интерфейсы (или ничего, если их нет) и завершается
+кодом 0. Существующий, но нечитаемый runtime-каталог — ошибка с кодом 1.
 
 Коды возврата: `0` — успех, а также `--help`/`-h`/`help` и
 `--version`/`-v`/`version`; `1` — ошибка использования (неизвестная команда

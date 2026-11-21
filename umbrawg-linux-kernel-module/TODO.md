@@ -159,10 +159,9 @@ src/tests/netlink-parity.sh
 
 ## Известные проблемы
 
-- Версии упаковки согласованы на `0.4.0` (`0.4.0` в RPM `Version`):
+- Версии упаковки согласованы на `0.4.1` (`0.4.1` в RPM `Version`):
   `src/version.h`, `src/Makefile`, `src/dkms.conf`, `debian/changelog`,
-  `umbrawg-dkms.spec`. Следующая версия — `0.4.1`; тег ставится после
-  поднятия версии и `updpkgsums` в `contrib/arch/`.
+  `umbrawg-dkms.spec`. Перед тегом остаётся `updpkgsums` в `contrib/arch/`.
 - Если инициирует ядро, первая попытка handshake теряется, когда userspace-демон
   ещё не забиндил UDP-порт; соединение поднимается на ретрае через 5 с. Порядок
   настройки: сначала userspace, затем ядро.
@@ -202,9 +201,9 @@ src/tests/netlink-parity.sh
 4. UDP GRO на сокете модуля — только если профилирование подтвердит, что
    приём датаграмм стал узким местом одиночного пира (ожидание 2–4%).
 5. CI: сборка против 7.x, netns-тесты, `-Werror`.
-6. Проставить тег `kernel-v0.4.1` после поднятия версии: `umbrawg-dkms.spec`
-   и `debian` уже согласованы на 0.4.0, после тега остаётся `updpkgsums`
-   для стабильного AUR-пакета.
+6. Проставить тег `kernel-v0.4.1`: `umbrawg-dkms.spec` и `debian` уже
+   согласованы на 0.4.1, после тега остаётся `updpkgsums` для стабильного
+   AUR-пакета.
 
 Не возвращаться к P0-3/P0-4 и TX-коалесингу, threaded NAPI не отключать без
 новых замеров.
@@ -218,18 +217,17 @@ src/tests/netlink-parity.sh
     `uapi/umbrawg.h`, исходники) и сборка модуля из **упакованных** исходников;
   - `rpm` (`fedora:latest`) — тарбол из чекаута, `Version:` в
     `umbrawg-dkms.spec` заменяется на версию из `src/version.h` в форме
-    `0.4.0` (дефис в RPM `Version` недопустим), затем `rpmbuild -ba`
+    `0.4.1` (дефис в RPM `Version` недопустим), затем `rpmbuild -ba`
     и проверка `rpm -qlp`;
   - `deb` (`debian:trixie`) — `dpkg-buildpackage -b -us -uc`, проверка
     содержимого `.deb`. Нужен пакет `dh-dkms`: в trixie addon `--with dkms`
     вынесен отдельно, без него `dh clean` падает;
   - `релиз` на тег `kernel-v*` — `.pkg.tar.zst`, `.rpm`, `.deb`, `SHA256SUMS`.
-- Версия тега = `UMBRAWG_VERSION` из `src/version.h` (`kernel-v0.4.1`
-  для готовящегося релиза). Тегов пока нет.
+- Версия тега = `UMBRAWG_VERSION` из `src/version.h` (`kernel-v0.4.1`).
 - Секретов не нужно: AUR и Copr не затрагиваются, публикация ручная.
 - `debian/changelog`, `umbrawg-dkms.spec`, `src/version.h`, `src/Makefile`
-  и `src/dkms.conf` согласованы на `0.4.0`; `.deb` ставит
-  `/usr/src/umbrawg-0.4.0`. Перед первым релизом остаётся проверить
+  и `src/dkms.conf` согласованы на `0.4.1`; `.deb` ставит
+  `/usr/src/umbrawg-0.4.1`. Перед первым релизом остаётся проверить
   `debian/rules` на предмет создания второго каталога из legacy-версии и
   обновить `contrib/arch/` (`updpkgsums`).
 - RPM собирается с версией из `version.h`, Arch-пакет — по `UMBRAWG_VERSION`;

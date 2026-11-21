@@ -5,7 +5,7 @@
 > [!IMPORTANT]
 > UmbraWG requires Linux 7.0 or newer. Older kernels are not supported.
 
-Версия в `src/version.h` — `0.4.0`; версия `0.4.1` готовится (2026-11-21).
+Версия в `src/version.h` — `0.4.1` (2026-11-21).
 
 The module uses only the in-kernel cryptography API (`chacha20poly1305`,
 `aes-gcm`, `blake2s`, `curve25519`, `chacha`) and builds against the kernel
@@ -79,9 +79,9 @@ You may need to install kernel headers and/or build essentials packages before r
     Or on a capable system you may want to use DKMS for this:
     ```shell
     sudo make dkms-install
-    sudo dkms add -m umbrawg -v 0.4.0
-    sudo dkms build -m umbrawg -v 0.4.0
-    sudo dkms install -m umbrawg -v 0.4.0
+    sudo dkms add -m umbrawg -v 0.4.1
+    sudo dkms build -m umbrawg -v 0.4.1
+    sudo dkms install -m umbrawg -v 0.4.1
     ```
 
     > [!NOTE]
@@ -136,7 +136,7 @@ Requirements and behaviour:
 
 | Job | Image | Contents |
 |---|---|---|
-| `версия` | `ubuntu-latest` | reads `UMBRAWG_VERSION` from `src/version.h` (`0.4.0`), derives the RPM-safe form (`0.4.0`) and requires the tag to be `kernel-v<version>` |
+| `версия` | `ubuntu-latest` | reads `UMBRAWG_VERSION` from `src/version.h` (`0.4.1`), derives the RPM-safe form (`0.4.1`) and requires the tag to be `kernel-v<version>` |
 | `arch` | `archlinux:latest` | `makepkg -f --noconfirm --nodeps` for `contrib/arch/umbrawg-dkms-git`, verifies `/usr/src/umbrawg-<pkgver>/` (`dkms.conf` with `PACKAGE_VERSION` and the `MAKE="make LLVM=1 …"` line, `version.h`, `uapi/umbrawg.h`, sources) and compiles the module from the **packaged** sources |
 | `rpm` | `fedora:latest` | builds the source tarball from the checkout, replaces `Version:` in `umbrawg-dkms.spec` with the RPM-safe version, runs `rpmbuild -ba` and checks `rpm -qlp` for the same file set |
 | `deb` | `debian:trixie` | `dpkg-buildpackage -b -us -uc` and checks the `/usr/src/umbrawg-*` payload of the `.deb` |
@@ -146,16 +146,16 @@ Notes:
 
 - no secrets are needed; nothing is uploaded to the AUR or Copr, both stay
   manual;
-- the next tag will be `kernel-v0.4.1` (манифест поднимается вместе с ним);
+- the tag is `kernel-v0.4.1`;
   `workflow_dispatch` accepts an optional `version` input for a manual check;
 - the `deb` job installs `dh-dkms` on top of `dkms`: on Debian trixie the
   `--with dkms` debhelper addon is a separate package, without it
   `dpkg-buildpackage` fails in `dh clean`;
-- `debian/changelog` и `umbrawg-dkms.spec` несут версию `0.4.0`
-  (`0.4.0` в RPM-поле `Version`), поэтому `.deb` называется
-  `umbrawg-dkms_0.4.0_all.deb` и ставит
-  `/usr/src/umbrawg-0.4.0`; `src/Makefile` и `src/dkms.conf`
-  по умолчанию содержат `0.4.0`, упаковщики переопределяют их;
+- `debian/changelog` и `umbrawg-dkms.spec` несут версию `0.4.1`
+  (`0.4.1` в RPM-поле `Version`), поэтому `.deb` называется
+  `umbrawg-dkms_0.4.1_all.deb` и ставит
+  `/usr/src/umbrawg-0.4.1`; `src/Makefile` и `src/dkms.conf`
+  содержат `0.4.1`, упаковщики переопределяют их;
 - the DKMS packages ship sources only, so building them on the target machine
   needs kernel headers (`linux-headers`, `kernel-devel`, `linux-headers-$(uname -r)`)
   and a toolchain; `dkms` is the only hard dependency;
@@ -195,7 +195,8 @@ Notes:
 - `uwg set <if> underlay-mtu N` — `UWGDEVICE_A_UNDERLAY_MTU` (40, `u16`,
   576..65535, по умолчанию 1500). При включённом FEC MTU интерфейса
   понижается до `underlay − 132 − S4` (1500 → 1368, при `S4=28` → 1340)
-  и восстанавливается при выключении FEC;
+  и восстанавливается при выключении FEC; floor — `min(576, base)`,
+  ручная база ниже 576 не поднимается;
 - `uwg show <if> bbr-stats|fec-stats` — вложенные `UWGDEVICE_A_BBR_STATS`
   (39) и `UWGDEVICE_A_FEC_STATS` (38).
 

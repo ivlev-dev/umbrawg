@@ -109,7 +109,7 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отч
   нужен vendor `netlink-packet-umbrawg`.
 - CI собирает ARM-тарболы, но не запускает тесты на ARM-хостах.
 - `Cargo.lock` синхронен с веткой `main` репозитория `netlink-packet-umbrawg`
-  (0.4.0); при сборке против другой ветки cargo обновляет lock, поэтому
+  (0.4.1); при сборке против другой ветки cargo обновляет lock, поэтому
   `--locked` в CI не используется.
 - Стенд (netns/insmod/iperf3) в CI не запускается: только `bash -n` и юнит-тесты
   хелперов; реальные замеры — на выделенной машине.
@@ -122,8 +122,8 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отч
 2. Vendor `netlink-packet-umbrawg` для source-upload в Debian.
 3. Проверить первую CI-сборку пакетов на тег `tools-v*` (Arch ждёт версию
    netlink из `Cargo.lock` в ветке `main`) и ARM-рантайм.
-4. Поднять версию до `0.4.1` и поставить компонентные теги `tools-v0.4.1`
-   и `netlink-v0.4.1`; до этого `updpkgsums` для стабильных Arch-пакетов.
+4. Поставить компонентные теги `tools-v0.4.1` и `netlink-v0.4.1`;
+   до публикации — `updpkgsums` для стабильных Arch-пакетов.
 
 Сделано в 0.2.0–0.4.1: упаковка Debian/RPM из `cargo build --release`,
 man-страницы, completions, systemd-юниты, CI fmt/clippy/test, релизные сборки

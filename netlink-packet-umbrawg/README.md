@@ -6,7 +6,7 @@
 
 A Rust crate for parsing and emitting **Umbra WireGuard** generic netlink packets on Linux.
 
-Версия крейта — `0.4.0`, версия `0.4.1` готовится (2026-11-21).
+Версия крейта — `0.4.1` (2026-11-21).
 
 This is a specialized fork focused specifically on **UmbraWG** kernel module support.  
 For plain WireGuard, use the original [`netlink-packet-wireguard`](https://crates.io/crates/netlink-packet-wireguard) crate.
@@ -202,9 +202,9 @@ so use the preflight when you need a trustworthy result.
 
 Release mechanics:
 
-- the tag has to match `netlink-v<version>` from `Cargo.toml` (`0.4.0` in
-  the manifest right now; the next release is `netlink-v0.4.1`);
-  otherwise the `версия` job fails before anything is built;
+- the tag has to match `netlink-v<version>` from `Cargo.toml`
+  (`netlink-v0.4.1` for this release); otherwise the `версия` job fails
+  before anything is built;
 - `workflow_dispatch` takes an optional `version` input for a manual dry check;
 - no secrets are required: nothing is pushed to crates.io or the AUR. Publishing
   the crate stays manual (`cargo publish` with `CARGO_REGISTRY_TOKEN`), and the

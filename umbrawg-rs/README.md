@@ -4,7 +4,7 @@
 
 Userspace daemon for the UmbraWG protocol (WireGuard-compatible Noise IK with
 UmbraWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
-Версия 0.4.1 готовится; в `Cargo.toml` пока `0.4.0`.
+Версия 0.4.1 — 2026-11-21.
 
 ## Workspace
 
@@ -112,9 +112,9 @@ duplicate the `tar.gz` archives from `rs-ci.yml`:
 
 Release mechanics:
 
-- the tag has to match `rs-<version>` from `Cargo.toml` (`rs-v0.4.1` for
-  the upcoming release; the manifests currently say `0.4.0`);
-  `workflow_dispatch` takes an optional `version` input for a manual check;
+- the tag has to match `rs-<version>` from `Cargo.toml`
+  (`rs-v0.4.1` for this release); `workflow_dispatch` takes an optional
+  `version` input for a manual check;
 - no secrets are needed — the AUR upload stays manual;
 - the release job uses `concurrency: release-<ref>` with `cancel-in-progress:
   false`; `rs-ci.yml` uses its own `rs-ci-<ref>` group, so a build and a
@@ -368,7 +368,9 @@ IP-фрагментации: 27.9 млн фрагментов за 24 прого
 (разница в пределах шума ±5%), а 8 сегментов теряли 8% на 3c c=1. По умолчанию
 64: на jumbo-underlay это меньше syscall на гигабит при том же худшем случае
 потери одной супер-датаграммы (64 сегмента — это один `sendmsg`, а не 64);
-16 (прежний кандидат) на 0.5–4% ниже 44 в 3 из 4 ячеек.
+16 (прежний кандидат) на 0.5–4% ниже 44 в 3 из 4 ячеек. Лимит 64 относится
+к legacy-данным; группа FEC-шардов ограничена `m` — при `2:1` шарды идут по
+одному, при `8:2` не больше двух.
 
 Параллельный приём (`UMBRAWG_PARALLEL_RX=1`) — экспериментальный: на одном пире
 он медленнее обычного rust на 6.2–16.2% в 5 из 8 ячеек матрицы final5

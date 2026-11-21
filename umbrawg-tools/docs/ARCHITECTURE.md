@@ -165,7 +165,8 @@ UDP socket -> rx-поток: recvmmsg + detect + index lookup
 
 Fast path (горячий путь): буферы 64 KiB с выравниванием под virtio-net header,
 пул на worker; `recvmmsg` до 64 датаграмм, `sendmmsg` с `UDP_SEGMENT` (GSO) до
-64 сегментов; `UDP_GRO` на приёме, склейка в `virtio_net_hdr` для TUN;
+64 сегментов для legacy-данных (FEC-шарды — не более `m` в группе); `UDP_GRO`
+на приёме, склейка в `virtio_net_hdr` для TUN;
 ChaCha20-Poly1305 без промежуточных `Vec`; обфускация в том же буфере без
 копий; без `format!`/`log` выше `debug` в горячем пути.
 

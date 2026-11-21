@@ -3,7 +3,7 @@
 ## Текущее состояние
 
 - Ветка `main`, всё слито и запушено.
-- Крейт `netlink-packet-umbrawg` 0.4.0 (0.4.1 готовится): пакет
+- Крейт `netlink-packet-umbrawg` 0.4.1 (2026-11-21): пакет
   `netlink-packet-umbrawg`, типы `Umbrawg*`, константы `UWG_*`.
 - Полное покрытие AmneziaWG/UmbraWG 3.1, включая `RandomTrailers`, `DisableCookies`,
   `HeaderProtectionKey`, `ContentPaddingAddition`, `H1..H4`, `S1..S4`, `Jc/Jmin/Jmax`,
@@ -66,12 +66,11 @@ cargo run --example set_umbrawg -- uwg0
 
 - `.github/workflows/netlink-packaging.yml`: `cargo test --all-targets`, сборка
   `contrib/arch/rust-netlink-packet-umbrawg-git` в `archlinux:latest` с проверкой
-  содержимого `/usr/share/cargo/registry/netlink-packet-umbrawg-0.4.0` и офлайновой
+  содержимого `/usr/share/cargo/registry/netlink-packet-umbrawg-0.4.1` и офлайновой
   сборки потребителя через `[source] replace`, `cargo package`, `cargo publish --dry-run`;
   на тег `netlink-v*` в GitHub Release попадают `.pkg.tar.zst`, `.crate` и `SHA256SUMS`.
-- Тег должен совпадать с версией из `Cargo.toml` (`netlink-v0.4.1` для
-  готовящегося релиза; в манифесте пока `0.4.0`); иначе job `версия`
-  падает до сборки.
+- Тег должен совпадать с версией из `Cargo.toml` (`netlink-v0.4.1`);
+  иначе job `версия` падает до сборки.
 - Секреты не нужны: crates.io и AUR не затрагиваются. Публикация крейта остаётся
   ручной (`cargo publish` с `CARGO_REGISTRY_TOKEN`), AUR — копированием
   `PKGBUILD`/`.SRCINFO` в AUR-репозиторий.

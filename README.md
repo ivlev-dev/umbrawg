@@ -7,7 +7,7 @@
 [![Go](https://github.com/ivlev-dev/umbrawg/actions/workflows/go-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/go-ci.yml)
 
 Монорепозиторий UmbraWG — VPN-протокола на базе WireGuard с обфускацией трафика.
-Версии в манифестах — 0.4.0; 0.4.1 готовится (2026-11-21).
+Версия 0.4.1 — 2026-11-21.
 
 ## Что внутри
 
@@ -72,10 +72,9 @@ cd go && go build ./... && go test ./...
 - CI запускается по `paths`-фильтрам: изменения в `bench/` или `docs/` не
   пересобирают модуль.
 - Упаковка (Arch, RPM, DEB, DKMS, `.crate`) запускается тегом компонента или
-  вручную через `workflow_dispatch`. Для готовящегося 0.4.1 это
+  вручную через `workflow_dispatch`. Для 0.4.1 это
   `kernel-v0.4.1`, `netlink-v0.4.1`, `tools-v0.4.1`, `rs-v0.4.1` — каждый
-  workflow реагирует только на свой префикс; сначала версия поднимается в
-  манифесте компонента.
+  workflow реагирует только на свой префикс.
 
 Подробности миграции и правила монорепо — [`docs/MONOREPO.md`](docs/MONOREPO.md).
 
