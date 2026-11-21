@@ -330,8 +330,8 @@ uwg-quick strip uwg0
 кодом 0. Существующий, но нечитаемый runtime-каталог — ошибка с кодом 1.
 
 `uwg show <if> bbr-stats` для kernel-бэкенда отдаёт поля `bbr_stats`;
-`peers_no_ack` (пиры без `ACK` в CAPS, к которым BBR не применяется) уже
-есть в netlink-атрибуте 9, но в текущем CLI ещё не печатается. FEC
+`peers_no_ack` (пиры без `ACK` в CAPS, к которым BBR не применяется) —
+netlink-атрибут 9, CLI печатает его как `peers_no_ack`. FEC
 `FEC_PARTIAL`/partial parity отдельной команды не требует: это автосогласуемый
 CAPS-флаг при включённом `fec`.
 

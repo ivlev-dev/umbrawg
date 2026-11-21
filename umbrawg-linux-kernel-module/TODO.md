@@ -158,7 +158,8 @@ src/tests/netlink-parity.sh
 - Совместимость с userspace-демоном `umbrawg` (Rust) в обе стороны, с обфускацией и без.
 - BBR-гейт: пейсинг/`inflight`/`cwnd` включаются только при `ACK` в CAPS
   пира; без ACK трафик не шейпится, пиры видны как `peers_no_ack`
-  (атрибут 9, в `uwg` пока не выводится). Loss-порог у обоих 20% раунда.
+  (атрибут 9, `uwg show bbr-stats` печатает `peers_no_ack`). Loss-порог
+  у обоих 20% раунда.
 - Partial FEC parity: `FEC_PARTIAL` (бит 4) включает `k' = n`, `m' = m`
   для неполных блоков; без флага — legacy `m' = 0`. Sparse ping при 2%
   потерь: 3–6% → 0–0.5%.

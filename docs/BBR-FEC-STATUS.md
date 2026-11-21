@@ -144,7 +144,8 @@ underlay_mtu − 48 (IPv6+UDP) − 32 (transport header + tag) − S4
   пира — и в ядре, и в Rust. Пир без `ACK` не шейпится; в ядре при потере
   `ACK` накопленный `inflight` сбрасывается, Rust новые отправки не
   учитывает. Такие пиры считает `peers_no_ack` (атрибут 9 в `bbr_stats`),
-  в агрегаты они не входят. В `uwg show bbr-stats` поле пока не выводится.
+  в агрегаты они не входят. `uwg show bbr-stats` печатает поле
+  `peers_no_ack`.
 
 ## Обратная связь и обфускация
 
@@ -283,7 +284,5 @@ underlay_mtu − 48 (IPv6+UDP) − 32 (transport header + tag) − S4
 
 1. Отмечать восстановленные FEC-пакеты в ACK, если появится внешний
    counter в шарде (wire-version 2).
-2. Вывести `peers_no_ack` в `uwg show bbr-stats` (в netlink-атрибуте 9 поле
-   уже есть).
-3. Поднять потолок шарда/floor cwnd при переходе на сети >6 Гбит/с.
-4. Матрица против `amneziawg-go` на loss/rate.
+2. Поднять потолок шарда/floor cwnd при переходе на сети >6 Гбит/с.
+3. Матрица против `amneziawg-go` на loss/rate.
