@@ -341,8 +341,13 @@ loss=$(ping_loss "$NS1" "$T0")
 [ "$loss" = 0 ] || fail "flap: reverse ping loss=${loss}%"
 
 # The first CAPS after a profile change can be lost. Both sides must still
-# converge (the fast retry and the bounded identical-repeat answer exist for
-# exactly this), including when the lost frame was a deferred 200 ms answer.
+# converge (the fast retry, the bounded identical-repeat answer and the
+# deferred 200 ms answer exist for exactly this). Ping alone would pass on the
+# legacy fallback with a stale CAPS, so the counters have to prove that FEC is
+# really agreed again: blocks_encoded only advances when the peer's CAPS
+# advertises the local profile, and blocks_decoded only when the peer's shards
+# match. The deferred changed-CAPS branch itself is covered deterministically
+# by the load-time self-test (EXT CAPS self-test, run by insmod).
 say "=== profile change while the first CAPS is lost"
 if command -v tc >/dev/null 2>&1; then
 	ip netns exec "$NS0" tc qdisc replace dev "$VA" root netem \
@@ -359,6 +364,36 @@ if command -v tc >/dev/null 2>&1; then
 		fail "CAPS loss: $NS0 profile is $(profile "$NS0")"
 	[ "$(profile "$NS1")" = "8:2" ] ||
 		fail "CAPS loss: $NS1 profile is $(profile "$NS1")"
+	# The bounded retry and the deferred answer converge within ~1 s.
+	sleep 2
+	b0e=$(stat "$NS0" blocks_encoded); b0e=${b0e:-0}
+	b0c=$(stat "$NS0" blocks_decoded); b0c=${b0c:-0}
+	b1e=$(stat "$NS1" blocks_encoded); b1e=${b1e:-0}
+	b1c=$(stat "$NS1" blocks_decoded); b1c=${b1c:-0}
+	dd0=$(stat "$NS0" dropped_disabled); dd0=${dd0:-0}
+	dd1=$(stat "$NS1" dropped_disabled); dd1=${dd1:-0}
+	ip netns exec "$NS0" ping -f -c 200 -W 1 "$T1" >/dev/null 2>&1 || true
+	ip netns exec "$NS1" ping -f -c 200 -W 1 "$T0" >/dev/null 2>&1 || true
+	sleep 0.3
+	a0e=$(stat "$NS0" blocks_encoded); a0e=${a0e:-0}
+	a0c=$(stat "$NS0" blocks_decoded); a0c=${a0c:-0}
+	a1e=$(stat "$NS1" blocks_encoded); a1e=${a1e:-0}
+	a1c=$(stat "$NS1" blocks_decoded); a1c=${a1c:-0}
+	dd0e=$(stat "$NS0" dropped_disabled); dd0e=${dd0e:-0}
+	dd1e=$(stat "$NS1" dropped_disabled); dd1e=${dd1e:-0}
+	note "  CAPS loss: $NS0 enc +$((a0e - b0e)) dec +$((a0c - b0c)), $NS1 enc +$((a1e - b1e)) dec +$((a1c - b1c))"
+	[ "$a0e" -gt "$b0e" ] ||
+		fail "CAPS loss: $NS0 blocks_encoded did not advance (legacy after lost CAPS)"
+	[ "$a0c" -gt "$b0c" ] ||
+		fail "CAPS loss: $NS0 blocks_decoded did not advance"
+	[ "$a1e" -gt "$b1e" ] ||
+		fail "CAPS loss: $NS1 blocks_encoded did not advance (legacy after lost CAPS)"
+	[ "$a1c" -gt "$b1c" ] ||
+		fail "CAPS loss: $NS1 blocks_decoded did not advance"
+	[ "$dd0e" -le "$dd0" ] ||
+		fail "CAPS loss: $NS0 dropped_disabled grew $dd0 -> $dd0e"
+	[ "$dd1e" -le "$dd1" ] ||
+		fail "CAPS loss: $NS1 dropped_disabled grew $dd1 -> $dd1e"
 else
 	note "tc missing: lost-CAPS convergence check skipped"
 fi

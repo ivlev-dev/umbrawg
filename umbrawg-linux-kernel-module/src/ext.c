@@ -189,6 +189,102 @@ bool uwg_ext_ack_selftest(void)
 	return ok;
 }
 
+/* What to do with a profile just received in a CAPS frame. Kept pure so the
+ * 200 ms gate and the deferred answer it produces are covered by the
+ * load-time self-test instead of only by the netns regression.
+ */
+enum uwg_ext_caps_plan {
+	UWG_EXT_CAPS_PLAN_NONE = 0,
+	UWG_EXT_CAPS_PLAN_SEND,
+	UWG_EXT_CAPS_PLAN_DEFER,
+};
+
+static enum uwg_ext_caps_plan
+uwg_ext_caps_plan(ktime_t now, ktime_t last_sent, bool changed,
+		  u8 send_attempts, u8 reply_attempts, ktime_t *next_send)
+{
+	bool too_soon;
+
+	/* Our own advertisement only depends on the local profile, so a peer
+	 * that keeps changing its CAPS does not need an answer per change: one
+	 * frame sent less than UWG_EXT_CAPS_CHANGED_MIN_MS ago carries the
+	 * same information. Skipping the duplicate keeps a hostile or flapping
+	 * peer from turning this into a control-frame amplifier; the bounded
+	 * answer to an identical repeat (the peer retries every 250 ms) still
+	 * converges the exchange if the earlier frame was lost.
+	 */
+	too_soon = last_sent &&
+		   ktime_before(now, ktime_add_ms(last_sent,
+						  UWG_EXT_CAPS_CHANGED_MIN_MS));
+	if (changed || !send_attempts) {
+		/* A changed profile must never be dropped: answer as soon as the
+		 * minimum spacing allows. With no frame in flight (the previous
+		 * transmit failed, or this is the first one) send right away.
+		 */
+		if (too_soon && send_attempts) {
+			*next_send = ktime_add_ms(last_sent,
+						  UWG_EXT_CAPS_CHANGED_MIN_MS);
+			return UWG_EXT_CAPS_PLAN_DEFER;
+		}
+		return UWG_EXT_CAPS_PLAN_SEND;
+	}
+	if (!too_soon && reply_attempts < UWG_EXT_CAPS_MAX_REPLIES)
+		return UWG_EXT_CAPS_PLAN_SEND;
+	return UWG_EXT_CAPS_PLAN_NONE;
+}
+
+/* Regression check for the deferred changed-CAPS answer: dropping it (the
+ * behaviour before the 200 ms gate was introduced) makes the first case fail,
+ * and so does answering a repeat more than UWG_EXT_CAPS_MAX_REPLIES times.
+ */
+bool uwg_ext_caps_selftest(void)
+{
+	ktime_t now = ktime_set(1000, 0);
+	ktime_t recent = ktime_sub_ms(now, 50);
+	ktime_t old = ktime_sub_ms(now, UWG_EXT_CAPS_CHANGED_MIN_MS * 2);
+	ktime_t next_send = 0;
+	bool ok = true;
+
+	if (uwg_ext_caps_plan(now, recent, true, 1, 0, &next_send) !=
+	    UWG_EXT_CAPS_PLAN_DEFER)
+		ok = false;
+	/* The deferred answer is scheduled exactly at the gate edge. */
+	if (ktime_to_ns(next_send) !=
+	    ktime_to_ns(ktime_add_ms(recent, UWG_EXT_CAPS_CHANGED_MIN_MS)))
+		ok = false;
+	/* Outside the gate a changed profile is answered immediately. */
+	if (uwg_ext_caps_plan(now, old, true, 1, 0, &next_send) !=
+	    UWG_EXT_CAPS_PLAN_SEND)
+		ok = false;
+	/* The first answer, or the resend after a failed transmit
+	 * (send_attempts == 0), is not delayed either.
+	 */
+	if (uwg_ext_caps_plan(now, recent, true, 0, 0, &next_send) !=
+	    UWG_EXT_CAPS_PLAN_SEND)
+		ok = false;
+	/* An identical repeat is never answered inside the gate ... */
+	if (uwg_ext_caps_plan(now, recent, false, 1, 0, &next_send) !=
+	    UWG_EXT_CAPS_PLAN_NONE)
+		ok = false;
+	/* ... and only UWG_EXT_CAPS_MAX_REPLIES times outside it. */
+	if (uwg_ext_caps_plan(now, old, false, 1,
+			      UWG_EXT_CAPS_MAX_REPLIES - 1, &next_send) !=
+	    UWG_EXT_CAPS_PLAN_SEND)
+		ok = false;
+	if (uwg_ext_caps_plan(now, old, false, 1,
+			      UWG_EXT_CAPS_MAX_REPLIES, &next_send) !=
+	    UWG_EXT_CAPS_PLAN_NONE)
+		ok = false;
+	/* The first CAPS ever (no frame sent yet) goes out now. */
+	if (uwg_ext_caps_plan(now, 0, false, 0, 0, &next_send) !=
+	    UWG_EXT_CAPS_PLAN_SEND)
+		ok = false;
+
+	if (!ok)
+		pr_err("EXT CAPS self-test: FAIL\n");
+	return ok;
+}
+
 int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
 			    struct uwg_ext_fec_shard *shard)
 {
@@ -353,6 +449,7 @@ void uwg_ext_caps_changed(struct uwg_device *uwg)
 	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
 		spin_lock_bh(&peer->caps.lock);
 		peer->caps.resend = true;
+		peer->caps.retry = false;
 		peer->caps.send_attempts = 0;
 		peer->caps.reply_attempts = 0;
 		peer->caps.next_send = 0;
@@ -373,6 +470,7 @@ void uwg_ext_caps_keypair_changed(struct uwg_peer *peer)
 {
 	spin_lock_bh(&peer->caps.lock);
 	peer->caps.resend = true;
+	peer->caps.retry = false;
 	peer->caps.send_attempts = 0;
 	peer->caps.reply_attempts = 0;
 	peer->caps.next_send = 0;
@@ -417,7 +515,8 @@ static void uwg_ext_caps_arm(struct uwg_peer *peer)
 	bool pending;
 
 	spin_lock_bh(&peer->caps.lock);
-	pending = peer->caps.resend && peer->caps.next_send != 0;
+	pending = (peer->caps.resend || peer->caps.retry) &&
+		  peer->caps.next_send != 0;
 	next = peer->caps.next_send;
 	spin_unlock_bh(&peer->caps.lock);
 	if (!pending)
@@ -431,12 +530,31 @@ static void uwg_ext_caps_arm(struct uwg_peer *peer)
 	uwg_timers_ack_reduce(peer, expires);
 }
 
+/* True when the profile the peer last advertised needs no further
+ * advertisement from us: the FEC setting matches (an unsupported profile was
+ * sanitized earlier), so a shard we send can be decoded on the other side.
+ */
+static bool uwg_ext_caps_fec_synced(const struct uwg_peer_caps *caps,
+				    const struct uwg_ext_caps *local)
+{
+	bool local_fec = local->flags & UWG_EXT_CAP_FEC;
+
+	if (!caps->peer_valid)
+		return false;
+	if (!!(caps->peer.flags & UWG_EXT_CAP_FEC) != local_fec)
+		return false;
+	return !local_fec || (caps->peer.fec_k == local->fec_k &&
+			      caps->peer.fec_m == local->fec_m);
+}
+
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 {
 	struct uwg_ext_caps local;
 	u8 frame[UWG_EXT_MAX_FRAME_LEN];
 	ktime_t now;
 	bool revoke;
+	bool retry;
+	bool pending;
 	int len;
 
 	now = ktime_get();
@@ -450,15 +568,30 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 	 */
 	revoke = !peer->caps.local.flags &&
 		 (peer->caps.extension_seen ||
-		  (peer->caps.resend && peer->caps.peer_valid &&
+		  ((peer->caps.resend || peer->caps.retry) &&
+		   peer->caps.peer_valid &&
 		   (peer->caps.peer.flags & UWG_EXT_CAP_FEC)));
 	if ((!revoke && !peer->caps.local.flags) ||
-	    (!revoke && peer->caps.peer_valid && !peer->caps.resend) ||
+	    (!revoke && peer->caps.peer_valid && !peer->caps.resend &&
+	     !peer->caps.retry) ||
 	    (!revoke &&
 	     peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS) ||
-	    (peer->caps.resend &&
+	    /* Pacing: at most one CAPS per window, no matter what triggered
+	     * the call. A fresh advertisement must not go out back to back,
+	     * and a revoke must stay at UWG_EXT_CAPS_RETRY_MS.
+	     */
+	    (peer->caps.send_attempts &&
 	     ktime_before(now, peer->caps.next_send))) {
+		/* A deferred answer or a pending retry must survive a call
+		 * that lands inside the pacing window: the delayed-ACK timer
+		 * carries it once next_send passes.
+		 */
+		pending = (peer->caps.resend || peer->caps.retry) &&
+			  peer->caps.next_send != 0;
+
 		spin_unlock_bh(&peer->caps.lock);
+		if (pending)
+			uwg_ext_caps_arm(peer);
 		return;
 	}
 	if (peer->caps.send_attempts < UWG_EXT_CAPS_MAX_ATTEMPTS)
@@ -480,7 +613,19 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 		   !uwg_packet_send_control(peer, frame, (size_t)len))) {
 		spin_lock_bh(&peer->caps.lock);
 		peer->caps.last_sent = now;
+		/* As long as the peer advertises another FEC profile, our
+		 * advertisement is unconfirmed: the first frame may have been
+		 * sent before the peer installed the new keypair, or the peer
+		 * may still answer a previous profile. Keep the bounded retry
+		 * armed so a lost pair does not leave both sides on the legacy
+		 * path until the next rekey.
+		 */
+		retry = peer->caps.send_attempts < UWG_EXT_CAPS_MAX_ATTEMPTS &&
+			!uwg_ext_caps_fec_synced(&peer->caps, &local);
+		peer->caps.retry = retry;
 		spin_unlock_bh(&peer->caps.lock);
+		if (retry)
+			uwg_ext_caps_arm(peer);
 		return;
 	}
 
@@ -488,6 +633,7 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 	if (peer->caps.send_attempts)
 		--peer->caps.send_attempts;
 	peer->caps.resend = true;
+	peer->caps.retry = false;
 	peer->caps.next_send = 0;
 	spin_unlock_bh(&peer->caps.lock);
 	net_dbg_ratelimited("%s: Could not send CAPS to peer %llu\n",
@@ -699,8 +845,9 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 {
 	struct uwg_ext_caps caps;
 	ktime_t now;
+	ktime_t next_send = 0;
+	enum uwg_ext_caps_plan plan;
 	bool changed;
-	bool too_soon;
 	bool defer = false;
 	bool send = false;
 
@@ -720,61 +867,33 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 		peer->caps.reply_attempts = 0;
 	/* Our own CAPS frame may have been sent before the peer installed the
 	 * new keypair and was lost. Hearing a new profile from the peer is a
-	 * good moment to (re)send ours.
-	 * send_attempts == 0 means we have not managed to send CAPS at all.
-	 *
-	 * Our advertisement only depends on the local profile, so a peer that
-	 * keeps changing its CAPS does not need an answer per change: one
-	 * frame sent less than UWG_EXT_CAPS_CHANGED_MIN_MS ago carries the
-	 * same information. Skipping the duplicate keeps a hostile or flapping
-	 * peer from turning this into a control-frame amplifier; the bounded
-	 * answer to an identical repeat (the peer retries every 250 ms)
-	 * still converges the exchange if the earlier frame was lost.
+	 * good moment to (re)send ours. The 200 ms gate keeps a flapping peer
+	 * from turning this into an answer per change, but a changed profile
+	 * is never dropped: uwg_ext_caps_plan() asks for a deferred answer
+	 * instead, carried by the delayed-ACK timer.
 	 */
-	too_soon = peer->caps.last_sent &&
-		   ktime_before(now, ktime_add_ms(peer->caps.last_sent,
-						  UWG_EXT_CAPS_CHANGED_MIN_MS));
-	if (changed) {
-		if (too_soon) {
-			/* Do not drop the answer: the recent CAPS may have
-			 * been lost. Answer as soon as the minimum spacing
-			 * allows, via the delayed-ACK timer.
-			 */
-			peer->caps.resend = true;
-			peer->caps.next_send = ktime_add_ms(
-				peer->caps.last_sent,
-				UWG_EXT_CAPS_CHANGED_MIN_MS);
-			if (peer->caps.send_attempts >=
-			    UWG_EXT_CAPS_MAX_ATTEMPTS)
-				peer->caps.send_attempts =
-					UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
-			defer = true;
-		} else {
-			peer->caps.resend = true;
-			peer->caps.next_send = 0;
-			send = true;
-		}
-	} else if (!too_soon) {
-		if (!peer->caps.send_attempts) {
-			peer->caps.resend = true;
-			peer->caps.next_send = 0;
-			send = true;
-		} else if (peer->caps.reply_attempts <
-			   UWG_EXT_CAPS_MAX_REPLIES) {
-			/* An identical repeat is not necessarily our own frame
-			 * echoed back: a re-created peer has no memory of the
-			 * CAPS we sent it, and if our earlier frame was lost it
-			 * would keep dropping every shard as dropped_disabled
-			 * forever. Answer a bounded number of repeats per
-			 * received profile so the exchange always converges,
-			 * while two kernels still cannot answer each other
-			 * indefinitely.
-			 */
+	plan = uwg_ext_caps_plan(now, peer->caps.last_sent, changed,
+				 peer->caps.send_attempts,
+				 peer->caps.reply_attempts, &next_send);
+	if (plan == UWG_EXT_CAPS_PLAN_SEND) {
+		if (!changed && peer->caps.send_attempts)
 			++peer->caps.reply_attempts;
-			peer->caps.resend = true;
-			peer->caps.next_send = 0;
-			send = true;
-		}
+		peer->caps.resend = true;
+		peer->caps.next_send = 0;
+		send = true;
+	} else if (plan == UWG_EXT_CAPS_PLAN_DEFER) {
+		peer->caps.resend = true;
+		peer->caps.next_send = next_send;
+		if (peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
+			peer->caps.send_attempts =
+				UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
+		defer = true;
+	} else if (uwg_ext_caps_fec_synced(&peer->caps,
+					   &peer->caps.local)) {
+		/* The peer now advertises the profile we run, so our
+		 * advertisement is confirmed: stop the bounded retry.
+		 */
+		peer->caps.retry = false;
 	}
 	if (send && peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
 		peer->caps.send_attempts = UWG_EXT_CAPS_MAX_ATTEMPTS - 1;

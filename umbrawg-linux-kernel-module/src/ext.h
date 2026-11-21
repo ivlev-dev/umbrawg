@@ -126,7 +126,14 @@ struct uwg_peer_caps {
 	struct uwg_ext_caps last_peer;
 	bool peer_valid;
 	bool last_peer_valid;
+	/* An answer to the peer's CAPS is owed and has not been sent yet. */
 	bool resend;
+	/* A CAPS frame was sent, but the peer still advertises another FEC
+	 * profile. The advertisement is unconfirmed, so it is retried a
+	 * bounded number of times: a lost first frame otherwise leaves both
+	 * sides on the legacy path until the next rekey.
+	 */
+	bool retry;
 	/* The peer sent us an extension frame while this device has the
 	 * extension switched off; its profile advertisement is stale.
 	 */
@@ -176,6 +183,7 @@ int uwg_ext_parse_caps(const u8 *payload, size_t len,
 int uwg_ext_parse_ack(const u8 *payload, size_t len, struct uwg_ext_ack *ack);
 u64 uwg_ext_ack_bitmap(const struct uwg_ext_ack *ack);
 bool uwg_ext_ack_selftest(void);
+bool uwg_ext_caps_selftest(void);
 int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
 			    struct uwg_ext_fec_shard *shard);
 

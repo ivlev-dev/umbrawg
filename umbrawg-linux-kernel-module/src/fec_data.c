@@ -124,14 +124,15 @@ unsigned int uwg_fec_underlay_payload(const struct uwg_device *uwg)
 
 /* MTU the device should run at. With FEC on it is the largest inner packet
  * that still fits one shard datagram, and never above the base MTU the user
- * chose; with FEC off it is exactly that base. The 576 floor keeps ICMPv6 and
- * IPv4 reassembly working even when the underlay is tiny; the shard limit then
- * falls back to legacy for packets above the underlay budget.
+ * chose; with FEC off it is exactly that base. The floor is min(576, base):
+ * 576 keeps ICMPv6 and IPv4 reassembly working, while a base below it is
+ * never raised — the operator asked for that MTU. The shard limit then falls
+ * back to legacy for packets above the underlay budget.
  */
 unsigned int uwg_fec_target_mtu(unsigned int underlay_mtu, unsigned int base_mtu,
 				bool fec_on, unsigned int underlay_padding)
 {
-	unsigned int allowed, target;
+	unsigned int allowed, target, floor;
 
 	if (!fec_on)
 		return base_mtu;
@@ -141,8 +142,9 @@ unsigned int uwg_fec_target_mtu(unsigned int underlay_mtu, unsigned int base_mtu
 	if (allowed > UWG_FEC_DATA_SHARD_CAP - 2)
 		allowed = UWG_FEC_DATA_SHARD_CAP - 2;
 	target = min(base_mtu, allowed);
-	if (target < UWG_UNDERLAY_MTU_MIN)
-		target = UWG_UNDERLAY_MTU_MIN;
+	floor = min_t(unsigned int, UWG_UNDERLAY_MTU_MIN, base_mtu);
+	if (target < floor)
+		target = floor;
 	return target;
 }
 
@@ -1506,6 +1508,23 @@ int uwg_fec_mtu_selftest(void)
 	T_CHECK(uwg_fec_target_mtu(576, 1420, true, 0) == UWG_UNDERLAY_MTU_MIN);
 	T_CHECK(uwg_fec_target_mtu(576, 1420, true, 0) >
 		uwg_fec_allowed_inner(576, 0));
+	/* A base MTU below the IPv4 minimum must not be raised: the floor is
+	 * min(576, base), exactly like the Rust implementation. A 500 byte TUN
+	 * over a 500 byte underlay cannot fit a shard, so the data plane takes
+	 * the legacy path for every packet.
+	 */
+	T_CHECK(uwg_fec_target_mtu(1500, 500, true, 0) == 500);
+	T_CHECK(uwg_fec_target_mtu(500, 500, true, 0) == 500);
+	T_CHECK(uwg_fec_target_mtu(500, 500, true, 0) <= 500);
+	T_CHECK(uwg_fec_target_mtu(500, 500, true, 0) >
+		uwg_fec_allowed_inner(500, 0));
+	/* The floor still applies while the underlay budget is bigger, and a
+	 * base below 576 pinning the MTU at the base means FEC cannot shrink
+	 * it further either.
+	 */
+	T_CHECK(uwg_fec_target_mtu(1500, 550, true, 0) == 550);
+	T_CHECK(uwg_fec_target_mtu(700, 550, true, 0) == 550);
+	T_CHECK(uwg_fec_target_mtu(600, 550, true, 0) == 550);
 	/* With FEC off the base MTU is returned untouched, whatever the
 	 * underlay says.
 	 */
@@ -1513,6 +1532,7 @@ int uwg_fec_mtu_selftest(void)
 	T_CHECK(uwg_fec_target_mtu(576, 1420, false, 0) == 1420);
 	T_CHECK(uwg_fec_adaptive_selftest());
 	T_CHECK(uwg_ext_ack_selftest());
+	T_CHECK(uwg_ext_caps_selftest());
 
 	if (!ok)
 		return -EINVAL;
