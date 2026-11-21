@@ -197,6 +197,19 @@ class PcapParsing(unittest.TestCase):
         self.assertEqual(cap.packets[0].sport, PORT_A)
         self.assertFalse(cap.packets[0].fragmented)
 
+    def test_ip_len_recorded(self):
+        path = self.dir / "iplen.pcap"
+        write_pcap(
+            path,
+            [
+                (100.0, udp_frame(1024, PORT_A, PORT_B)),
+                (100.1, udp6_frame(300, PORT_A, PORT_B)),
+            ],
+        )
+        cap = detect.read_pcap(path)
+        self.assertEqual(cap.packets[0].ip_len, 20 + 8 + 1024)
+        self.assertEqual(cap.packets[1].ip_len, 40 + 8 + 300)
+
     def test_fragment_parsed_and_counted(self):
         path = self.dir / "frag.pcap"
         records = bad_records()[:5]
@@ -314,6 +327,99 @@ class Profiles(unittest.TestCase):
         self.assertLess(plain["metrics"]["all"]["ack_share_window"], 0.05)
         self.assertGreater(shifted["metrics"]["all"]["ack_share_window"], 0.4)
 
+    def test_padded_ack_window_catches_full_control_tail(self):
+        path = self.dir / "padded-ack.pcap"
+        rng = random.Random(11)
+        records = []
+        ts = 200.0
+        for i in range(1000):
+            if i < 300:
+                # ACK 64+s4 плюс случайный control-хвост 0..15.
+                frame = udp_frame(64 + (i % 16), PORT_B, PORT_A)
+            else:
+                frame = udp_frame(rng.randint(200, 1150), PORT_A, PORT_B)
+            records.append((ts, frame))
+            ts += rng.expovariate(1 / 50) + 0.001
+        write_pcap(path, records)
+        report = detect.analyze_capture(path, PORT_A, PORT_B, s4=0)
+        metrics = report["metrics"]["all"]
+        # Раньше окно 64±4 ловило только хвост 0..4 (около 0.09).
+        self.assertGreater(metrics["ack_share_window"], 0.25)
+        self.assertGreater(metrics["ack_share_window"], metrics["ack_share"] * 5)
+        self.assertEqual(status_of(report, "ack_clock_share"), "FAIL")
+
+    def test_padded_ack_follows_s4(self):
+        path = self.dir / "padded-ack-s4.pcap"
+        records = []
+        ts = 300.0
+        for i in range(600):
+            if i % 2 == 0:
+                frame = udp_frame(92 + (i // 2) % 16, PORT_B, PORT_A)
+            else:
+                frame = udp_frame(300 + (i * 13) % 800, PORT_A, PORT_B)
+            records.append((ts, frame))
+            ts += 0.01
+        write_pcap(path, records)
+        plain = detect.analyze_capture(path, PORT_A, PORT_B, s4=0)
+        shifted = detect.analyze_capture(path, PORT_A, PORT_B, s4=28)
+        self.assertLess(plain["metrics"]["all"]["ack_share_window"], 0.05)
+        self.assertGreater(shifted["metrics"]["all"]["ack_share_window"], 0.45)
+
+    def test_fec_block_metrics(self):
+        path = self.dir / "fec-blocks.pcap"
+        rng = random.Random(5)
+        records = []
+        ts = 300.0
+        for _ in range(200):
+            for _ in range(3):
+                records.append((ts, udp_frame(400 + rng.randint(0, 15), PORT_A, PORT_B)))
+                ts += 0.0002
+            ts += 0.01
+            records.append((ts, udp_frame(rng.randint(120, 460), PORT_A, PORT_B)))
+            ts += 0.01
+        write_pcap(path, records)
+        report = detect.analyze_capture(path, PORT_A, PORT_B, s4=0)
+        metrics = report["metrics"]["all"]
+        self.assertGreaterEqual(metrics["fec_blocks"], 100)
+        self.assertGreater(metrics["fec_block_shard_share"], 0.5)
+        self.assertAlmostEqual(metrics["fec_parity_share_est"], 1 / 3, places=2)
+        self.assertLess(metrics["fec_adaptive_step"], 0.3)
+        self.assertEqual(status_of(report, "fec_block_uniformity"), "PASS")
+        self.assertEqual(status_of(report, "fec_parity_share"), "PASS")
+
+    def test_fec_uniform_blocks_fail(self):
+        path = self.dir / "fec-uniform.pcap"
+        records = []
+        ts = 400.0
+        for _ in range(200):
+            for _ in range(3):
+                records.append((ts, udp_frame(400, PORT_A, PORT_B)))
+                ts += 0.0002
+            ts += 0.01
+        write_pcap(path, records)
+        report = detect.analyze_capture(path, PORT_A, PORT_B, s4=0)
+        metrics = report["metrics"]["all"]
+        self.assertAlmostEqual(metrics["fec_block_uniform_share"], 1.0)
+        self.assertEqual(status_of(report, "fec_block_uniformity"), "FAIL")
+
+    def test_fec_adaptive_step(self):
+        path = self.dir / "fec-adaptive.pcap"
+        rng = random.Random(9)
+        records = []
+        ts = 500.0
+        for _ in range(700):
+            records.append((ts, udp_frame(rng.randint(120, 460), PORT_A, PORT_B)))
+            ts += 0.01
+        for _ in range(200):
+            for _ in range(3):
+                records.append((ts, udp_frame(400 + rng.randint(0, 15), PORT_A, PORT_B)))
+                ts += 0.0002
+            ts += 0.01
+        write_pcap(path, records)
+        report = detect.analyze_capture(path, PORT_A, PORT_B, s4=0)
+        metrics = report["metrics"]["all"]
+        self.assertGreater(metrics["fec_adaptive_step"], 0.5)
+
     def test_fragmentation_rule_fails(self):
         path = self.dir / "frag.pcap"
         records = good_records(count=200)
@@ -343,6 +449,205 @@ class Profiles(unittest.TestCase):
         self.assertEqual(status_of(report, "mod16_entropy"), "FAIL")
 
 
+class GsoAggregates(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def add_gso(self, records, count=200, size=60000):
+        start, end = records[0][0], records[-1][0]
+        step = (end - start) / (count + 1)
+        for i in range(count):
+            records.append((start + step * (i + 1), udp_frame(size, PORT_A, PORT_B)))
+        records.sort(key=lambda item: item[0])
+        return records
+
+    def test_gso_share_is_informational_not_fail(self):
+        path = self.dir / "gso-mixed.pcap"
+        write_pcap(path, self.add_gso(good_records(count=900), count=60))
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertEqual(report["verdict"], "OK", report["checks"])
+        self.assertEqual(report["fail_count"], 0)
+        self.assertEqual(status_of(report, "gso_aggregates"), "SKIP")
+        metrics = report["metrics"]["all"]
+        self.assertEqual(metrics["gso_packets"], 60)
+        self.assertEqual(metrics["packets_total"], 960)
+        self.assertEqual(metrics["packets"], 900)
+        self.assertAlmostEqual(metrics["gso_share"], 60 / 960)
+        # Правила размеров посчитаны только по одиночным пакетам.
+        self.assertLess(metrics["top1_share"], detect.TOP1_SHARE_MAX)
+
+    def test_gso_aggregates_do_not_break_rules(self):
+        path = self.dir / "gso-flood.pcap"
+        # Если агрегаты не исключить, top1_share станет 0.5 и max_run >= 200.
+        write_pcap(path, self.add_gso(good_records(count=200), count=200))
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertEqual(report["verdict"], "OK", report["checks"])
+        metrics = report["metrics"]["all"]
+        self.assertAlmostEqual(metrics["gso_share"], 0.5)
+        self.assertLessEqual(metrics["max_run"], detect.MAX_RUN_MAX)
+        self.assertLessEqual(metrics["top1_share"], detect.TOP1_SHARE_MAX)
+        self.assertLessEqual(metrics["run3_share"], detect.RUN3_SHARE_MAX)
+
+    def test_gso_does_not_mask_real_obfuscation(self):
+        path = self.dir / "gso-bad.pcap"
+        write_pcap(path, self.add_gso(bad_records(), count=200))
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertEqual(status_of(report, "gso_aggregates"), "SKIP")
+        # Обычный поток с фиксированными размерами по-прежнему FAIL.
+        self.assertEqual(status_of(report, "top1_share"), "FAIL")
+        self.assertEqual(status_of(report, "mod16_entropy"), "FAIL")
+        self.assertEqual(status_of(report, "max_run"), "FAIL")
+        self.assertGreaterEqual(report["fail_count"], 4)
+
+    def test_underlay_mtu_marks_packets_above_mtu(self):
+        path = self.dir / "gso-1500.pcap"
+        records = good_records(count=200)
+        start, end = records[0][0], records[-1][0]
+        for i in range(300):
+            ts = start + (end - start) * (i + 0.5) / 300
+            records.append((ts, udp_frame(4506, PORT_A, PORT_B)))
+        records.sort(key=lambda item: item[0])
+        write_pcap(path, records)
+
+        # Без MTU 4506 B — обычный пакет: доля 0.25 проваливает top1_share.
+        plain = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertEqual(plain["metrics"]["all"]["gso_packets"], 0)
+        self.assertEqual(status_of(plain, "top1_share"), "FAIL")
+
+        # С MTU 1500 это GSO-агрегат: из правил исключён.
+        aware = detect.analyze_capture(path, PORT_A, PORT_B, underlay_mtu=1500)
+        self.assertEqual(aware["metrics"]["all"]["gso_packets"], 300)
+        self.assertEqual(aware["verdict"], "OK", aware["checks"])
+        self.assertLess(aware["metrics"]["all"]["top1_share"], detect.TOP1_SHARE_MAX)
+
+    def test_all_gso_stream_skips_size_rules(self):
+        path = self.dir / "gso-only.pcap"
+        records = [(100.0 + i * 0.01, udp_frame(60000, PORT_A, PORT_B)) for i in range(100)]
+        write_pcap(path, records)
+        report = detect.analyze_capture(path)
+        self.assertEqual(report["verdict"], "OK")
+        self.assertEqual(report["fail_count"], 0)
+        self.assertEqual(status_of(report, "gso_aggregates"), "SKIP")
+        self.assertEqual(status_of(report, "capture_size"), "PASS")
+        for name in ("top1_share", "mod16_entropy", "max_run", "run3_share", "autocorr"):
+            self.assertEqual(status_of(report, name), "SKIP", name)
+
+    def test_small_non_gso_sample_skips_rules(self):
+        # 200 агрегатов и всего 20 одиночных пакетов: после исключения GSO
+        # выборка меньше MIN_PACKETS_FOR_RULES, правила должны стать SKIP.
+        path = self.dir / "gso-small-sample.pcap"
+        records = [(1000.0 + i * 0.01, udp_frame(60000, PORT_A, PORT_B)) for i in range(200)]
+        records += [
+            (1000.0 + i * 0.1, udp_frame(300 + i * 7, PORT_A, PORT_B))
+            for i in range(20)
+        ]
+        write_pcap(path, records)
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertEqual(report["verdict"], "OK")
+        self.assertEqual(report["fail_count"], 0)
+        self.assertEqual(status_of(report, "capture_size"), "PASS")
+        self.assertEqual(status_of(report, "gso_aggregates"), "SKIP")
+        for name in ("top1_share", "mod16_entropy", "max_run", "run3_share", "autocorr"):
+            self.assertEqual(status_of(report, name), "SKIP", name)
+
+    def test_no_gso_check_passes(self):
+        path = self.dir / "plain.pcap"
+        write_pcap(path, good_records(count=200))
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertEqual(status_of(report, "gso_aggregates"), "PASS")
+
+
+class AckPpsFec(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def fec_symmetric_records(self):
+        rng = random.Random(21)
+        records = []
+        ts = 1000.0
+        for i in range(200):
+            for _ in range(3):
+                records.append((ts, udp_frame(500 + rng.randint(0, 15), PORT_B, PORT_A)))
+                records.append((ts, udp_frame(520 + rng.randint(0, 15), PORT_A, PORT_B)))
+                ts += 0.0002
+            ts += 0.01
+            records.append((ts, udp_frame(rng.randint(120, 460), PORT_A, PORT_B)))
+            ts += 0.01
+            records.append((ts, udp_frame(rng.randint(120, 460), PORT_B, PORT_A)))
+            # ACK в сторону A — каждый цикл, в сторону B — каждый 10-й: ratio ~10.
+            records.append((ts, udp_frame(64, PORT_B, PORT_A)))
+            if i % 10 == 0:
+                records.append((ts, udp_frame(64, PORT_A, PORT_B)))
+            ts += 0.01
+        return records
+
+    def test_fec_symmetric_ack_ratio_uses_relaxed_limit(self):
+        path = self.dir / "fec-ack.pcap"
+        write_pcap(path, self.fec_symmetric_records())
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertGreaterEqual(report["metrics"]["all"]["fec_blocks"], 2)
+        check = next(c for c in report["checks"] if c["name"] == "ack_pps_ratio")
+        self.assertAlmostEqual(check["value"], 10.0, delta=1.0)
+        self.assertEqual(check["status"], "PASS", check)
+        self.assertIn("FEC", check["threshold"])
+
+    def test_one_way_load_skips_ack_ratio(self):
+        path = self.dir / "fec-oneway.pcap"
+        rng = random.Random(22)
+        records = []
+        ts = 2000.0
+        for i in range(200):
+            for _ in range(3):
+                records.append((ts, udp_frame(500 + rng.randint(0, 15), PORT_B, PORT_A)))
+                ts += 0.0002
+            ts += 0.01
+            records.append((ts, udp_frame(64, PORT_B, PORT_A)))
+            if i % 20 == 0:
+                records.append((ts, udp_frame(64, PORT_A, PORT_B)))
+            ts += 0.01
+        write_pcap(path, records)
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertGreaterEqual(report["metrics"]["all"]["fec_blocks"], 2)
+        check = next(c for c in report["checks"] if c["name"] == "ack_pps_ratio")
+        self.assertEqual(check["status"], "SKIP", check)
+        self.assertIn("односторонняя", check["detail"])
+
+    def test_symmetric_non_fec_ack_skew_still_fails(self):
+        path = self.dir / "plain-ack.pcap"
+        rng = random.Random(23)
+        records = []
+        ts = 3000.0
+        for i in range(400):
+            records.append((ts, udp_frame(rng.randint(200, 1100), PORT_A, PORT_B)))
+            records.append((ts, udp_frame(rng.randint(200, 1100), PORT_B, PORT_A)))
+            if i % 2 == 0:
+                records.append((ts, udp_frame(64, PORT_B, PORT_A)))
+            if i % 20 == 0:
+                records.append((ts, udp_frame(64, PORT_A, PORT_B)))
+            ts += 0.005
+        write_pcap(path, records)
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertLess(report["metrics"]["all"]["fec_blocks"], 2)
+        check = next(c for c in report["checks"] if c["name"] == "ack_pps_ratio")
+        self.assertAlmostEqual(check["value"], 10.0, delta=1.0)
+        self.assertEqual(check["status"], "FAIL", check)
+        self.assertNotIn("FEC", check["threshold"])
+
+    def test_bad_profile_one_way_ack_check_is_not_fail(self):
+        path = self.dir / "bad.pcap"
+        write_pcap(path, bad_records())
+        report = detect.analyze_capture(path, PORT_A, PORT_B)
+        self.assertEqual(status_of(report, "ack_pps_ratio"), "SKIP")
+
+
 class Cli(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -356,6 +661,39 @@ class Cli(unittest.TestCase):
         with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             code = detect.main(argv)
         return code, out.getvalue(), err.getvalue()
+
+    def test_underlay_mtu_cli(self):
+        path = self.dir / "agg.pcap"
+        records = good_records(count=200)
+        start, end = records[0][0], records[-1][0]
+        for i in range(60):
+            records.append(
+                (start + (end - start) * (i + 0.5) / 60, udp_frame(4506, PORT_A, PORT_B))
+            )
+        write_pcap(path, records)
+        code, out, _ = self.run_cli(
+            [
+                "--pcap",
+                str(path),
+                "--port-a",
+                str(PORT_A),
+                "--port-b",
+                str(PORT_B),
+                "--underlay-mtu",
+                "1500",
+                "--json",
+            ]
+        )
+        self.assertEqual(code, 0)
+        data = json.loads(out)
+        self.assertEqual(data["underlay_mtu"], 1500)
+        self.assertEqual(data["gso_threshold"], 1500)
+        self.assertEqual(data["metrics"]["all"]["gso_packets"], 60)
+
+    def test_bad_underlay_mtu_exit_2(self):
+        with self.assertRaises(SystemExit) as ctx:
+            self.run_cli(["--pcap", "x.pcap", "--underlay-mtu", "0"])
+        self.assertEqual(ctx.exception.code, 2)
 
     def test_exit_codes(self):
         bad = self.dir / "bad.pcap"

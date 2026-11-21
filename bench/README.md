@@ -249,6 +249,16 @@ uwg pubkey < priv.key                 # публичный ключ
 `CONNS_LIST`, `LOSS_LIST`, `OBF_LIST`, `PEERS_LIST`, `DURATION`, `SMOKE`,
 `RESULT`. Ниже — новое.
 
+Пути по умолчанию выводятся из расположения `bench.sh`, без привязки к
+`/root`: `RUSTDIR` — `$WORKSPACE_ROOT/umbrawg-rs` (затем `rust`), `MODDIR` —
+`$WORKSPACE_ROOT/umbrawg-linux-kernel-module/src` (затем `module/src`),
+`UWG` — `$REPO_ROOT/target/release/uwg` или
+`$WORKSPACE_ROOT/umbrawg-tools/target/release/uwg`, `DAEMON` —
+`$RUSTDIR/target/release/umbrawg`. Для монорепозитория `REPO_ROOT` и
+`WORKSPACE_ROOT` совпадают с корнем; для `umbrawg-tools/bench` корень
+поднимается на уровень выше. Переопределяются через `RUSTDIR`, `MODDIR`
+(`MODULE_DIR`), `UWG`, `DAEMON`, `GO_BASELINE`, `OBF`.
+
 | Переменная | По умолчанию | Смысл |
 |---|---|---|
 | `REPEATS` | 3 (SMOKE: 1) | число повторов каждой ячейки |
@@ -261,6 +271,10 @@ uwg pubkey < priv.key                 # публичный ключ
 | `VETH_QUEUES` | `nproc` | число очередей veth (max для `numtxqueues`/`numrxqueues`) |
 | `VETH_RX_Q` / `VETH_TX_Q` | `VETH_QUEUES` | сколько очередей реально включить через `ethtool -L` |
 | `RPS_MASK` | off | hex-маска для `rps_cpus` на rx-очередях veth (`off` — не трогать) |
+| `GSO_SEGMENTS` | пусто | `UMBRAWG_GSO_SEGMENTS` для Rust-демона (алиас `UMBRAWG_GSO_SEGMENTS` тоже читается) |
+| `RUST_PARALLEL` | 0 | 1 — добавить `rust-par` (`UMBRAWG_PARALLEL_RX=1`) в список реализаций |
+| `RUST_RX_SCHED` | peer | планировщик RX для `rust-par` (`UMBRAWG_RX_SCHED`) |
+| `CIPHER` | пусто | значение `Cipher =` в сгенерированных конфигах |
 | `RUN_ID` | timestamp | метка прогона, пишется в CSV |
 | `FORCE` | 0 | 1 — обойти проверку занятости стенда |
 | `PLAN_ONLY` | 0 | 1 — напечатать план, собрать пустой отчёт и выйти без прогонов |
@@ -380,9 +394,11 @@ busy ≥80%) и суммарную busy% машины, плюс вердикт:
 `detect.py` — офлайн-анализатор pcap с UDP-потоком туннеля. Он не измеряет
 скорость, а показывает, насколько внешний поток похож на «машинный» профиль,
 который цепляет DPI: фиксированные размеры, ACK-часы, метроном, IP-фрагменты.
-Это **rule-based эвристика, а не ML и не реальный DPI**: PASS означает лишь
-«грубых признаков не найдено», FAIL — «есть признаки, которые надо объяснить».
-Пороги подобраны консервативно и вынесены в константы в начале файла.
+Крупные GSO-агрегаты (ядро склеивает датаграммы до 63 КБ) считаются отдельно
+и не портят метрики размеров. Это **rule-based эвристика, а не ML и не
+реальный DPI**: PASS означает лишь «грубых признаков не найдено», FAIL — «есть
+признаки, которые надо объяснить». Пороги подобраны консервативно и вынесены
+в константы в начале файла.
 
 ### Как снять pcap
 
@@ -407,6 +423,7 @@ sudo tcpdump -i any  -s 0 -w tunnel.pcap 'udp and port 51820'   # SLL-загол
 ```bash
 python3 bench/detect.py --pcap tunnel.pcap
 python3 bench/detect.py --pcap tunnel.pcap --port-a 51820 --port-b 51821
+python3 bench/detect.py --pcap tunnel.pcap --port-a 51820 --port-b 51821 --underlay-mtu 1500
 python3 bench/detect.py --pcap tunnel.pcap --port-a 51820 --s4 28 --json
 ```
 
@@ -415,40 +432,77 @@ python3 bench/detect.py --pcap tunnel.pcap --port-a 51820 --s4 28 --json
 конвенция, что в `sniff.py`. Если задан только один порт, направление
 выводится по `sport`: пакеты с `sport == port-a` считаются `→B`.
 
+`--underlay-mtu N` — MTU underlay-интерфейса. IP-датаграммы длиннее `N`
+считаются GSO-агрегатами и исключаются из правил размеров/серий/таймингов
+(см. ниже). Без флага порог `8192` B: одиночный Ethernet-кадр такого размера
+невозможен, а jumbo-подложку (9000) надо указывать явно, иначе одиночные
+9-килобайтные сегменты тоже попадут в «агрегаты». Для 1500-подложки флаг
+важен: агрегаты 1.5–8 КБ иначе останутся в выборке.
+
 `--s4 N` — размер S4-префикса профиля обфускации. Эталон ACK-часов тогда
-`64+N`; окно допуска — `±4` байта.
+`64+N`; control-кадры несут случайный хвост `0..15` байт, поэтому проверка
+ловит весь диапазон `64+N .. 79+N`.
 
 Коды возврата: `0` — все проверки PASS/SKIP, `1` — есть FAIL, `2` — ошибка
 (файл, формат, linktype, аргументы). `--json` печатает тот же отчёт
 машиночитаемо (`ok`, `verdict`, `metrics`, `checks`, `capture`).
 
+### GSO-агрегаты
+
+Ядро (и Rust-демон) склеивает соседние датаграммы равной длины в UDP GSO,
+поэтому на underlay-интерфейсе до сегментации виден один UDP-пакет размером
+до 63 КБ, внутри которого лежат `N` одинаковых сегментов. Для DPI это не
+одна датаграмма, а пачка; если считать такой пакет одной строкой гистограммы,
+`top1_share`, `mod16_entropy`, `max_run`, `run3_share` и `autocorr` дают
+ложные FAIL на легитимном FEC/bulk-трафике.
+
+`detect.py` помечает пакет как GSO, если полная длина IP-пакета больше
+`--underlay-mtu` (по умолчанию `8192` B), и исключает агрегаты из:
+
+- распределения размеров (`top1_share`, `mod16_entropy`, `small_packets`);
+- серий (`max_run`, `run3_share`);
+- таймингов (`autocorr`, `interval_cv`);
+- FEC-эвристики (`fec_block_uniformity`, `fec_parity_share`).
+
+Доля агрегатов выводится отдельно: `metrics.*.gso_packets`, `gso_share` и
+проверка `gso_aggregates` со статусом `SKIP` (не FAIL). Если после исключения
+осталось меньше 50 не-GSO пакетов, правила размеров/таймингов переводятся в
+`SKIP`: судить о профиле по одним control-кадрам нельзя. Обычные потоки без
+агрегатов проверяются ровно как раньше — GSO-поправка не маскирует фиксированные
+размеры, метроном и серии (это закреплено тестами).
+
 ### Метрики и пороги
 
 Размер пакета — это длина **UDP payload** (внешняя туннельная датаграмма), а не
 кадр Ethernet: именно её видит DPI. Все метрики считаются по всему потоку и
-отдельно по направлениям, если порты заданы.
+отдельно по направлениям, если порты заданы. Пакеты, распознанные как
+GSO-агрегаты, в метрики размеров/серий/таймингов не входят (см. выше).
 
 | Проверка | Порог | Что означает |
 |---|---|---|
 | `capture_size` | `>= 50` пакетов | меньше — метрики недостоверны, проверка FAIL |
+| `gso_aggregates` | `ip_len <= --underlay-mtu` (8192) | доля GSO-агрегатов; при их наличии `SKIP` — они исключены из остальных правил |
 | `top1_share` | `<= 0.15` | доля самого частого размера; при `>=50%` пакетов размером `>= 1200 B` порог смягчается до `0.50`, потому что full-MTU поток физически не может быть разнообразным |
-| `ack_clock_share` | `<= 0.15` | доля пакетов `64+s4 ± 4` B — ACK-часы и пустые подтверждения |
+| `ack_clock_share` | `<= 0.15` | доля пакетов `64+s4 .. 79+s4` B — ACK-часы и пустые подтверждения; control-кадры несут случайный хвост `0..15`, поэтому окно асимметричное |
 | `mod16_entropy` | `>= 3.5` бит | энтропия распределения `len % 16`; низкая означает квантование размеров (паддинг до 16) — сам по себе fingerprint. На full-MTU нагрузке проверка SKIP |
 | `ip_fragments` | `== 0` | доля IP-фрагментов; фрагмент — аномалия и ломает обфускацию |
 | `max_run` | `<= 8` | максимальная серия одинаковых размеров подряд |
 | `run3_share` | `<= 0.30` | доля пакетов в сериях одинакового размера `>= 3` |
+| `fec_block_uniformity` | `<= 0.50` | доля найденных FEC-блоков с разбросом длин `<= 1 B`; у настоящих шардов есть случайный хвост `0..15`. На full-MTU нагрузке и при `< 2` блоков SKIP |
+| `fec_parity_share` | `<= 0.50` | оценка доли parity-шардов среди FEC-блоков; parity не должен доминировать над data-шардами. SKIP без блоков |
 | `interval_cv` | `>= 0.3` | CV межпакетных интервалов; низкий — метроном/жёсткий пейсинг |
 | `autocorr` | `abs(r) <= 0.5` | автокорреляция ряда «пакетов в 100-мс бине» на лагах 1/2/5/10/120 с; ищет периодические CAPS/keepalive |
 | `small_packets` | `<= 0.30` | доля пакетов `< 100` B |
-| `ack_pps_ratio` | `<= 4.0` | перекос pps ACK-пакетов между направлениями; требует оба порта и ненулевой ACK-поток в обе стороны, иначе SKIP |
+| `ack_pps_ratio` | `<= 4.0`, для FEC `<= 20.0` | перекос pps ACK-пакетов между направлениями. При явно односторонней нагрузке (в слабом направлении <5% байт данных) проверка SKIP: обратный канал несёт только ACK, и асимметрия ожидаема. Если найден FEC (`>= 2` блоков), порог мягче (20). Для симметричного потока без FEC порог остаётся 4 |
 
 Отчёт также печатает `pps`, средний размер, окно захвата, число фрагментов и
 пакетов без известного направления — по ним удобно проверять, что дамп снят
-корректно. Полная гистограмма размеров лежит в JSON
-(`metrics.all.histogram`). Хвостовые IP-фрагменты (offset != 0) не содержат
-UDP-заголовка: они попадают в счётчик фрагментации, но не в гистограмму
-размеров. Файл читается целиком в память, поэтому для дампов в единицы
-гигабайт снимайте окно короче.
+корректно. В JSON у каждой группы есть `packets_total` (все UDP-пакеты),
+`packets` (только не-GSO, по ним считаются метрики) и `gso_packets`/`gso_share`.
+Полная гистограмма размеров лежит в JSON (`metrics.all.histogram`).
+Хвостовые IP-фрагменты (offset != 0) не содержат UDP-заголовка: они попадают в
+счётчик фрагментации, но не в гистограмму размеров. Файл читается целиком в
+память, поэтому для дампов в единицы гигабайт снимайте окно короче.
 
 ### Тесты
 
@@ -459,7 +513,11 @@ python3 bench/tests/test-detect.py
 Тесты генерируют синтетические pcap: «плохой» профиль (кратные 16 размеры,
 20% ACK по 64 B, ровный шаг 10 мс) должен дать FAIL, «хороший» (вариативные
 размеры, случайные интервалы) — PASS; отдельно проверяются фрагментация,
-big-endian/nsec, `DLT_RAW`, Linux SLL, VLAN, `--s4` и pcapng-ошибка.
+big-endian/nsec, `DLT_RAW`, Linux SLL, VLAN, `--s4`, padded ACK (control-хвост
+`0..15`), FEC-блоки (серии `k+m`, parity, ровные длины, adaptive-ступенька),
+GSO-агрегаты (не дают FAIL, не маскируют реальную обфускацию, `--underlay-mtu`,
+поток целиком из GSO), `ack_pps_ratio` (SKIP для односторонней нагрузки,
+порог 20 для FEC, FAIL для симметричного потока без FEC) и pcapng-ошибка.
 
 Команда `python3 -m unittest discover -s bench/tests -p "test-detect.py"` на
 современном Python тесты не находит: `unittest discover` импортирует только
@@ -508,16 +566,19 @@ discover, но ломает оговорённое имя файла.
 workflow, вручную (`workflow_dispatch`) и по ночному cron (03:00 UTC).
 Джоб `bench` на `ubuntu-latest`:
 
-1. ставит `clang`/`llvm`/`lld`, `linux-headers-$(uname -r)`, `kmod`,
-   `iperf3`, `iproute2`, `tcpdump`, `python3` и проверяет `bash -n` скриптов;
-2. собирает модуль:
-   `make -C umbrawg-linux-kernel-module/src -j$(nproc) LLVM=1 KERNELDIR=/lib/modules/$(uname -r)/build`;
-3. собирает `umbrawg-rs` (`cargo build --release -p umbrawg`) и `uwg`
-   (`cargo build --release -p uwg`);
-4. на каждом push/PR гоняет `python3 bench/tests/test-detect.py` и
-   `PLAN_ONLY=1 CASES="mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec" bash bench/ext-tests.sh`;
+1. проверяет `bash -n bench/wire-ext.sh bench/ext-tests.sh bench/ext-matrix.sh`
+   и ставит на раннер `bc`, `build-essential`, `clang`, `libelf-dev`, `lld`,
+   `llvm`, `kmod`, `iperf3`, `iproute2`, `python3`, `tcpdump`;
+2. собирает модуль в контейнере `archlinux:base-devel` (`linux-headers`,
+   `KERNELDIR=/usr/lib/modules/*/build`, `LLVM=1` при clang-ядре): заголовки
+   Ubuntu-раннера не содержат `crypto/aes-gcm.h`;
+3. собирает `umbrawg-rs` (`cargo build --release --locked -p umbrawg`) и `uwg`
+   (`cargo build --release --locked -p uwg`);
+4. на каждом push/PR гоняет `python3 bench/tests/test-detect.py`,
+   `python3 bench/tests/test-golden-pcap.py` и
+   `PLAN_ONLY=1 CASES="mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec profile-mismatch adaptive-clean bbr-fec-clean clean-fec21" bash bench/ext-tests.sh`;
 5. только на push в master, `workflow_dispatch` и cron выполняет реальный
-   interop: `sudo DUR=2 CASES="mixed-fec21 kernel-fec21 rust2-fec21" bash bench/ext-tests.sh`.
+   interop: `sudo DUR=2 CASES="rust2-fec21 rust2-bbr-fec" bash bench/ext-tests.sh`.
 
 Полный прогон требует root (netns, `insmod`, `tc`, `tcpdump`) и занимает
 раннер на несколько минут, поэтому в PR он не запускается: сборка ловит
@@ -525,11 +586,12 @@ workflow, вручную (`workflow_dispatch`) и по ночному cron (03:0
 detect-тесты — регрессии анализатора. Логи прогонов (если были) уходят в
 артефакт `bench-interop-logs`.
 
-Ограничения: сборка модуля зависит от доступности `linux-headers-$(uname -r)`
-в apt; модуль для другого ядра всё равно не загрузится из-за vermagic,
-поэтому шаг падает явно, а не пропускается молча. `rust2-*` кейсы не требуют
-модуля и при необходимости гоняются отдельно:
-`sudo CASES="rust2-fec21 rust2-bbr-fec" bash bench/ext-tests.sh`.
+Ограничения: сборка модуля идёт в Arch-контейнере и зависит от доступности
+`linux-headers` в pacman; модуль для другого ядра всё равно не загрузится
+из-за vermagic, поэтому шаг падает явно, а не пропускается молча. Реальный
+interop на раннере покрывает только `rust2-*` (Rust↔Rust без модуля); кейсы
+`mixed`/`kernel`/`profile-mismatch`/`clean` гоняются на стенде, а в CI для них
+проверяется только `PLAN_ONLY`.
 
 ## CI (bench-matrix.yml)
 
@@ -564,6 +626,8 @@ PLAN_ONLY=1 bash bench/ext-tests.sh
 bash tests/test-bench-lib.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 bench/tests/test-detect.py
+python3 bench/tests/test-golden-pcap.py
+python3 bench/tests/test_bench_report.py
 python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/bench-ci.yml"))'
 python3 -c 'import yaml; yaml.safe_load(open(".github/workflows/bench-matrix.yml"))'
 ```

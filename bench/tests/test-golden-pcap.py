@@ -60,10 +60,44 @@ class GoldenPcap(unittest.TestCase):
             8,
             f"max_run={metrics['max_run']} (ожидалось <= 8)",
         )
+        ack_share = metrics["ack_share_window"]
+        self.assertGreater(
+            ack_share,
+            0.0,
+            "ACK-доля нулевая: окно 64+s4..79+s4 не поймало control-кадры",
+        )
         self.assertLessEqual(
-            metrics["ack_share_window"],
+            ack_share,
             0.10,
-            f"ack_share_window={metrics['ack_share_window']} (ожидалось <= 0.10)",
+            f"ack_share_window={ack_share} (ожидалось <= 0.10)",
+        )
+        histogram = metrics["histogram"]
+        ack_size = report["ack_size"]
+        padded = sum(
+            count
+            for size, count in histogram.items()
+            if ack_size < size <= ack_size + detect.ACK_TAIL_MAX
+        )
+        self.assertGreater(
+            padded,
+            0,
+            "в golden-дампе нет ACK с control-хвостом 1..15 — окно проверено не полностью",
+        )
+        self.assertGreater(
+            metrics["fec_blocks"],
+            0,
+            "в mixed-fec21 не найдено ни одного FEC-блока",
+        )
+        self.assertGreater(
+            metrics["fec_block_shard_share"],
+            0.3,
+            f"fec_block_shard_share={metrics['fec_block_shard_share']} (ожидалось > 0.3)",
+        )
+        self.assertIsNotNone(metrics["fec_parity_share_est"])
+        self.assertLessEqual(
+            metrics["fec_parity_share_est"],
+            0.5,
+            f"fec_parity_share_est={metrics['fec_parity_share_est']} (ожидалось <= 0.5)",
         )
         self.assertEqual(
             metrics["frag_share"],
