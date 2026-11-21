@@ -10,7 +10,6 @@
 | `ivlev-dev/netlink-packet-umbrawg` | `netlink-packet-umbrawg/` | полностью |
 | `ivlev-dev/umbrawg-tools` | `umbrawg-tools/` | полностью |
 | `ivlev-dev/umbrawg-rs` | `umbrawg-rs/` | полностью |
-| Go-реализация (была только на сервере) | `go/` | первый коммит |
 | `bench/` (был только на сервере) | `bench/` | первый коммит |
 
 История перенесена `git filter-repo --to-subdirectory-filter`, поэтому все

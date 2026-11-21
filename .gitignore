@@ -33,10 +33,6 @@ bench/state/
 __pycache__/
 *.pyc
 
-# Go
-go/umbrawg
-go/*.exe
-
 # Редакторы и ОС
 .DS_Store
 *.swp

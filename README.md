@@ -4,7 +4,6 @@
 [![netlink CI](https://github.com/ivlev-dev/umbrawg/actions/workflows/netlink-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/netlink-ci.yml)
 [![tools CI](https://github.com/ivlev-dev/umbrawg/actions/workflows/tools-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/tools-ci.yml)
 [![rs CI](https://github.com/ivlev-dev/umbrawg/actions/workflows/rs-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/rs-ci.yml)
-[![Go](https://github.com/ivlev-dev/umbrawg/actions/workflows/go-ci.yml/badge.svg)](https://github.com/ivlev-dev/umbrawg/actions/workflows/go-ci.yml)
 
 Монорепозиторий UmbraWG — VPN-протокола на базе WireGuard с обфускацией трафика.
 Версия 0.4.1 — 2026-11-21.
@@ -17,7 +16,6 @@
 | `netlink-packet-umbrawg/` | крейт разбора generic netlink UAPI | Rust |
 | `umbrawg-tools/` | CLI `uwg`, `uwg-quick`, конфиг и netlink-клиент | Rust |
 | `umbrawg-rs/` | userspace-демон (альтернатива модулю ядра) | Rust |
-| `go/` | Go-реализация (форк wireguard-go) | Go |
 | `bench/` | стенд: сценарии замеров, анализ, конфиги | Bash/Python |
 | `docs/` | общая документация монорепозитория | Markdown |
 
@@ -49,13 +47,10 @@ cd umbrawg-tools && cargo test --workspace && cargo clippy --workspace --all-tar
 
 # userspace-демон
 cd umbrawg-rs && cargo test --workspace && cargo clippy --workspace --all-targets
-
-# Go-реализация
-cd go && go build ./... && go test ./...
 ```
 
 Требования: Linux ≥ 7.0 и clang/LLVM для модуля, Rust 1.85
-(`umbrawg-tools`, `netlink-packet-umbrawg`) и 1.88 (`umbrawg-rs`), Go 1.25.
+(`umbrawg-tools`, `netlink-packet-umbrawg`) и 1.88 (`umbrawg-rs`).
 
 ## Ветки и релизы
 
@@ -98,5 +93,5 @@ cd go && go build ./... && go test ./...
 ## Лицензии
 
 Компоненты лицензированы по отдельности: модуль ядра — GPL-2.0,
-`umbrawg-tools` — GPL-2.0-only, `umbrawg-rs` и `netlink-packet-umbrawg` — MIT,
-`go/` — MIT. См. `LICENSE`/`COPYING` в каталогах компонентов.
+`umbrawg-tools` — GPL-2.0-only, `umbrawg-rs` и `netlink-packet-umbrawg` — MIT.
+См. `LICENSE`/`COPYING` в каталогах компонентов.

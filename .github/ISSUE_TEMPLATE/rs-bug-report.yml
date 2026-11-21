@@ -31,7 +31,6 @@ body:
       options:
         - kernel
         - rust
-        - go
     validations:
       required: true
   - type: dropdown
