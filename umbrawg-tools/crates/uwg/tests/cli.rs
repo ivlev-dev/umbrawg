@@ -661,14 +661,32 @@ fn show_all_without_interfaces_succeeds_with_empty_output() {
 }
 
 #[test]
-fn show_all_without_runtime_directory_fails() {
+fn show_all_without_runtime_directory_shows_kernel_interfaces() {
     let directory = runtime_dir();
     let missing = directory.join("missing");
+    assert!(!missing.exists());
 
+    // A kernel-only host has no userspace runtime directory at all. The
+    // command must still succeed and print the kernel interface list
+    // (empty on a host without UmbraWG interfaces).
     let output = run(&missing, &["show", "all"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert!(output.stdout.is_empty(), "{:?}", output.stdout);
+    assert!(stderr(&output).is_empty(), "{}", stderr(&output));
+}
+
+#[test]
+fn show_all_with_unreadable_runtime_directory_fails() {
+    let directory = runtime_dir();
+    // A regular file is not a readable runtime directory; `read_dir` fails
+    // with ENOTDIR, which must not be swallowed like NotFound.
+    let not_a_directory = directory.join("runtime-file");
+    std::fs::write(&not_a_directory, b"not a directory").expect("write");
+
+    let output = run(&not_a_directory, &["show", "all"]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr(&output).contains("runtime directory"),
+        stderr(&output).contains("Unable to list interfaces"),
         "{}",
         stderr(&output)
     );

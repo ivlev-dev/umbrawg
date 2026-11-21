@@ -37,6 +37,11 @@ Shows the configuration and runtime state. With \fIinterfaces\fP, prints the
 names of all UmbraWG interfaces separated by spaces. With a \fIPARAMETER\fP,
 prints one tab-separated value per line, intended for scripts. With
 \fIall\fP and a \fIPARAMETER\fP, every line is prefixed with the interface name.
+\fIall\fP lists kernel interfaces through rtnetlink and userspace interfaces
+through the runtime directory. A missing runtime directory is treated as empty,
+so a kernel-only host without the userspace daemon succeeds and prints the
+kernel interfaces (or nothing when there are none). A runtime directory that
+exists but cannot be read is an error.
 .PP
 \fIPARAMETER\fP is one of:
 \fIpublic-key\fP, \fIprivate-key\fP, \fIlisten-port\fP, \fIextra-ports\fP, \fIfwmark\fP,
