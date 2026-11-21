@@ -133,4 +133,3 @@ class GoldenPcap(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-PY
