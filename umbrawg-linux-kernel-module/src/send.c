@@ -276,6 +276,30 @@ static unsigned int uwg_fec_shard_tail(const struct sk_buff *skb,
 			      MESSAGE_PADDING_MULTIPLE);
 }
 
+/*
+ * Parity count of the FEC block the shard was cut from. A GSO
+ * superdatagram is lost as a whole by the underlay, so a group may carry at
+ * most this many shards: Reed-Solomon can then still rebuild the block.
+ * Zero means "not a parsed shard" (or parity encoding failed); callers treat
+ * it as no grouping. Only valid before encryption, while the ext header is
+ * still plaintext.
+ */
+static u8 uwg_fec_shard_m(const struct sk_buff *skb)
+{
+	const u8 *ext = skb->data;
+
+	if (unlikely(skb->len < UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN))
+		return 0;
+	if (unlikely(ext[0] != UWG_EXT_TAG || ext[1] != UWG_EXT_MAGIC_0 ||
+		     ext[2] != UWG_EXT_MAGIC_1 || ext[3] != UWG_EXT_MAGIC_2 ||
+		     ext[5] != UWG_EXT_KIND_FEC_SHARD))
+		return 0;
+	/* Wire layout of struct uwg_ext_fec_shard after the ext header:
+	 * block_id +0, index +4, k +5, m +6.
+	 */
+	return ext[UWG_EXT_HEADER_LEN + 6];
+}
+
 static unsigned int calculate_skb_padding(struct sk_buff *skb)
 {
 	unsigned int padded_size, last_unit = skb->len;
@@ -465,6 +489,7 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 		PACKET_CB(skb)->mtu = skb->dev->mtu;
 		PACKET_CB(skb)->is_keepalive = true;
 		PACKET_CB(skb)->is_fec = false;
+		PACKET_CB(skb)->fec_m = 0;
 		PACKET_CB(skb)->pace_len = 0;
 		skb_queue_tail(&peer->staged_packet_queue, skb);
 		net_dbg_ratelimited("%s: Sending keepalive packet to peer %llu (%pISpfsc)\n",
@@ -822,20 +847,33 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 	 * traffic: every GSO segment has to remain a standalone ext frame with
 	 * its own shard header. Pacing is charged once per block by the shard
 	 * carrying pace_len, see uwg_packet_pace_bytes().
+	 *
+	 * A GSO superdatagram is lost as a whole by the underlay, so a FEC
+	 * group is limited to the block's parity count: m shards may vanish
+	 * without making the block unrepairable. With m == 1 (and for blocks
+	 * whose parity encoding failed) shards are sent one per datagram,
+	 * exactly like before the aggregation existed.
 	 */
 	for (i = 0; i < nskbs; ) {
 		unsigned int len = skbs[i]->len;
+		unsigned int group_max = UWG_GSO_SEGS_MAX;
+		u8 fec_m = PACKET_CB(skbs[i])->fec_m;
 		u8 ds = PACKET_CB(skbs[i])->ds;
 		bool is_fec = PACKET_CB(skbs[i])->is_fec;
+
+		if (is_fec)
+			group_max = min_t(unsigned int, fec_m ? fec_m : 1,
+					  UWG_GSO_SEGS_MAX);
 
 		for (j = i + 1; j < nskbs; ++j) {
 			if (skbs[j]->len != len ||
 			    PACKET_CB(skbs[j])->ds != ds ||
 			    PACKET_CB(skbs[j])->is_fec != is_fec ||
+			    PACKET_CB(skbs[j])->fec_m != fec_m ||
 			    PACKET_CB(skbs[j])->is_keepalive !=
 				    PACKET_CB(skbs[i])->is_keepalive)
 				break;
-			if (j - i >= UWG_GSO_SEGS_MAX)
+			if (j - i >= group_max)
 				break;
 			if ((j - i + 1) * len > UWG_GSO_MAX_BYTES)
 				break;
@@ -994,6 +1032,7 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 	PACKET_CB(skb)->ds = 0;
 	PACKET_CB(skb)->is_keepalive = false;
 	PACKET_CB(skb)->is_fec = false;
+	PACKET_CB(skb)->fec_m = 0;
 	PACKET_CB(skb)->pace_len = 0;
 	/* CAPS/ACK frames are tiny: cap their random tail instead of letting
 	 * the transport padding policy inflate them to the UDP window.
@@ -1278,6 +1317,11 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 		 * do not pass through this path, may set one.
 		 */
 		PACKET_CB(skb)->padding = 0;
+		/* The FEC ext header is still plaintext here; the GSO
+		 * grouping runs after encryption and cannot read it anymore.
+		 */
+		PACKET_CB(skb)->fec_m = PACKET_CB(skb)->is_fec ?
+			uwg_fec_shard_m(skb) : 0;
 		PACKET_CB(skb)->nonce =
 				atomic64_inc_return(&keypair->sending_counter) - 1;
 		if (unlikely(PACKET_CB(skb)->nonce >= REJECT_AFTER_MESSAGES))

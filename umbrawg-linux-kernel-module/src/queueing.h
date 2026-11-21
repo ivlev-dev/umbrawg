@@ -75,6 +75,11 @@ struct packet_cb {
 	u8 ds;
 	bool is_keepalive;
 	bool is_fec;
+	/* Parity count of the FEC block a shard belongs to; also the maximum
+	 * number of shards that may share one GSO superdatagram. Zero for
+	 * non-FEC traffic and for blocks encoded without parity.
+	 */
+	u8 fec_m;
 };
 
 #define PACKET_CB(skb) ((struct packet_cb *)((skb)->cb))
