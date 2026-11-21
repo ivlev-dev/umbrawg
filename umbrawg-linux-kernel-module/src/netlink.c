@@ -425,6 +425,7 @@ err:
 struct uwg_bbr_stats {
 	u8 mode;
 	u32 peers;
+	u32 peers_no_ack;
 	u64 cwnd;
 	u64 inflight;
 	u64 pacing_rate;
@@ -451,6 +452,20 @@ static void uwg_bbr_stats_fill_device(struct uwg_device *uwg,
 	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
 		struct uwg_bbr_snapshot snap;
 		struct uwg_bbr *bbr;
+
+		/* A peer that never confirmed ACK is not shaped by BBR: the
+		 * data path skips accounting, pacing and the cwnd gate for it,
+		 * so its controller snapshot would only report estimates that
+		 * are not in use. Count it separately and keep it out of the
+		 * aggregates, which then show inflight/pacing as inactive.
+		 * Without CAPS the peer is unconfirmed too, not legacy: BBR
+		 * must not pace a link whose feedback is not negotiated.
+		 */
+		if (!READ_ONCE(peer->caps.peer_valid) ||
+		    !(READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_ACK)) {
+			stats->peers_no_ack++;
+			continue;
+		}
 
 		rcu_read_lock();
 		bbr = uwg_peer_bbr_lookup(peer);
@@ -531,7 +546,9 @@ static int uwg_put_bbr_stats(struct sk_buff *skb,
 			      stats->min_rtt_ns, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
 	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_ROUND_LOST,
 			(u32)min_t(u64, stats->round_lost, U32_MAX)) ||
-	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_PEERS, stats->peers)) {
+	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_PEERS, stats->peers) ||
+	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK,
+			stats->peers_no_ack)) {
 		nla_nest_cancel(skb, nest);
 		return -EMSGSIZE;
 	}

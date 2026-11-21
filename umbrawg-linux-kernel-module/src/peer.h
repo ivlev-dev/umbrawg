@@ -108,6 +108,11 @@ struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 
 struct uwg_bbr *uwg_peer_bbr_lookup(struct uwg_peer *peer);
 void uwg_peer_bbr_keypair_changed(struct uwg_peer *peer, u64 keypair_id);
+/* The peer's CAPS no longer advertise ACK: discard the in-flight window that
+ * was accumulated while it did. Pacing and the cwnd gate are skipped for a
+ * peer without ACK, so the records would never be released.
+ */
+void uwg_peer_bbr_ack_lost(struct uwg_peer *peer);
 void uwg_peer_bbr_release(struct uwg_peer *peer);
 int uwg_peer_bbr_sync(struct uwg_peer *peer);
 int uwg_peer_bbr_sync_device(struct uwg_device *uwg);

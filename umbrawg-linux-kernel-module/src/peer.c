@@ -57,6 +57,20 @@ void uwg_peer_bbr_keypair_changed(struct uwg_peer *peer, u64 keypair_id)
 	rcu_read_unlock();
 }
 
+void uwg_peer_bbr_ack_lost(struct uwg_peer *peer)
+{
+	struct uwg_bbr *bbr;
+
+	rcu_read_lock();
+	bbr = uwg_peer_bbr_lookup(peer);
+	if (bbr) {
+		spin_lock_bh(&peer->bbr_lock);
+		uwg_bbr_drop_inflight(bbr);
+		spin_unlock_bh(&peer->bbr_lock);
+	}
+	rcu_read_unlock();
+}
+
 static struct uwg_bbr *uwg_peer_bbr_alloc(u32 mss)
 {
 	struct uwg_bbr *bbr = kvmalloc(sizeof(*bbr), GFP_KERNEL);

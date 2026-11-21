@@ -68,6 +68,12 @@ struct uwg_peer;
 #define UWG_EXT_CAP_ACK BIT(1)
 #define UWG_EXT_CAP_FEC BIT(2)
 #define UWG_EXT_CAP_FEC_ADAPTIVE BIT(3)
+/* The peer understands parity on a partial FEC block: a flush with n < k
+ * data shards may be encoded as k' = n, m' > 0 instead of the legacy m' = 0
+ * form. Both sides advertise it whenever FEC is enabled; the bit is only
+ * consulted for shards from a peer that also advertises FEC.
+ */
+#define UWG_EXT_CAP_FEC_PARTIAL BIT(4)
 
 #define UWG_EXT_ACK_FLAG_ECN_CE BIT(0)
 

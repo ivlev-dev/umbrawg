@@ -12,10 +12,20 @@
 #include <linux/errno.h>
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
+#include <linux/module.h>
 #include <linux/random.h>
 #include <linux/skbuff.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
+
+/* Test knob for wire compatibility: with partial parity switched off we
+ * advertise and emit exactly the legacy partial block (k' = n, m' = 0), as a
+ * kernel without FEC_PARTIAL would. Default stays on.
+ */
+static bool uwg_ext_fec_partial = true;
+module_param_named(fec_partial, uwg_ext_fec_partial, bool, 0644);
+MODULE_PARM_DESC(fec_partial,
+		 "Advertise FEC partial-block parity (default: on)");
 
 static bool uwg_ext_kind_valid(u8 kind)
 {
@@ -340,6 +350,8 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 		flags |= UWG_EXT_CAP_FEC;
 		if (adaptive)
 			flags |= UWG_EXT_CAP_FEC_ADAPTIVE;
+		if (READ_ONCE(uwg_ext_fec_partial))
+			flags |= UWG_EXT_CAP_FEC_PARTIAL;
 		caps->fec_k = k;
 		caps->fec_m = m;
 	}
@@ -835,7 +847,8 @@ static void uwg_ext_sanitize_caps(struct uwg_peer *peer,
 	net_dbg_ratelimited("%s: Peer %llu advertised unsupported FEC %u:%u\n",
 			    peer->device->dev->name, peer->internal_id,
 			    caps->fec_k, caps->fec_m);
-	caps->flags &= ~(UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_ADAPTIVE);
+	caps->flags &= ~(UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_ADAPTIVE |
+			 UWG_EXT_CAP_FEC_PARTIAL);
 	caps->fec_k = 0;
 	caps->fec_m = 0;
 }
@@ -847,6 +860,8 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	ktime_t now;
 	ktime_t next_send = 0;
 	enum uwg_ext_caps_plan plan;
+	bool ack_before;
+	bool ack_after;
 	bool changed;
 	bool defer = false;
 	bool send = false;
@@ -857,6 +872,9 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	now = ktime_get();
 	spin_lock_bh(&peer->caps.lock);
 	uwg_ext_local_caps(peer->device, &peer->caps.local);
+	ack_before = peer->caps.peer_valid &&
+		     (peer->caps.peer.flags & UWG_EXT_CAP_ACK);
+	ack_after = caps.flags & UWG_EXT_CAP_ACK;
 	changed = !peer->caps.last_peer_valid ||
 		  !uwg_ext_caps_same(&peer->caps.last_peer, &caps);
 	peer->caps.last_peer = caps;
@@ -898,6 +916,13 @@ static void uwg_ext_handle_caps(struct uwg_peer *peer, const u8 *payload,
 	if (send && peer->caps.send_attempts >= UWG_EXT_CAPS_MAX_ATTEMPTS)
 		peer->caps.send_attempts = UWG_EXT_CAPS_MAX_ATTEMPTS - 1;
 	spin_unlock_bh(&peer->caps.lock);
+	/* The peer stopped acknowledging: the datagrams registered while it
+	 * still advertised ACK can never leave inflight through feedback.
+	 * Drop the in-flight window instead of letting the cwnd gate stall on
+	 * it; the pacer and the gate are off for this peer anyway.
+	 */
+	if (ack_before && !ack_after)
+		uwg_peer_bbr_ack_lost(peer);
 	if (send)
 		uwg_ext_maybe_send_caps(peer);
 	else if (defer)

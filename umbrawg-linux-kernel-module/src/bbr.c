@@ -980,6 +980,21 @@ void uwg_bbr_new_epoch(struct uwg_bbr *b, u64 keypair_id, u64 now_ns)
 	uwg_pacer_refill(b, now_ns);
 }
 
+void uwg_bbr_drop_inflight(struct uwg_bbr *b)
+{
+	memset(b->ring, 0, sizeof(b->ring));
+	b->inflight = 0;
+	b->oldest_inflight = 0;
+	b->oldest_valid = false;
+	b->round_delivered = 0;
+	b->round_lost = 0;
+	b->round_max_inflight = 0;
+	b->round_congestion = false;
+	b->next_round_delivered = b->delivered;
+	b->pacer.allowance = 0;
+	b->pacer.started = false;
+}
+
 /*
  * Fallback for a missed keypair notification: a changed id or a counter far
  * below max_sent cannot belong to the current nonce space, because the ring

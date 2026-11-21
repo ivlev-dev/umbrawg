@@ -191,6 +191,13 @@ void uwg_bbr_init(struct uwg_bbr *b, u32 mss, u32 initial_rtt_us);
 void uwg_bbr_set_mss(struct uwg_bbr *b, u32 mss);
 /* Caller must hold the peer's bbr_lock. */
 void uwg_bbr_new_epoch(struct uwg_bbr *b, u64 keypair_id, u64 now_ns);
+/* Forgets every datagram currently in flight and restarts the round, while
+ * keeping the channel estimate (btl_bw, min_rtt, cwnd, pacing rate). Used when
+ * the peer stops acknowledging: those records can never be released by an ACK
+ * and would otherwise pin the congestion window forever.
+ * Caller must hold the peer's bbr_lock.
+ */
+void uwg_bbr_drop_inflight(struct uwg_bbr *b);
 void uwg_bbr_snapshot_get(const struct uwg_bbr *b,
 			  struct uwg_bbr_snapshot *snap);
 void uwg_bbr_on_send(struct uwg_bbr *b, u64 keypair_id, u64 counter, u32 len,

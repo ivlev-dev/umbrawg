@@ -451,6 +451,22 @@ int uwg_fec_selftest(void)
 	if (ret < 0)
 		return ret;
 
+	/* Partial blocks are encoded with k' = n; the smallest shapes a
+	 * sparse stream produces are k' = 1 and k' = 2, with the local m.
+	 */
+	ret = uwg_fec_selftest_config(1, 1);
+	if (ret < 0)
+		return ret;
+	ret = uwg_fec_selftest_config(1, 2);
+	if (ret < 0)
+		return ret;
+	ret = uwg_fec_selftest_config(2, 1);
+	if (ret < 0)
+		return ret;
+	ret = uwg_fec_selftest_config(2, 2);
+	if (ret < 0)
+		return ret;
+
 	ret = uwg_fec_selftest_config(10, 3);
 	if (ret < 0)
 		return ret;

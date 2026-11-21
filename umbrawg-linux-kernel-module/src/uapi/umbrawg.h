@@ -50,6 +50,7 @@
  *        UWGDEVICE_BBR_STATS_A_MIN_RTT_NS: NLA_U64
  *        UWGDEVICE_BBR_STATS_A_ROUND_LOST: NLA_U32
  *        UWGDEVICE_BBR_STATS_A_PEERS: NLA_U32
+ *        UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK: NLA_U32
  *    UWGDEVICE_A_PEERS: NLA_NESTED
  *        0: NLA_NESTED
  *            UWGPEER_A_PUBLIC_KEY: NLA_EXACT_LEN, len UWG_KEY_LEN
@@ -283,6 +284,11 @@ enum uwgdevice_bbr_stats_attrs {
 	UWGDEVICE_BBR_STATS_A_MIN_RTT_NS,	/* u64, нс */
 	UWGDEVICE_BBR_STATS_A_ROUND_LOST,	/* u32, пакеты */
 	UWGDEVICE_BBR_STATS_A_PEERS,		/* u32, число пиров с BBR-состоянием */
+	UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK,	/* u32, пиры без подтверждения
+						 * ACK в CAPS: BBR не
+						 * применяется, в агрегаты
+						 * выше не входят
+						 */
 	__UWGDEVICE_BBR_STATS_A_LAST,
 };
 

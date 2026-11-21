@@ -500,6 +500,20 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 	uwg_packet_send_staged_packets(peer);
 }
 
+/*
+ * Whether BBR may shape traffic to this peer at all. A peer confirms that it
+ * will acknowledge by setting UWG_EXT_CAP_ACK in CAPS. Until that confirmation
+ * arrives (and again if the peer withdraws it) the controller stays out of the
+ * data path: accounting, pacing and the cwnd gate are all skipped, so packets
+ * leave immediately and inflight does not grow against a peer that never sends
+ * feedback. The Rust implementation gates on the same flag.
+ */
+static bool uwg_packet_bbr_peer_ack(const struct uwg_peer *peer)
+{
+	return READ_ONCE(peer->caps.peer_valid) &&
+	       (READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_ACK);
+}
+
 static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
 				   struct sk_buff_head *packets,
 				   u64 keypair_id)
@@ -508,7 +522,8 @@ static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
 	struct sk_buff *skb;
 	u64 now_ns;
 
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
+	    !uwg_packet_bbr_peer_ack(peer))
 		return;
 
 	rcu_read_lock();
@@ -548,7 +563,8 @@ static void uwg_packet_bbr_on_sent(struct uwg_peer *peer,
 	u64 now_ns;
 	unsigned int i;
 
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
+	    !uwg_packet_bbr_peer_ack(peer))
 		return;
 
 	rcu_read_lock();
@@ -582,7 +598,8 @@ static void uwg_packet_bbr_on_drop(struct uwg_peer *peer, struct sk_buff *list)
 	struct sk_buff *skb, *next;
 	struct uwg_bbr *bbr;
 
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
+	    !uwg_packet_bbr_peer_ack(peer))
 		return;
 
 	rcu_read_lock();
@@ -607,7 +624,8 @@ static void uwg_packet_bbr_on_drop_one(struct uwg_peer *peer, u64 nonce)
 {
 	struct uwg_bbr *bbr;
 
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
+	    !uwg_packet_bbr_peer_ack(peer))
 		return;
 
 	rcu_read_lock();
@@ -627,7 +645,8 @@ static void uwg_packet_bbr_on_drop_skbs(struct uwg_peer *peer,
 	struct uwg_bbr *bbr;
 	unsigned int i;
 
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF)
+	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
+	    !uwg_packet_bbr_peer_ack(peer))
 		return;
 
 	rcu_read_lock();
@@ -674,6 +693,8 @@ static void uwg_packet_pace(struct uwg_peer *peer, unsigned int len)
 	if (len < UWG_TX_PACE_MIN_BYTES)
 		return;
 	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_ON)
+		return;
+	if (!uwg_packet_bbr_peer_ack(peer))
 		return;
 	if (!preemptible())
 		return;
@@ -1049,7 +1070,8 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 	/* Control frames consume wire counters too: record the nonce so the
 	 * peer's ACKs for them are not rejected by the BBR validator.
 	 */
-	if (READ_ONCE(uwg->bbr_mode) == UWG_BBR_MODE_ON) {
+	if (READ_ONCE(uwg->bbr_mode) == UWG_BBR_MODE_ON &&
+	    uwg_packet_bbr_peer_ack(peer)) {
 		struct uwg_bbr *bbr;
 
 		rcu_read_lock();
@@ -1159,6 +1181,8 @@ static bool uwg_packet_cwnd_gate(struct uwg_peer *peer,
 	__skb_queue_head_init(hold);
 
 	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_ON)
+		return true;
+	if (!uwg_packet_bbr_peer_ack(peer))
 		return true;
 	/* Control frames never enter this queue; keepalives do, and are what
 	 * keeps a stalled tunnel alive.

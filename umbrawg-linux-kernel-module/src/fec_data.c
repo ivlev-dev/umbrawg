@@ -76,6 +76,18 @@ struct uwg_fec_rx {
 	bool keypair_valid;
 };
 
+/* A shard carries its own block shape. A full block matches the local
+ * profile exactly through k' = k and m' = m; a partial block may be narrower
+ * in either direction. The bound on k' + m' keeps the per-slot arena, the
+ * received bitmap and the RS decoder inside the locally allocated profile.
+ */
+static bool uwg_fec_shard_profile_ok(u8 k, u8 m, u8 local_k, u8 local_m)
+{
+	if (!k || k > local_k || m > local_m)
+		return false;
+	return (unsigned int)k + m <= (unsigned int)local_k + local_m;
+}
+
 bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive)
 {
 	u8 data, parity;
@@ -359,6 +371,20 @@ bool uwg_fec_peer_tx_ready(const struct uwg_peer *peer)
 	return true;
 }
 
+/* The peer can decode parity on a partial block (k' = n, m' > 0). A peer
+ * without the flag must keep receiving the legacy k' = n, m' = 0 form.
+ */
+static bool uwg_fec_peer_partial(const struct uwg_peer *peer)
+{
+	u32 flags;
+
+	if (!READ_ONCE(peer->caps.peer_valid))
+		return false;
+	flags = READ_ONCE(peer->caps.peer.flags);
+	return (flags & (UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_PARTIAL)) ==
+	       (UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_PARTIAL);
+}
+
 static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 			    struct sk_buff_head *out)
 {
@@ -400,10 +426,15 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 
 	/* Only the encoder needs a contiguous block; without parity the shards
 	 * are copied straight from tx->shards into their skbs below.
+	 *
+	 * A partial block is encoded with its actual data count as k'. Parity
+	 * is attached when the peer negotiated FEC_PARTIAL; otherwise the
+	 * legacy m' = 0 form is kept. The block buffer is sized for the full
+	 * k + m, and n + m never exceeds it.
 	 */
-	block_k = with_parity ? tx->k : (u8)n;
-	block_m = with_parity ? tx->m : 0;
-	if (with_parity) {
+	block_k = (u8)n;
+	block_m = (with_parity || uwg_fec_peer_partial(peer)) ? tx->m : 0;
+	if (block_m) {
 		for (i = 0; i < n; i++) {
 			unsigned int copy = (unsigned int)tx->lens[i] + 2;
 			u8 *dst = tx->block + (size_t)i * shard_len;
@@ -414,11 +445,9 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 			if (copy < shard_len)
 				memset(dst + copy, 0, shard_len - copy);
 		}
-		if (uwg_fec_encode(tx->k, tx->m, shard_len, tx->block,
-				   tx->block + (size_t)tx->k * shard_len)) {
+		if (uwg_fec_encode(block_k, block_m, shard_len, tx->block,
+				   tx->block + (size_t)block_k * shard_len))
 			block_m = 0;
-			block_k = (u8)n;
-		}
 	}
 	total = (unsigned int)block_k + block_m;
 	atomic64_inc(&peer->fec_counters.blocks_encoded);
@@ -795,7 +824,8 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 	if (shard->m == 0) {
 		if (!shard->k || shard->k > rx->k)
 			invalid = true;
-	} else if (shard->k != rx->k || shard->m != rx->m) {
+	} else if (!uwg_fec_shard_profile_ok(shard->k, shard->m,
+					    rx->k, rx->m)) {
 		invalid = true;
 	}
 	if (invalid) {
@@ -818,7 +848,12 @@ int uwg_fec_rx_shard(struct uwg_peer *peer,
 		rx->have_next = true;
 	}
 	if ((s32)(shard->block_id - rx->next_id) < 0) {
-		atomic64_inc(&peer->fec_counters.dropped_bounds);
+		/* A partial block is delivered as soon as its k' shards are
+		 * present, so the remaining parity of a (k', m') block can
+		 * arrive after the block was already released. That is normal
+		 * for FEC_PARTIAL and is ignored silently, exactly like a
+		 * replay of an older block: neither is a bounds violation.
+		 */
 		goto out_unlock;
 	}
 
@@ -1530,6 +1565,20 @@ int uwg_fec_mtu_selftest(void)
 	 */
 	T_CHECK(uwg_fec_target_mtu(1500, 1420, false, 0) == 1420);
 	T_CHECK(uwg_fec_target_mtu(576, 1420, false, 0) == 1420);
+
+	/* Partial-block RX bounds: a shard may carry fewer data shards than
+	 * the local k, but never more, and its m' must fit the local m.
+	 * k' = 1 with parity is the sparse-ping case.
+	 */
+	T_CHECK(uwg_fec_shard_profile_ok(1, 2, 8, 2));
+	T_CHECK(uwg_fec_shard_profile_ok(2, 2, 8, 2));
+	T_CHECK(uwg_fec_shard_profile_ok(8, 2, 8, 2));
+	T_CHECK(uwg_fec_shard_profile_ok(1, 0, 8, 2));
+	T_CHECK(!uwg_fec_shard_profile_ok(0, 1, 8, 2));
+	T_CHECK(!uwg_fec_shard_profile_ok(9, 1, 8, 2));
+	T_CHECK(!uwg_fec_shard_profile_ok(1, 3, 8, 2));
+	T_CHECK(!uwg_fec_shard_profile_ok(8, 1, 7, 2));
+
 	T_CHECK(uwg_fec_adaptive_selftest());
 	T_CHECK(uwg_ext_ack_selftest());
 	T_CHECK(uwg_ext_caps_selftest());
