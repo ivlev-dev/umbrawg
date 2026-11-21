@@ -1,5 +1,5 @@
 Name:           umbrawg-tools
-Version:        0.4.0
+Version:        0.4.1
 Release:        1%{?dist}
 Summary:        Rust command-line tools for the UmbraWG VPN
 License:        GPL-2.0-only
@@ -77,6 +77,12 @@ install -d -m0700 %{buildroot}%{_sysconfdir}/umbrawg
 %{_unitdir}/umbrawg@.service
 
 %changelog
+* Sat Nov 21 2026 Yuri Egorov <ye@umbra.org> - 0.4.1-1
+- Add underlay-mtu for the userspace daemon and uwg-quick
+- Add bbr-stats and fec-stats to uwg show for both backends
+- Restrict fixed FEC profiles to K=1..8 and M=1..2
+- Make WG_COLOR_MODE/WG_HIDE_KEYS primary with UWG_* fallback
+
 * Fri Nov 20 2026 Yuri Egorov <ye@umbra.org> - 0.4.0-1
 - Add underlay-mtu, bbr-stats and fec-stats to uwg show/set
 

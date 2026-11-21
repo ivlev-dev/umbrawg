@@ -1,7 +1,7 @@
 # Maintainer: Yuri Egorov <ye@umbra.org>
 # pkgver вычисляется из src/version.h; дефисы upstream-версии заменяются подчёркиваниями.
 pkgname=umbrawg-dkms-git
-pkgver=0.4.0.r0.g0000000
+pkgver=0.4.1.r0.g0000000
 pkgrel=1
 _upstream_name=umbrawg-linux-kernel-module
 pkgdesc="UmbraWG VPN tunnel kernel module (DKMS sources, git master)"

@@ -1,6 +1,6 @@
 pkgbase = umbrawg-tools
 	pkgdesc = UmbraWG command line tools: uwg and uwg-quick
-	pkgver = 0.4.0
+	pkgver = 0.4.1
 	pkgrel = 1
 	url = https://github.com/ivlev-dev/umbrawg
 	arch = x86_64
@@ -19,8 +19,8 @@ pkgbase = umbrawg-tools
 	optdepends = umbrawg-dkms: ядерный бэкенд UmbraWG
 	optdepends = umbrawg-daemon: userspace-бэкенд UmbraWG
 	conflicts = umbrawg-tools-git
-	source = umbrawg-tools-0.4.0.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/tools-v0.4.0.tar.gz
-	source = netlink-packet-umbrawg-0.4.0.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/netlink-v0.4.0.tar.gz
+	source = umbrawg-tools-0.4.1.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/tools-v0.4.1.tar.gz
+	source = netlink-packet-umbrawg-0.4.1.tar.gz::https://github.com/ivlev-dev/umbrawg/archive/refs/tags/netlink-v0.4.1.tar.gz
 	sha256sums = TODO_UPDPKGSUMS_AFTER_FIRST_TAG
 	sha256sums = TODO_UPDPKGSUMS_AFTER_FIRST_TAG
 

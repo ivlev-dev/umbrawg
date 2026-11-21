@@ -1,3 +1,12 @@
+umbrawg-linux-kmod (1:0.4.1-1) unstable; urgency=medium
+
+  * Limit FEC GSO shard groups to m and rework the adaptive settle window.
+  * Revoke stale FEC profiles only after extension traffic; cap CAPS replies.
+  * Bind the BBR watermark ring to the keypair and gate cwnd after loss-cut.
+  * Derive the FEC MTU from the underlay MTU and expose FEC drop counters.
+
+ -- Alex Ivlev <ai@itegroup.ru>  Sat, 21 Nov 2026 12:00:00 +0300
+
 umbrawg-linux-kmod (1:0.4.0-1) unstable; urgency=medium
 
   * Export BBR/FEC counters and BBR statistics over netlink.

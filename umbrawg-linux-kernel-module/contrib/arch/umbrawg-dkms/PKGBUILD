@@ -1,9 +1,9 @@
 # Maintainer: Yuri Egorov <ye@umbra.org>
 # pkgver: upstream версия модуля из src/version.h; тег — kernel-v<версия>.
 pkgname=umbrawg-dkms
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
-_upstream_version=0.4.0
+_upstream_version=0.4.1
 _upstream_name=umbrawg-linux-kernel-module
 pkgdesc="UmbraWG VPN tunnel kernel module (DKMS sources)"
 arch=('any')

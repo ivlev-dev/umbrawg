@@ -1,8 +1,8 @@
 %global debug_package %{nil}
-%global upstream_version 0.4.0
+%global upstream_version 0.4.1
 
 Name:           umbrawg-dkms
-Version:        0.4.0
+Version:        0.4.1
 Release:        1%{?dist}
 Epoch:          1
 URL:            https://github.com/ivlev-dev/umbrawg
@@ -86,6 +86,12 @@ exit 0
 %{_usrsrc}/umbrawg-%{version}
 
 %changelog
+* Sat Nov 21 2026 Yuri Egorov <ye@umbra.org> - 0.4.1-1
+- Limit FEC GSO shard groups to m and rework the adaptive settle window
+- Revoke stale FEC profiles only after extension traffic; cap CAPS replies
+- Bind the BBR watermark ring to the keypair and gate cwnd after loss-cut
+- Derive the FEC MTU from the underlay MTU and expose FEC drop counters
+
 * Fri Nov 20 2026 Yuri Egorov <ye@umbra.org> - 0.4.0-1
 - Export BBR/FEC metrics, keypair epochs, underlay MTU policy and cwnd gating
 
