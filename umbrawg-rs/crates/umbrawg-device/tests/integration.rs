@@ -1579,6 +1579,157 @@ fn batch_padding_keeps_equal_packets_gso_compatible() {
 }
 
 #[test]
+fn mixed_batches_with_random_trailers_do_not_inflate_full_packets() {
+    // `random_trailers` draws a trailer for the whole batch from the room the
+    // *smallest* packet leaves inside the window. A full-MTU packet sharing
+    // that batch has no room and must only get the 0..=15 reserve, never the
+    // full trailer.
+    let mut pair = pair(ObfParams {
+        s4: 28,
+        random_trailers: true,
+        ..ObfParams::default()
+    });
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let big = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[6u8; 1400]);
+    let small = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[7u8; 52]);
+    let big_base = 28 + 16 + big.len() + 16;
+    let small_base = 28 + 16 + small.len() + 16;
+    let plaintexts: [&[u8]; 3] = [&big, &small, &small];
+    let mut output = vec![0u8; 65_535];
+    let mut saw_trailer = false;
+    for _ in 0..32 {
+        let layout = {
+            let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+            pair.a
+                .send_batch(&pair.peer_b, &plaintexts, &mut output, &mut ctx)
+                .unwrap()
+                .layout
+        };
+        assert_eq!(layout.len(), 2, "big and small packets are separate groups");
+        let big_len = layout.groups()[0].segment_len;
+        let small_len = layout.groups()[1].segment_len;
+        assert!(
+            big_len <= big_base + 15,
+            "full packet was inflated to {big_len} bytes"
+        );
+        if small_len > small_base + 15 {
+            saw_trailer = true;
+        }
+    }
+    assert!(saw_trailer, "the RNG never drew a real trailer");
+}
+
+#[test]
+fn full_packets_keep_the_random_trailer_reserve_and_one_gso_group() {
+    // A full-MTU datagram has no room inside the peer's UDP window, so the
+    // `random_trailers` reserve (0..=15) is the only thing that keeps its wire
+    // length from being fixed. The reserve must not be clipped by the window;
+    // it is drawn once per batch, so all packets stay in one GSO group while
+    // the segment length still changes from batch to batch.
+    let mut pair = pair(ObfParams {
+        s4: 28,
+        random_trailers: true,
+        ..ObfParams::default()
+    });
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[5u8; 1400]);
+    let plaintexts: [&[u8]; 4] = [&packet; 4];
+    let base = 28 + 16 + packet.len() + 16;
+    let mut output = vec![0u8; 65_535];
+    let mut lengths = std::collections::HashSet::new();
+    for _ in 0..32 {
+        let layout = {
+            let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+            pair.a
+                .send_batch(&pair.peer_b, &plaintexts, &mut output, &mut ctx)
+                .unwrap()
+                .layout
+        };
+        assert_eq!(layout.len(), 1, "full packets must stay in one GSO group");
+        assert_eq!(layout.groups()[0].segments, plaintexts.len());
+        let segment_len = layout.groups()[0].segment_len;
+        assert!(segment_len >= base, "reserve is never negative");
+        assert!(
+            segment_len <= base + 15,
+            "reserve is bounded by MESSAGE_PADDING_MULTIPLE - 1, got {segment_len}"
+        );
+        lengths.insert(segment_len);
+    }
+    assert!(
+        lengths.len() > 1,
+        "a full-MTU datagram must vary between batches, got {lengths:?}"
+    );
+}
+
+#[test]
+fn udp_window_ignores_our_padding_and_counts_the_aead_tag() {
+    // The window is what a peer's padding is measured against. On TX it must
+    // be the unpadded wire length (otherwise our own reserve inflates it on
+    // every packet); on RX it must include the AEAD tag like the kernel
+    // (`padding + MESSAGE_MINIMUM_LENGTH + plaintext`).
+    let mut pair = pair(ObfParams {
+        s4: 28,
+        random_trailers: true,
+        ..ObfParams::default()
+    });
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let packet = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[3u8; 1400]);
+    let base = 28 + 16 + packet.len() + 16;
+    let mut wire = 0;
+    for _ in 0..64 {
+        send_data(&mut pair, true, &packet, now);
+        let mut sent = pair.io_a.take_sent();
+        assert_eq!(sent.len(), 1);
+        wire = sent[0].payload.len();
+        assert_eq!(
+            pair.peer_b.udp_window() as usize,
+            base,
+            "TX window must ignore the random trailer"
+        );
+        if wire > base {
+            let datagram = sent.remove(0);
+            deliver_one(
+                datagram,
+                pair.addr_a,
+                &pair.b,
+                &mut pair.io_b,
+                &mut pair.rng,
+                now,
+                &mut pair.scratch,
+            );
+            break;
+        }
+    }
+    assert!(wire > base, "the test RNG must draw a non-zero reserve");
+    assert_eq!(
+        pair.peer_a.udp_window() as usize,
+        wire,
+        "RX window must be the whole datagram, including the AEAD tag"
+    );
+
+    // A small inner ACK may grow up to the full-size datagram, never past it.
+    let ack = ipv4_packet([10, 0, 0, 2], [10, 0, 0, 1], &[4u8; 52]);
+    let mut ack_len = 0;
+    for _ in 0..64 {
+        send_data(&mut pair, false, &ack, now);
+        let mut sent = pair.io_b.take_sent();
+        assert_eq!(sent.len(), 1);
+        ack_len = sent.remove(0).payload.len();
+        assert!(
+            ack_len < wire,
+            "a small ACK grew to a full-size datagram: {ack_len} >= {wire}"
+        );
+    }
+    assert!(ack_len > 0);
+}
+
+#[test]
 fn fec_shards_fit_an_ethernet_underlay() {
     // 1500-byte underlay with IPv6+UDP headers leaves a 1452-byte datagram
     // budget. A one-shard frame adds 2 (length) + 20 (extension+FEC headers)
