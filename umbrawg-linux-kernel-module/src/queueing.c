@@ -4,6 +4,7 @@
  */
 
 #include "queueing.h"
+#include <linux/atomic.h>
 #include <linux/skb_array.h>
 #include <linux/topology.h>
 
@@ -59,9 +60,22 @@ int uwg_packet_queue_init_percpu(struct crypt_queue *queue,
 	memset(queue, 0, sizeof(*queue));
 	queue->helper_cpu = -1;
 	atomic_set(&queue->steal_cpu, -1);
+	atomic64_set(&queue->spill_count, 0);
 	queue->worker = alloc_percpu(struct multicore_worker);
 	if (!queue->worker)
 		return -ENOMEM;
+
+	queue->spill_cpu = alloc_percpu(int);
+	if (!queue->spill_cpu) {
+		free_percpu(queue->worker);
+		queue->worker = NULL;
+		return -ENOMEM;
+	}
+	for_each_possible_cpu(cpu) {
+		int *cursor = per_cpu_ptr(queue->spill_cpu, cpu);
+
+		*cursor = -1;
+	}
 
 	for_each_possible_cpu(cpu) {
 		INIT_WORK(&per_cpu_ptr(queue->worker, cpu)->work, function);
@@ -95,6 +109,10 @@ err:
 		per_cpu_ptr(queue->worker, cpu)->ptr = NULL;
 	}
 	free_percpu(queue->worker);
+	if (queue->spill_cpu) {
+		free_percpu(queue->spill_cpu);
+		queue->spill_cpu = NULL;
+	}
 	queue->worker = NULL;
 	return ret;
 }
@@ -117,6 +135,10 @@ void uwg_packet_queue_free_percpu(struct crypt_queue *queue, bool purge)
 		per_cpu_ptr(queue->worker, cpu)->ptr = NULL;
 	}
 	free_percpu(queue->worker);
+	if (queue->spill_cpu) {
+		free_percpu(queue->spill_cpu);
+		queue->spill_cpu = NULL;
+	}
 	queue->worker = NULL;
 }
 

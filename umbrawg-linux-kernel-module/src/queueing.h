@@ -295,12 +295,95 @@ static inline void uwg_crypt_maybe_steal(struct crypt_queue *device_queue,
 		uwg_crypt_steal_cancel(device_queue, own_cpu);
 }
 
+/*
+ * Pick the next spill candidate from @mask for producer @own and advance
+ * @cursor past it. Candidates are visited in CPU-id order with wraparound,
+ * the producer's own CPU is never returned, and the walk gives up after two
+ * steps so a mask that only contains @own cannot spin. This is the exact
+ * 2-CPU case: with mask {0,1} and own 0 it returns 1 on the first step,
+ * instead of consuming the loop iteration on the skipped own CPU.
+ */
+static inline int uwg_spill_next_cpu(const struct cpumask *mask, int own,
+				     int *cursor)
+{
+	int target = READ_ONCE(*cursor);
+	int i;
+
+	for (i = 0; i < 2; ++i) {
+		target = cpumask_next(target, mask);
+		if (target >= nr_cpu_ids)
+			target = cpumask_first(mask);
+		if (target != own) {
+			WRITE_ONCE(*cursor, target);
+			return target;
+		}
+	}
+	return -1;
+}
+
+/*
+ * Put one skb on this CPU's ring, or spill it to another online CPU when the
+ * local ring is momentarily full. The producer stays local and batched in the
+ * common case; only an overflow pays for the walk below. At most
+ * UWG_SPILL_CANDIDATES rings are tried, starting after the per-producer
+ * sticky cursor, so an overflow cannot turn into an O(ncpus) scan or a
+ * wakeup storm under saturation. The cursor is per producer CPU, which keeps
+ * a hot producer/target pair together without a shared cache line.
+ *
+ * Ordering is unaffected: the peer queue holds the packets in arrival order
+ * and its consumer waits for the head skb's state, so a packet processed by
+ * a helper CPU cannot overtake an earlier one.
+ *
+ * The shared handshake queue does not use this path: it has a single ring and
+ * no per-CPU worker, so uwg_queue_enqueue_per_device_and_peer() is only ever
+ * called with the per-CPU encrypt/decrypt queues.
+ */
+#define UWG_SPILL_CANDIDATES 2
+
+static inline int uwg_queue_produce_crypt(struct crypt_queue *device_queue,
+					  struct multicore_worker *worker,
+					  struct sk_buff *skb, int cpu,
+					  struct workqueue_struct *wq)
+{
+	struct multicore_worker *target_worker;
+	struct crypt_queue *queue;
+	int *cursor, target, first = -1;
+	int i;
+
+	queue = worker->ptr;
+	if (likely(!ptr_ring_produce_bh(&queue->ring, skb))) {
+		uwg_queue_wakeup_arm(worker, cpu, wq);
+		return 0;
+	}
+
+	if (num_online_cpus() < 2)
+		return -EPIPE;
+
+	cursor = per_cpu_ptr(device_queue->spill_cpu, cpu);
+	for (i = 0; i < UWG_SPILL_CANDIDATES; ++i) {
+		target = uwg_spill_next_cpu(cpu_online_mask, cpu, cursor);
+		if (target < 0 || target == first)
+			break;
+		if (first < 0)
+			first = target;
+
+		target_worker = per_cpu_ptr(device_queue->worker, target);
+		queue = target_worker->ptr;
+		if (!ptr_ring_produce_bh(&queue->ring, skb)) {
+			uwg_queue_wakeup_arm(target_worker, target, wq);
+			atomic64_inc(&device_queue->spill_count);
+			return 0;
+		}
+	}
+
+	return -EPIPE;
+}
+
 static inline int uwg_queue_enqueue_per_device_and_peer(
 	struct crypt_queue *device_queue, struct prev_queue *peer_queue,
 	struct sk_buff *skb, struct workqueue_struct *wq)
 {
 	struct multicore_worker *worker;
-	struct crypt_queue *queue;
 	int cpu;
 
 	atomic_set_release(&PACKET_CB(skb)->state, PACKET_STATE_UNCRYPTED);
@@ -322,15 +405,17 @@ static inline int uwg_queue_enqueue_per_device_and_peer(
 	 * softirq backlog into ksoftirqd and left the CPUs idle between
 	 * wakeups. A TCP flow is emitted from one CPU, so staying local lets
 	 * a worker wake once and drain a real batch with warm cachelines.
+	 * The only exception is uwg_queue_produce_crypt() below: when the
+	 * local ring is full the skb spills to another CPU instead of being
+	 * dropped, which is rare enough not to affect the batching above.
 	 */
 	cpu = get_cpu();
 	worker = per_cpu_ptr(device_queue->worker, cpu);
-	queue = worker->ptr;
-	if (unlikely(ptr_ring_produce_bh(&queue->ring, skb))) {
+	if (unlikely(uwg_queue_produce_crypt(device_queue, worker, skb, cpu,
+					     wq))) {
 		put_cpu();
 		return -EPIPE;
 	}
-	uwg_queue_wakeup_arm(worker, cpu, wq);
 	/* The single flow that backs up its ring gets idle CPUs to help. */
 	uwg_crypt_maybe_steal(device_queue, peer_queue, cpu, wq);
 	put_cpu();

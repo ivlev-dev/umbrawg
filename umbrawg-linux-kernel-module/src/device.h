@@ -44,6 +44,13 @@ struct crypt_queue {
 	atomic_t steal_cpu;
 	/* Device-level: round-robin cursor for picking the next helper. */
 	int helper_cpu;
+	/* Device-level: per-producer-CPU sticky cursor for the overflow
+	 * spill path. NULL for the shared handshake queue, which has no
+	 * per-CPU rings and never takes that path.
+	 */
+	int __percpu *spill_cpu;
+	/* Device-level: successful ring overflows (informational). */
+	atomic64_t spill_count;
 	/* Round-robin cursor for the shared handshake queue only. The
 	 * per-CPU crypt queues must not use it: their ring is chosen by the
 	 * producing CPU (uwg_queue_enqueue_per_device_and_peer()), and

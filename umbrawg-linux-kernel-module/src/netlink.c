@@ -82,6 +82,7 @@ static const struct nla_policy device_policy[UWGDEVICE_A_MAX + 1] = {
 	[UWGDEVICE_A_UNDERLAY_MTU] = { .type = NLA_U16 },
 	[UWGDEVICE_A_FEC_STATS] = { .type = NLA_NESTED },
 	[UWGDEVICE_A_BBR_STATS] = { .type = NLA_NESTED },
+	[UWGDEVICE_A_CRYPT_SPILL] = { .type = NLA_U64 },
 };
 
 static const struct nla_policy peer_policy[UWGPEER_A_MAX + 1] = {
@@ -577,8 +578,12 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 	struct nlattr *peers_nest;
 	int ret = -EMSGSIZE;
 	bool done = true;
+	u64 spill_count;
 	void *hdr;
 	char buf[32];
+
+	spill_count = atomic64_read(&uwg->encrypt_queue.spill_count) +
+		      atomic64_read(&uwg->decrypt_queue.spill_count);
 
 	rtnl_lock();
 	mutex_lock(&uwg->device_update_lock);
@@ -600,6 +605,8 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 		    nla_put_u32(skb, UWGDEVICE_A_FEC, uwg->fec_mode) ||
 		    nla_put_u16(skb, UWGDEVICE_A_UNDERLAY_MTU,
 				uwg->underlay_mtu) ||
+		    nla_put_u64_64bit(skb, UWGDEVICE_A_CRYPT_SPILL,
+				      spill_count, UWGDEVICE_A_UNSPEC) ||
 		    nla_put_u32(skb, UWGDEVICE_A_IFINDEX, uwg->dev->ifindex) ||
 		    nla_put_string(skb, UWGDEVICE_A_IFNAME, uwg->dev->name) ||
 		    nla_put_u16(skb, UWGDEVICE_A_JC, uwg->jc) ||

@@ -9,6 +9,7 @@
 #include <linux/delay.h>
 #include <linux/jiffies.h>
 #include <linux/bitmap.h>
+#include <linux/cpumask.h>
 
 #define UWGT_PRODUCERS 4
 #define UWGT_ITEMS_PER_PRODUCER 25000
@@ -297,6 +298,297 @@ static bool uwg_queueing_steal_selftest(int *test_num)
 	return success;
 }
 
+/*
+ * Spill-path tests. The real per-CPU queue is used, with a worker that only
+ * clears the pending flag and records which CPU ran, so ring contents and
+ * wake targets can be checked exactly. Ring capacity is intentionally tiny;
+ * the point is the overflow policy, not throughput.
+ */
+#define UWGT_SPILL_RING_LEN 4
+
+struct uwg_spill_selftest_ctx {
+	struct crypt_queue dev;
+	struct workqueue_struct *wq;
+	atomic_t woken;
+	int woken_cpu;
+};
+
+static struct uwg_spill_selftest_ctx *uwg_spill_ctx;
+
+static void uwg_spill_selftest_worker(struct work_struct *work)
+{
+	struct multicore_worker *worker = container_of(work,
+						       struct multicore_worker,
+						       work);
+
+	if (uwg_spill_ctx) {
+		uwg_spill_ctx->woken_cpu = smp_processor_id();
+		atomic_inc(&uwg_spill_ctx->woken);
+	}
+	atomic_set(&worker->pending, 0);
+}
+
+static int uwg_spill_fill(struct crypt_queue *queue, void *token)
+{
+	int n = 0;
+
+	while (!ptr_ring_produce_bh(&queue->ring, token))
+		++n;
+	return n;
+}
+
+static int uwg_spill_count_token(struct crypt_queue *dev, void *token)
+{
+	int cpu, i, count = 0;
+
+	for_each_online_cpu(cpu) {
+		struct crypt_queue *q = per_cpu_ptr(dev->worker, cpu)->ptr;
+		struct ptr_ring *r = &q->ring;
+
+		for (i = 0; i < r->size; ++i)
+			if (READ_ONCE(r->queue[i]) == token)
+				++count;
+	}
+	return count;
+}
+
+static int uwg_spill_find_token(struct crypt_queue *dev, void *token)
+{
+	int cpu, i;
+
+	for_each_online_cpu(cpu) {
+		struct crypt_queue *q = per_cpu_ptr(dev->worker, cpu)->ptr;
+		struct ptr_ring *r = &q->ring;
+
+		for (i = 0; i < r->size; ++i)
+			if (READ_ONCE(r->queue[i]) == token)
+				return cpu;
+	}
+	return -1;
+}
+
+static void uwg_spill_reset_ctx(struct uwg_spill_selftest_ctx *ctx)
+{
+	int cpu;
+
+	flush_workqueue(ctx->wq);
+	for_each_online_cpu(cpu) {
+		int *cursor = per_cpu_ptr(ctx->dev.spill_cpu, cpu);
+		struct crypt_queue *q =
+			per_cpu_ptr(ctx->dev.worker, cpu)->ptr;
+
+		while (ptr_ring_consume_bh(&q->ring))
+			;
+		atomic_set(&per_cpu_ptr(ctx->dev.worker, cpu)->pending, 0);
+		*cursor = -1;
+	}
+	atomic_set(&ctx->woken, 0);
+	ctx->woken_cpu = -1;
+}
+
+static bool uwg_queueing_spill_selftest(int *test_num)
+{
+	struct uwg_spill_selftest_ctx *ctx;
+	struct multicore_worker *worker;
+	struct crypt_queue *own_q;
+	cpumask_var_t mask;
+	void *token;
+	int c0, c1, c2, own, target, cursor, ret, cpu;
+	bool success = true;
+
+	ctx = kzalloc_obj(*ctx);
+	if (!ctx)
+		return false;
+
+	ret = uwg_packet_queue_init_percpu(&ctx->dev,
+					   uwg_spill_selftest_worker,
+					   UWGT_SPILL_RING_LEN);
+	if (ret) {
+		kfree(ctx);
+		return false;
+	}
+
+	ctx->wq = alloc_workqueue("uwg-spill-selftest",
+				  WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU,
+				  0);
+	if (!ctx->wq) {
+		uwg_packet_queue_free_percpu(&ctx->dev, false);
+		kfree(ctx);
+		return false;
+	}
+
+	uwg_spill_ctx = ctx;
+	if (!alloc_cpumask_var(&mask, GFP_KERNEL)) {
+		uwg_spill_ctx = NULL;
+		destroy_workqueue(ctx->wq);
+		uwg_packet_queue_free_percpu(&ctx->dev, false);
+		kfree(ctx);
+		return false;
+	}
+	c0 = cpumask_first(cpu_online_mask);
+	c1 = cpumask_next(c0, cpu_online_mask);
+	c2 = c1 < nr_cpu_ids ? cpumask_next(c1, cpu_online_mask) : nr_cpu_ids;
+
+	/* The exact 2-CPU mask that the old loop skipped with a "continue":
+	 * the only remote CPU is the first and the last candidate at once.
+	 */
+	cpumask_clear(mask);
+	cpumask_set_cpu(c0, mask);
+	if (c1 < nr_cpu_ids)
+		cpumask_set_cpu(c1, mask);
+	++*test_num;
+	cursor = -1;
+	if (uwg_spill_next_cpu(mask, c0, &cursor) !=
+		    (c1 < nr_cpu_ids ? c1 : -1)) {
+		pr_err("queueing self-test %d: FAIL (2-CPU spill candidate)\n",
+		       *test_num);
+		success = false;
+	}
+	cursor = -1;
+	if (c1 < nr_cpu_ids && uwg_spill_next_cpu(mask, c1, &cursor) != c0) {
+		pr_err("queueing self-test %d: FAIL (2-CPU reverse)\n",
+		       *test_num);
+		success = false;
+	}
+
+	/* A 3-CPU mask: the candidate after the skipped own CPU must still
+	 * be reached on the next step.
+	 */
+	if (c2 < nr_cpu_ids) {
+		cpumask_set_cpu(c2, mask);
+		++*test_num;
+		cursor = -1;
+		if (uwg_spill_next_cpu(mask, c1, &cursor) != c0 ||
+		    uwg_spill_next_cpu(mask, c1, &cursor) != c2) {
+			pr_err("queueing self-test %d: FAIL (spill wrap)\n",
+			       *test_num);
+			success = false;
+		}
+	}
+
+	/* A mask that only contains the producer has no candidate. */
+	++*test_num;
+	cpumask_clear(mask);
+	cpumask_set_cpu(c0, mask);
+	cursor = -1;
+	if (uwg_spill_next_cpu(mask, c0, &cursor) != -1) {
+		pr_err("queueing self-test %d: FAIL (single CPU spill)\n",
+		       *test_num);
+		success = false;
+	}
+
+	if (num_online_cpus() < 2) {
+		pr_info("queueing self-test: spill ring tests skipped on a single CPU\n");
+		goto out;
+	}
+
+	own = c0;
+	worker = per_cpu_ptr(ctx->dev.worker, own);
+	own_q = worker->ptr;
+
+	/* Local ring full, every other ring empty: exactly one remote ring
+	 * receives the skb, its owner is woken once, and the stat moves.
+	 */
+	++*test_num;
+	uwg_spill_reset_ctx(ctx);
+	uwg_spill_fill(own_q, (void *)0xdead0001UL);
+	token = (void *)0xdead1001UL;
+	ret = uwg_queue_produce_crypt(&ctx->dev, worker,
+				      (struct sk_buff *)token, own, ctx->wq);
+	if (ret ||
+	    uwg_spill_count_token(&ctx->dev, token) != 1 ||
+	    uwg_spill_find_token(&ctx->dev, token) == own ||
+	    atomic64_read(&ctx->dev.spill_count) != 1) {
+		pr_err("queueing self-test %d: FAIL (remote spill)\n",
+		       *test_num);
+		success = false;
+	}
+	target = uwg_spill_find_token(&ctx->dev, token);
+	flush_workqueue(ctx->wq);
+	if (atomic_read(&ctx->woken) != 1 || ctx->woken_cpu != target) {
+		pr_err("queueing self-test %d: FAIL (spill wake)\n", *test_num);
+		success = false;
+	}
+
+	/* All rings full: no ring may receive the skb, nobody is woken and
+	 * the caller gets -EPIPE.
+	 */
+	++*test_num;
+	uwg_spill_reset_ctx(ctx);
+	for_each_online_cpu(cpu) {
+		struct crypt_queue *q = per_cpu_ptr(ctx->dev.worker, cpu)->ptr;
+
+		uwg_spill_fill(q, (void *)0xdead0002UL);
+	}
+	token = (void *)0xdead1002UL;
+	ret = uwg_queue_produce_crypt(&ctx->dev,
+				      per_cpu_ptr(ctx->dev.worker, own),
+				      (struct sk_buff *)token, own, ctx->wq);
+	flush_workqueue(ctx->wq);
+	if (ret != -EPIPE || uwg_spill_count_token(&ctx->dev, token) ||
+	    atomic_read(&ctx->woken) ||
+	    atomic64_read(&ctx->dev.spill_count) != 1) {
+		pr_err("queueing self-test %d: FAIL (all rings full)\n",
+		       *test_num);
+		success = false;
+	}
+
+	/* Bounded candidate walk: with two candidates the first may be full
+	 * while the second accepts; with the one-candidate default the same
+	 * setup must drop instead of scanning further.
+	 */
+	if (c2 < nr_cpu_ids) {
+		int first;
+		struct crypt_queue *q;
+		u64 spills;
+
+		++*test_num;
+		uwg_spill_reset_ctx(ctx);
+		cursor = -1;
+		first = uwg_spill_next_cpu(cpu_online_mask, own, &cursor);
+		uwg_spill_fill(own_q, (void *)0xdead0003UL);
+		q = per_cpu_ptr(ctx->dev.worker, first)->ptr;
+		uwg_spill_fill(q, (void *)0xdead0003UL);
+		token = (void *)0xdead1003UL;
+		spills = atomic64_read(&ctx->dev.spill_count);
+		ret = uwg_queue_produce_crypt(&ctx->dev, worker,
+					      (struct sk_buff *)token, own,
+					      ctx->wq);
+		flush_workqueue(ctx->wq);
+#if UWG_SPILL_CANDIDATES > 1
+		if (ret ||
+		    uwg_spill_find_token(&ctx->dev, token) != c2 ||
+		    atomic_read(&ctx->woken) != 1 ||
+		    ctx->woken_cpu != c2) {
+			pr_err("queueing self-test %d: FAIL (second candidate)\n",
+			       *test_num);
+			success = false;
+		}
+#else
+		if (ret != -EPIPE ||
+		    uwg_spill_count_token(&ctx->dev, token) ||
+		    atomic_read(&ctx->woken) ||
+		    atomic64_read(&ctx->dev.spill_count) != spills) {
+			pr_err("queueing self-test %d: FAIL (bounded spill)\n",
+			       *test_num);
+			success = false;
+		}
+#endif
+	}
+
+	uwg_spill_ctx = NULL;
+	flush_workqueue(ctx->wq);
+	uwg_spill_reset_ctx(ctx);
+out:
+	uwg_spill_ctx = NULL;
+	flush_workqueue(ctx->wq);
+	destroy_workqueue(ctx->wq);
+	uwg_packet_queue_free_percpu(&ctx->dev, false);
+	free_cpumask_var(mask);
+	kfree(ctx);
+	return success;
+}
+
 bool __init uwg_queueing_selftest(void)
 {
 	struct uwg_queueing_selftest_ctx *ctx;
@@ -406,6 +698,9 @@ bool __init uwg_queueing_selftest(void)
 	}
 
 	if (!uwg_queueing_steal_selftest(&test_num))
+		success = false;
+
+	if (!uwg_queueing_spill_selftest(&test_num))
 		success = false;
 
 	if (success)

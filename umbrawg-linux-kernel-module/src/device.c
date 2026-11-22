@@ -62,6 +62,24 @@ MODULE_PARM_DESC(crypt_queue_budget,
 		 "Device-wide in-flight budget (skb chains) for the per-CPU crypt queues, "
 		 "split across possible CPUs, 64..8192; applied when an interface is created");
 
+/*
+ * Priority of the per-CPU crypt workers. The producer runs in the UDP
+ * receive softirq and can burst a few hundred packets before the worker is
+ * scheduled; at nice 0 that delay let a 50-peer ring overflow into
+ * 0.35..0.64% rx_dropped. WQ_HIGHPRI removes most of that delay, but it also
+ * puts the workers ahead of unrelated nice-0 work on the same CPU, which is a
+ * host-scheduling change and can move latency (including the p90 tail) in the
+ * wrong direction. Keep it as a knob so the spill-only policy can be measured
+ * on the same build: set to 0 before creating the interface to run the crypt
+ * workers at normal priority. Applied at interface creation; existing
+ * interfaces keep the workqueue they were built with.
+ */
+static bool crypt_wq_highpri = true;
+module_param(crypt_wq_highpri, bool, 0644);
+MODULE_PARM_DESC(crypt_wq_highpri,
+		 "Run per-CPU crypt workers at WQ_HIGHPRI (1, default) or normal priority (0); "
+		 "applied when an interface is created");
+
 static LIST_HEAD(device_list);
 
 static int uwg_open(struct net_device *dev)
@@ -381,6 +399,7 @@ static int uwg_newlink(struct net_device *dev,
 				      MAX_QUEUED_PACKETS);
 	unsigned int queue_len = max_t(unsigned int, 128,
 				       budget / num_possible_cpus());
+	unsigned int wq_flags;
 	int ret = -ENOMEM, i;
 
 	rcu_assign_pointer(uwg->creating_net, link_net);
@@ -412,8 +431,15 @@ static int uwg_newlink(struct net_device *dev,
 	if (!uwg->handshake_send_wq)
 		goto err_destroy_handshake_receive;
 
-	uwg->packet_crypt_wq = alloc_workqueue("uwg-crypt-%s",
-			WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU, 0, dev->name);
+	/* See the crypt_wq_highpri comment above: high priority is the
+	 * candidate fix for the bursty worker delay, not a permanent policy
+	 * decision. The spill path in queueing.h covers the residual bursts.
+	 */
+	wq_flags = WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU;
+	if (READ_ONCE(crypt_wq_highpri))
+		wq_flags |= WQ_HIGHPRI;
+	uwg->packet_crypt_wq = alloc_workqueue("uwg-crypt-%s", wq_flags, 0,
+					       dev->name);
 	if (!uwg->packet_crypt_wq)
 		goto err_destroy_handshake_send;
 

@@ -258,6 +258,7 @@ enum uwgdevice_attribute {
 	UWGDEVICE_A_FEC_STATS,	/* 38: nested uwgdevice_fec_stats_attrs */
 	UWGDEVICE_A_BBR_STATS,	/* 39: nested uwgdevice_bbr_stats_attrs */
 	UWGDEVICE_A_UNDERLAY_MTU,	/* 40: u16, MTU of the path between peers */
+	UWGDEVICE_A_CRYPT_SPILL,	/* 41: u64, successful ring overflows */
 	__UWGDEVICE_A_LAST
 };
 #define UWGDEVICE_A_MAX (__UWGDEVICE_A_LAST - 1)

@@ -771,11 +771,12 @@ static void uwg_packet_consume_data(struct uwg_device *uwg, struct sk_buff *skb)
 	ret = uwg_queue_enqueue_per_device_and_peer(&uwg->decrypt_queue, &peer->rx_queue, skb,
 						   uwg->packet_crypt_wq);
 	if (unlikely(ret == -EPIPE)) {
-		/* The per-CPU ring is full: the skb will be freed by the rx
-		 * path, so account for it where the drop happens.
+		/* Every per-CPU ring is full (the spill path failed too): the
+		 * skb will be freed by the rx path, so account for it where
+		 * the drop happens.
 		 */
 		DEV_STATS_INC(uwg->dev, rx_dropped);
-		net_dbg_ratelimited("%s: decrypt queue full, dropping packet\n",
+		net_dbg_ratelimited("%s: all per-CPU decrypt rings full, dropping packet\n",
 				    uwg->dev->name);
 		uwg_queue_enqueue_per_peer_rx(skb, PACKET_STATE_DEAD);
 	}
