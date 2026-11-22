@@ -36,7 +36,14 @@ use rx::RxBatch;
 use tx::TxBatch;
 
 const MAX_PACKET: usize = 65_535;
-const RECV_BATCH: usize = 64;
+/// Сколько дейтаграмм забирает один `recvmmsg`.
+///
+/// С UDP GRO одна дейтаграмма несёт до 64 сегментов, поэтому на 6–8 Гбит/с
+/// приёмник обрабатывает ~20 тыс. датаграмм/с, а не сотни тысяч: батч 16 не
+/// превращает цикл в syscall-per-packet, но вчетверо уменьшает буферы приёма.
+/// Память на демон: `воркеры × RECV_BATCH × MAX_PACKET` — 4 воркера × 16 ×
+/// 64 КиБ = 4 МиБ вместо 16 МиБ, а на стенде 51 демон это ~600 МиБ разницы.
+const RECV_BATCH: usize = 16;
 const TUN_BATCH: usize = 128;
 const TUN_PACKET_MARGIN: usize = 256;
 const IDLE_TIMEOUT_MS: i32 = 10;
@@ -98,10 +105,42 @@ where
     Ok(parsed)
 }
 
+/// Сколько RAM (байт) считать «небольшим хостом» для дефолта числа воркеров.
+///
+/// На таком хосте обычно живут десятки демонов (стенд 50 пиров — это 51
+/// демон), и каждый лишний воркер стоит ~2 МиБ приёмных буферов, TUN-очередь
+/// и UDP-сокет с SO_REUSEPORT. Восемь гибибайт — порог, выше которого
+/// 51 демон заведомо помещается и можно отдавать приёму половину ядер.
+const SMALL_HOST_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
+/// `MemTotal` из `/proc/meminfo`, если он доступен.
+pub(crate) fn mem_total() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemTotal:") {
+            let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
+}
+
 /// Определяет число рабочих потоков.
+///
+/// На небольшом хосте (≤ 8 ГиБ RAM) дефолт — 2, на большом — прежние
+/// `min(4, ядра)`: там 51 демон заведомо помещается и приём можно раздать
+/// четырём ядрам.
 pub fn worker_count(requested: Option<&str>, available: usize) -> usize {
+    worker_count_for(requested, available, mem_total())
+}
+
+fn worker_count_for(requested: Option<&str>, available: usize, mem_total: Option<u64>) -> usize {
     let available = available.max(1);
-    let default = 4.min(available);
+    let by_cpu = 4.min(available);
+    let default = match mem_total {
+        Some(total) if total < SMALL_HOST_BYTES => by_cpu.min(2),
+        _ => by_cpu,
+    };
     match requested {
         Some(value) => value
             .trim()
@@ -1265,12 +1304,15 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         parallel::ParallelConfig::from_env(available).map_err(io::Error::other)?
     {
         log::info!(
-            "parallel rx enabled: {} crypto workers, sched={}, queue depth {} slots (~{} MiB per worker)",
+            "parallel rx enabled: {} crypto workers ({} threads with rx and control), sched={}, \
+             queue depth {} slots (up to {} MiB per worker when full; slot buffers are lazy)",
             parallel.workers,
+            parallel.workers + 2,
             parallel.sched.as_str(),
             parallel.queue_depth,
             parallel::queue_bytes(parallel.queue_depth).div_ceil(1024 * 1024)
         );
+        parallel::warn_pool_budget(parallel.workers, parallel.queue_depth);
         return run_parallel(
             device,
             ifname,
@@ -1284,6 +1326,15 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
 
     let requested = env::var("UMBRAWG_THREADS").ok();
     let workers = worker_count(requested.as_deref(), available);
+    log::info!(
+        "workers: {workers} of {available} cores, RAM {} MiB, source={}",
+        mem_total().map_or(0, |bytes| bytes / (1024 * 1024)),
+        if requested.is_some() {
+            "UMBRAWG_THREADS"
+        } else {
+            "memory-aware default"
+        }
+    );
 
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
@@ -1507,6 +1558,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn receive_buffers_have_a_bounded_budget() {
+        // Буфер приёма — MAX_PACKET (GRO-суперпакет), поэтому память на демон
+        // задаётся только батчем: 4 воркера × RECV_BATCH × 64 КиБ.
+        const { assert!(RECV_BATCH * MAX_PACKET <= 1024 * 1024) };
+        const { assert!(RECV_BATCH >= 8) };
+        // Батч покрывает всплеск из целого GRO-суперпакета (до 64 сегментов).
+        const { assert!(RECV_BATCH * 64 >= 1024) };
+    }
+
+    #[test]
     fn tx_batch_does_not_reuse_tun_batch_capacity() {
         let source = include_str!("lib.rs");
         let needle = concat!("TxBatch::new(", "TUN_BATCH)");
@@ -1540,15 +1601,25 @@ mod tests {
 
     #[test]
     fn worker_count_default() {
-        assert_eq!(worker_count(None, 8), 4);
-        assert_eq!(worker_count(None, 2), 2);
+        // Большой хост: прежняя формула min(4, ядра).
+        assert_eq!(worker_count_for(None, 8, Some(64 << 30)), 4);
+        assert_eq!(worker_count_for(None, 2, Some(64 << 30)), 2);
+        // Небольшой хост (≤ 8 ГиБ): 2 воркера — 51 демон иначе не влезает.
+        assert_eq!(worker_count_for(None, 8, Some(4 << 30)), 2);
+        assert_eq!(worker_count_for(None, 6, Some(4 << 30)), 2);
+        assert_eq!(worker_count_for(None, 1, Some(4 << 30)), 1);
+        // Неизвестный объём RAM — считаем хост большим.
+        assert_eq!(worker_count_for(None, 8, None), 4);
     }
 
     #[test]
     fn worker_count_override() {
-        assert_eq!(worker_count(Some("6"), 8), 6);
-        assert_eq!(worker_count(Some("0"), 8), 4);
-        assert_eq!(worker_count(Some("64"), 8), 8);
+        assert_eq!(worker_count_for(Some("6"), 8, Some(64 << 30)), 6);
+        assert_eq!(worker_count_for(Some("0"), 8, Some(64 << 30)), 4);
+        assert_eq!(worker_count_for(Some("64"), 8, Some(64 << 30)), 8);
+        // Явное значение важнее памяти: 4 воркера на 4 ГБ — на ответственности
+        // администратора, дефолт его не перебивает.
+        assert_eq!(worker_count_for(Some("4"), 8, Some(4 << 30)), 4);
     }
 
     #[test]

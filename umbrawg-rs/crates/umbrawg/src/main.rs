@@ -43,12 +43,17 @@ fn print_help() {
     println!("  -h, --help         показать эту справку");
     println!();
     println!("Переменные окружения:");
-    println!("  UMBRAWG_THREADS       число рабочих потоков");
-    println!("  UMBRAWG_SOCKET_BUFFER размер буферов UDP-сокета в байтах: 212 КиБ..64 МиБ (8 МиБ)");
+    println!("  UMBRAWG_THREADS       число рабочих потоков (и крипто-воркеров parallel RX,");
+    println!("                        если не задан UMBRAWG_RX_WORKERS); по умолчанию 2 на");
+    println!("                        хосте ≤ 8 ГиБ RAM, иначе min(4, ядра)");
+    println!(
+        "  UMBRAWG_SOCKET_BUFFER потолок буферов UDP-сокета в байтах: 212 КиБ..64 МиБ (8 МиБ)"
+    );
     println!("  UMBRAWG_PARALLEL_RX   1 — параллельный приём (RX-поток + крипто-воркеры)");
-    println!("  UMBRAWG_RX_WORKERS    число крипто-воркеров параллельного приёма");
+    println!("  UMBRAWG_RX_WORKERS    число крипто-воркеров параллельного приёма (по умолчанию");
+    println!("                        как UMBRAWG_THREADS: 2 на хосте ≤ 8 ГиБ RAM)");
     println!("  UMBRAWG_RX_SCHED      выбор воркера: peer (по умолчанию) или queue");
-    println!("  UMBRAWG_RX_QUEUE      глубина очереди воркера: 64..1024, степень двойки (256)");
+    println!("  UMBRAWG_RX_QUEUE      глубина очереди воркера: 64..1024, степень двойки (64)");
     println!("  UMBRAWG_RX_STATS      1 — выводить счётчики приёма раз в 5 секунд");
     println!("  UMBRAWG_LOG_LEVEL     уровень логирования");
     println!("  UMBRAWG_RUNTIME_DIR   каталог сокетов управления");

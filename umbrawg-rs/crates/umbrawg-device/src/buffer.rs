@@ -16,14 +16,15 @@ pub struct BufferPool {
 impl BufferPool {
     #[must_use]
     pub fn new(capacity: usize, size: usize) -> Self {
-        let mut free = Vec::with_capacity(capacity);
-        for _ in 0..capacity {
-            free.push(vec![0u8; size].into_boxed_slice());
-        }
+        // Буферы не выделяются заранее: пул на 128 буферов по 64 КиБ — это
+        // 8 МиБ анонимной памяти у каждого демона, которые нужны только в
+        // окне рукопожатия (когда пакеты складываются в staged). Под
+        // нагрузкой пул вырастает до фактического числа одновременных
+        // staged-пакетов и не превышает `capacity`.
         Self {
             size,
             capacity,
-            free: Mutex::new(free),
+            free: Mutex::new(Vec::new()),
         }
     }
 
@@ -136,17 +137,38 @@ mod tests {
     #[test]
     fn acquire_and_release_round_trip() {
         let pool = Arc::new(BufferPool::with_default(2));
-        assert_eq!(pool.available(), 2);
+        // Пул ленивый: заранее не выделено ни одного буфера.
+        assert_eq!(pool.available(), 0);
         let mut first = pool.acquire();
         assert_eq!(first.len(), DEFAULT_BUFFER_SIZE);
         first[0] = 0xaa;
-        assert_eq!(pool.available(), 1);
+        assert_eq!(pool.available(), 0);
         drop(first);
-        assert_eq!(pool.available(), 2);
+        assert_eq!(pool.available(), 1);
         let second = pool.acquire();
         assert_eq!(second[0], 0xaa);
         drop(second);
+        assert_eq!(pool.available(), 1);
+        // Пул дозаполняется по мере возврата буферов, но не сверх `capacity`.
+        let third = pool.acquire();
+        let fourth = pool.acquire();
+        drop(third);
+        drop(fourth);
         assert_eq!(pool.available(), 2);
+    }
+
+    #[test]
+    fn lazy_pool_starts_empty() {
+        let pool = Arc::new(BufferPool::with_default(128));
+        assert_eq!(pool.available(), 0);
+        assert_eq!(pool.capacity(), 128);
+        assert_eq!(pool.size(), DEFAULT_BUFFER_SIZE);
+        // Один acquire выделяет ровно один буфер.
+        let buffer = pool.acquire();
+        assert_eq!(buffer.len(), DEFAULT_BUFFER_SIZE);
+        assert_eq!(pool.available(), 0);
+        drop(buffer);
+        assert_eq!(pool.available(), 1);
     }
 
     #[test]

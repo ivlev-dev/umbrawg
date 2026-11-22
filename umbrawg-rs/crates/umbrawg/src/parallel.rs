@@ -43,8 +43,16 @@ use crate::{
 /// Максимальное число сегментов в одном задании.
 pub(crate) const MAX_SEGMENTS: usize = 64;
 
-/// Глубина очереди заданий и пула буферов по умолчанию: 256 слотов по 64 КиБ.
-const DEFAULT_QUEUE_DEPTH: usize = 256;
+/// Глубина очереди заданий и пула буферов по умолчанию: 64 слота по 64 КиБ.
+///
+/// Глубина задаёт запас на всплеск, а не пропускную способность: воркер
+/// разбирает очередь на каждой итерации и уходит в `poll`, только когда она
+/// пуста. На стенде с 50 пирами и 51 демоном каждый лишний слот — это 64 КиБ
+/// анонимной памяти на воркер, поэтому дефолт выбран минимальным из
+/// допустимых: 64 × 64 КиБ × 4 воркера = 16 МиБ на процесс вместо 64 МиБ.
+/// Пул можно увеличить через `UMBRAWG_RX_QUEUE` (до 1024), если на стенде
+/// есть запас памяти под всплески.
+const DEFAULT_QUEUE_DEPTH: usize = MIN_QUEUE_DEPTH;
 
 /// Минимальная глубина очереди воркера.
 const MIN_QUEUE_DEPTH: usize = 64;
@@ -81,12 +89,32 @@ impl ParallelConfig {
     /// Читает конфигурацию из окружения. `None` означает обычный режим.
     ///
     /// Некорректная глубина очереди (`UMBRAWG_RX_QUEUE`) возвращается ошибкой.
+    /// Число воркеров берётся из `UMBRAWG_RX_WORKERS`, а если он не задан или
+    /// задан пустым/нечисловым — из `UMBRAWG_THREADS`: у параллельного приёма
+    /// нет отдельного смысла игнорировать общую ручку числа потоков демона,
+    /// а молча подставлять дефолт вместо явно заданного значения нельзя.
     pub fn from_env(available: usize) -> Result<Option<Self>, String> {
         let enabled = parallel_rx_enabled(std::env::var("UMBRAWG_PARALLEL_RX").ok().as_deref());
         if !enabled {
             return Ok(None);
         }
-        let requested = std::env::var("UMBRAWG_RX_WORKERS").ok();
+        let threads = std::env::var("UMBRAWG_THREADS")
+            .ok()
+            .filter(|value| worker_count_value(value).is_some());
+        let requested = match std::env::var("UMBRAWG_RX_WORKERS").ok() {
+            Some(value) if value.trim().is_empty() => threads,
+            Some(value) => match worker_count_value(&value) {
+                Some(_) => Some(value),
+                None => {
+                    log::warn!(
+                        "UMBRAWG_RX_WORKERS={value:?} is not a worker count; \
+                         falling back to UMBRAWG_THREADS/default"
+                    );
+                    threads
+                }
+            },
+            None => threads,
+        };
         let sched = RxSchedule::from_env(std::env::var("UMBRAWG_RX_SCHED").ok().as_deref());
         let queue_depth = queue_depth_from_env(std::env::var("UMBRAWG_RX_QUEUE").ok().as_deref())?;
         Ok(Some(Self {
@@ -95,6 +123,15 @@ impl ParallelConfig {
             queue_depth,
         }))
     }
+}
+
+/// Возвращает число из значения переменной, если это корректный счётчик > 0.
+fn worker_count_value(value: &str) -> Option<usize> {
+    value
+        .trim()
+        .parse::<usize>()
+        .ok()
+        .filter(|count| *count > 0)
 }
 
 /// Правило выбора воркера для задания.
@@ -134,11 +171,30 @@ pub(crate) fn parallel_rx_enabled(value: Option<&str>) -> bool {
 
 /// Определяет число крипто-воркеров.
 ///
-/// По умолчанию половина доступных ядер, но не больше четырёх: одно ядро
-/// остаётся потоку приёма, остальные — сетевому стеку, UAPI и прочей работе.
+/// По умолчанию: половина доступных ядер, но не больше четырёх, а на
+/// небольшом хосте (≤ 8 ГиБ RAM) — 2. Одно ядро остаётся потоку приёма,
+/// остальные — сетевому стеку, UAPI и прочей работе.
+///
+/// Потоков у процесса при этом `N + 2`: N крипто-воркеров плюс поток приёма
+/// и поток управления; ещё один поток держит UAPI. Память пула считается по
+/// N, поэтому на стенде с малым объёмом RAM воркеры уменьшают через
+/// `UMBRAWG_RX_WORKERS` (для 50 пиров на 4 ГБ это дефолтные 2).
 pub(crate) fn crypto_worker_count(requested: Option<&str>, available: usize) -> usize {
+    crypto_worker_count_for(requested, available, crate::mem_total())
+}
+
+/// Та же логика с явным объёмом RAM — для тестов и детерминированных вызовов.
+pub(crate) fn crypto_worker_count_for(
+    requested: Option<&str>,
+    available: usize,
+    mem_total: Option<u64>,
+) -> usize {
     let available = available.clamp(1, MAX_WORKERS);
-    let default = (available / 2).clamp(1, 4);
+    let by_cpu = (available / 2).clamp(1, 4);
+    let default = match mem_total {
+        Some(total) if total < crate::SMALL_HOST_BYTES => by_cpu.min(2),
+        _ => by_cpu,
+    };
     match requested {
         Some(value) => value
             .trim()
@@ -186,6 +242,57 @@ pub(crate) fn queue_depth_from_env(value: Option<&str>) -> Result<usize, String>
 /// Буферы, которые занимает пул воркера при глубине `depth`.
 pub(crate) const fn queue_bytes(depth: usize) -> usize {
     depth * crate::MAX_PACKET
+}
+
+/// Верхняя граница памяти пула всех воркеров: `workers × depth × MAX_PACKET`.
+///
+/// Слоты растут лениво, поэтому это предел под нагрузкой, а не текущий RSS.
+pub(crate) const fn pool_bytes(workers: usize, depth: usize) -> u64 {
+    (workers as u64).saturating_mul(queue_bytes(depth) as u64)
+}
+
+/// Предупреждает, если верхняя граница пула больше четверти доступной памяти.
+///
+/// Слоты выделяются по требованию, но под нагрузкой пул может дорасти до
+/// `pool_bytes`. На стенде с десятками демонов это чаще приводит к OOM-
+/// киллеру, чем к понятной ошибке, поэтому предупреждаем заранее.
+pub(crate) fn warn_pool_budget(workers: usize, depth: usize) {
+    let Some(available) = mem_available() else {
+        return;
+    };
+    let pool = pool_bytes(workers, depth);
+    if !pool_over_budget(pool, available) {
+        return;
+    }
+    log::warn!(
+        "parallel rx pool can reach {} MiB ({} workers × {} slots × {} KiB), more than a \
+         quarter of the {} MiB available: lower UMBRAWG_RX_QUEUE or UMBRAWG_RX_WORKERS",
+        pool / (1024 * 1024),
+        workers,
+        depth,
+        crate::MAX_PACKET / 1024,
+        available / (1024 * 1024)
+    );
+}
+
+/// Решение о предупреждении: пул больше четверти доступной памяти.
+///
+/// Сравнение через деление, а не `pool * 4`, чтобы не переполняться на
+/// больших значениях и не терять предупреждение из-за saturating-умножения.
+fn pool_over_budget(pool: u64, available: u64) -> bool {
+    pool > available / 4
+}
+
+/// `MemAvailable` из `/proc/meminfo`, если он доступен.
+fn mem_available() -> Option<u64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    for line in text.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kb = rest.split_whitespace().next()?.parse::<u64>().ok()?;
+            return Some(kb.saturating_mul(1024));
+        }
+    }
+    None
 }
 
 /// Счётчики потока приёма. Все поля — обычные атомики без блокировок.
@@ -236,7 +343,7 @@ pub(crate) struct Job {
 
 struct BufferSlots {
     slots: Box<[UnsafeCell<Vec<u8>>]>,
-    slot_len: usize,
+    max_len: usize,
 }
 
 // Безопасность: буфером владеет либо поток приёма (после `allocate`), либо
@@ -244,27 +351,72 @@ struct BufferSlots {
 unsafe impl Sync for BufferSlots {}
 
 impl BufferSlots {
-    fn new(count: usize, slot_len: usize) -> Self {
+    /// Создаёт пул из `count` пустых слотов с пределом `max_len` байт.
+    ///
+    /// Слоты растут лениво, до длины фактического дейтаграммы: пул на 64–1024
+    /// слота по 64 КиБ, выделенный заранее, — это десятки мегабайт анонимной
+    /// памяти у каждого демона ещё до первого пакета. На стенде с 51 демоном
+    /// такой стартовый всплеск упирается в OOM-киллер, хотя под нагрузкой
+    /// одновременно занята лишь часть пула.
+    ///
+    /// Верхняя граница памяти пула — `count × max_len` (для 64 слотов это
+    /// 4 МиБ), но фактически занято столько, сколько нужно самым длинным
+    /// пакетам, попавшим в каждый слот: слот не сжимается, поэтому его длина
+    /// равна максимуму длин дейтаграмм этого слота за всё время. Ёмкость
+    /// `Vec` может быть чуть больше длины (аллокатор), но `reserve_exact`
+    /// не удваивает её, как `reserve`.
+    fn new(count: usize, max_len: usize) -> Self {
         let slots = (0..count)
-            .map(|_| UnsafeCell::new(vec![0u8; slot_len]))
+            .map(|_| UnsafeCell::new(Vec::new()))
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        Self { slots, slot_len }
+        Self { slots, max_len }
     }
 
     fn write(&self, slot: u32, data: &[u8]) -> bool {
-        if data.len() > self.slot_len {
+        if data.len() > self.max_len {
             return false;
         }
-        let buffer = unsafe { &mut *self.slots[slot as usize].get() };
-        buffer[..data.len()].copy_from_slice(data);
+        copy_packet(unsafe { &mut *self.slots[slot as usize].get() }, data);
         true
     }
 
     /// Возвращает буфер слота, которым в этот момент владеет воркер.
+    ///
+    /// `len` — длина дейтаграммы из задания: буфер не короче неё, иначе
+    /// учёт пула сломан (это ловит `debug_assert`), а в release срез
+    /// ограничивается фактической длиной, чтобы не читать за границей.
     #[allow(clippy::mut_from_ref)]
-    fn get(&self, slot: u32) -> &mut [u8] {
-        unsafe { &mut *self.slots[slot as usize].get() }
+    fn get(&self, slot: u32, len: usize) -> &mut [u8] {
+        let buffer = unsafe { &mut *self.slots[slot as usize].get() };
+        debug_assert!(
+            len <= buffer.len(),
+            "job length {len} exceeds slot buffer {}",
+            buffer.len()
+        );
+        let end = len.min(buffer.len());
+        &mut buffer[..end]
+    }
+}
+
+/// Копирует пакет в буфер, не сжимая его и не зануляя хвост.
+///
+/// `Vec::resize(len, 0)` сначала пишет нули во весь новый хвост (до 64 КиБ
+/// на слот), которые тут же перезаписываются пакетом. Здесь память растёт
+/// через `reserve_exact`, а инициализируется только скопированными байтами.
+fn copy_packet(buffer: &mut Vec<u8>, data: &[u8]) {
+    if buffer.len() < data.len() {
+        buffer.reserve_exact(data.len() - buffer.len());
+        // SAFETY: `reserve_exact` гарантирует capacity >= data.len(); первые
+        // `data.len()` байт инициализируются копированием, `u8` не имеет Drop.
+        unsafe {
+            buffer
+                .as_mut_ptr()
+                .copy_from_nonoverlapping(data.as_ptr(), data.len());
+            buffer.set_len(data.len());
+        }
+    } else {
+        buffer[..data.len()].copy_from_slice(data);
     }
 }
 
@@ -317,7 +469,7 @@ impl EventFd {
 }
 
 struct ControlJob {
-    buffer: Box<[u8]>,
+    buffer: Vec<u8>,
     len: usize,
     source: SocketAddr,
     detected: DetectedPacket,
@@ -325,7 +477,7 @@ struct ControlJob {
 
 struct ControlState {
     pending: VecDeque<ControlJob>,
-    free: Vec<Box<[u8]>>,
+    free: Vec<Vec<u8>>,
 }
 
 /// Ограниченная очередь управляющих пакетов для отдельного потока.
@@ -340,9 +492,10 @@ pub(crate) struct ControlQueue {
 
 impl ControlQueue {
     fn new(capacity: usize) -> io::Result<Self> {
-        let free = (0..capacity)
-            .map(|_| vec![0u8; MAX_PACKET].into_boxed_slice())
-            .collect();
+        // Буферы тоже растут лениво: рукопожатие — это 64–200 байт, а
+        // фиксированные 128 × 64 КиБ = 8 МиБ на каждый из 51 демонов стоили
+        // 400 МиБ RSS на стенде и ничего не давали.
+        let free = (0..capacity).map(|_| Vec::new()).collect();
         Ok(Self {
             state: Mutex::new(ControlState {
                 pending: VecDeque::with_capacity(capacity),
@@ -360,7 +513,7 @@ impl ControlQueue {
         let Some(mut buffer) = state.free.pop() else {
             return false;
         };
-        buffer[..data.len()].copy_from_slice(data);
+        copy_packet(&mut buffer, data);
         state.pending.push_back(ControlJob {
             buffer,
             len: data.len(),
@@ -376,8 +529,33 @@ impl ControlQueue {
         lock(&self.state).pending.pop_front()
     }
 
+    /// Возвращает задание в начало очереди, не теряя его.
+    ///
+    /// Нужно, когда сокет ещё не привязан: выбросить initiation на старте —
+    /// значит потерять рукопожатие до следующего ретрансмита.
+    fn requeue_front(&self, job: ControlJob) {
+        lock(&self.state).pending.push_front(job);
+    }
+
     fn recycle(&self, job: ControlJob) {
         lock(&self.state).free.push(job.buffer);
+    }
+
+    /// Возвращает в пул все ожидающие задания одним проходом.
+    ///
+    /// Нужно на остановке, когда сокета уже нет: если отдавать по одному
+    /// заданию за итерацию, между ними стоит `wait(IDLE_TIMEOUT_MS)`, и
+    /// полная очередь 128 задерживает `join` на ~1.3 с вместо мгновенного
+    /// дренажа.
+    fn recycle_all(&self) {
+        let mut state = lock(&self.state);
+        let pending = std::mem::take(&mut state.pending);
+        state.free.extend(pending.into_iter().map(|job| job.buffer));
+    }
+
+    #[cfg(test)]
+    fn free(&self) -> usize {
+        lock(&self.state).free.len()
     }
 
     fn is_empty(&self) -> bool {
@@ -462,7 +640,10 @@ impl WorkerChannel {
         self.free.push(slot).is_ok()
     }
 
-    #[cfg(test)]
+    /// Сколько слотов пула свободно (для строки статистики и тестов).
+    ///
+    /// Уменьшение до нуля означает, что пул выбран полностью: новые задания
+    /// будут отброшены со счётчиком `drops(queue)`.
     fn available(&self) -> usize {
         self.free.len()
     }
@@ -776,8 +957,14 @@ pub(crate) fn rx_loop(
         if stats_enabled && stats_at.elapsed() >= STATS_INTERVAL {
             stats_at = Instant::now();
             let counters = device.incoming_drop_counters();
+            let pool_free = shared
+                .channels
+                .iter()
+                .map(WorkerChannel::available)
+                .min()
+                .unwrap_or(0);
             log::info!(
-                "rx stats: sched={} datagrams={} enqueued={} controls={} control_drops={} under_load={} segments={} gro_splits={} max_datagram_segments={} mixed_peers={} housekeeping={} drops(detect={} prepared={} endpoint={} queue={} size={} open={} replay={} allowed={} tun={} tx={} pool={}) wakes={}",
+                "rx stats: sched={} datagrams={} enqueued={} controls={} control_drops={} under_load={} segments={} gro_splits={} max_datagram_segments={} mixed_peers={} housekeeping={} pool_free={} drops(detect={} prepared={} endpoint={} queue={} size={} open={} replay={} allowed={} tun={} tx={} pool={}) wakes={}",
                 shared.sched.as_str(),
                 shared.stats.datagrams.load(Ordering::Relaxed),
                 shared.stats.enqueued.load(Ordering::Relaxed),
@@ -789,6 +976,7 @@ pub(crate) fn rx_loop(
                 shared.stats.max_datagram_segments.load(Ordering::Relaxed),
                 shared.stats.mixed_peer_datagrams.load(Ordering::Relaxed),
                 shared.stats.housekeeping.load(Ordering::Relaxed),
+                pool_free,
                 shared.stats.drops_detect.load(Ordering::Relaxed),
                 shared.stats.drops_prepared.load(Ordering::Relaxed),
                 shared.stats.drops_endpoint.load(Ordering::Relaxed),
@@ -849,8 +1037,20 @@ pub(crate) fn control_loop(device: Arc<Device>, shared: Arc<SharedRx>) -> io::Re
         let mut processed = 0usize;
         while let Some(mut job) = shared.controls.pop() {
             let Some(socket) = shared.socket() else {
+                // Сокет ещё не привязан потоком приёма: вернуть задание в
+                // очередь, а не выбросить. Иначе initiation, пришедшая в это
+                // окно, теряется до следующего ретрансмита (5 с).
+                if !shutdown_requested() {
+                    shared.controls.requeue_front(job);
+                    break;
+                }
+                // Остановка: сокета уже не будет, обрабатывать задания
+                // некуда. Дренаж всей очереди одним проходом, без `wait`
+                // между заданиями, иначе полные 128 слотов задерживают
+                // `join` на ~1.3 с.
                 shared.controls.recycle(job);
-                break;
+                shared.controls.recycle_all();
+                return Ok(());
             };
             let now = Instant::now();
             let snapshot = device.incoming_snapshot();
@@ -1058,6 +1258,7 @@ fn enqueue_segments(
         let mut prepared: [Option<PreparedTransport>; MAX_SEGMENTS] =
             [const { None }; MAX_SEGMENTS];
         let mut ordinal = 0usize;
+        let mut transports = 0usize;
         let mut offset = start;
         while offset < end && ordinal < MAX_SEGMENTS {
             let segment_end = gro_size.map_or(end, |size| (offset + size).min(end));
@@ -1084,6 +1285,7 @@ fn enqueue_segments(
                         Some(_) => {}
                     }
                     prepared[ordinal] = Some(entry);
+                    transports += 1;
                 }
                 PreparedIncoming::Control(detected) => {
                     shared.stats.controls.fetch_add(1, Ordering::Relaxed);
@@ -1117,6 +1319,13 @@ fn enqueue_segments(
         }
         total_segments += ordinal as u64;
         chunk_count += 1;
+        if transports == 0 {
+            // В куске только управляющие пакеты: они уже лежат в очереди
+            // управления, а задание воркеру расшифровывать нечего. Публикация
+            // такого задания занимает слот пула и будит воркера впустую —
+            // на 50 одновременных initiation это половина пула.
+            continue;
+        }
         publish_job(
             shared,
             cursor,
@@ -1172,6 +1381,22 @@ fn housekeeping<R: RngCore>(
     }
 }
 
+/// Дочитывает очередь канала и возвращает слоты в пул, когда сокета уже нет.
+///
+/// Возвращает число выброшенных заданий. Без этого `channel.is_empty()`
+/// навсегда остаётся ложным: воркер не выходит из цикла, `run_parallel`
+/// не дожидается `join`, и демон не завершается по SIGTERM (его приходится
+/// убивать `kill -9`). Обрабатывать задания без сокета нельзя — доставлять
+/// расшифрованное некуда, — поэтому они отбрасываются вместе со слотами.
+fn drain_without_socket(channel: &WorkerChannel) -> usize {
+    let mut drained = 0;
+    while let Some(job) = channel.pop() {
+        channel.release(job.slot);
+        drained += 1;
+    }
+    drained
+}
+
 pub(crate) fn supervise(rx_finished: bool, worker_finished: bool) -> Option<&'static str> {
     if rx_finished {
         Some("rx thread exited unexpectedly")
@@ -1198,7 +1423,7 @@ fn execute_job<R: RngCore>(
 ) {
     let len = job.len as usize;
     let gro_size = job.gro_size.map(|size| size as usize);
-    let data = channel.buffers().get(job.slot);
+    let data = channel.buffers().get(job.slot, len);
     let mut offset = 0usize;
     let mut ordinal = 0usize;
     while offset < len && ordinal < MAX_SEGMENTS {
@@ -1371,6 +1596,15 @@ pub(crate) fn worker_loop(
                     .drops_tun
                     .fetch_add(errors as u64, Ordering::Relaxed);
             }
+        } else {
+            // Поток приёма уже снял сокет (остановка или его падение):
+            // дочитать очередь и вернуть слоты в пул.
+            let drained = drain_without_socket(channel);
+            if drained > 0 {
+                log::debug!(
+                    "crypto worker {index} dropped {drained} queued jobs: the rx socket is gone"
+                );
+            }
         }
 
         let (released, leaked) = channel.drain_reclaimed();
@@ -1457,24 +1691,34 @@ mod tests {
 
     #[test]
     fn worker_count_defaults_to_half_the_cores() {
-        assert_eq!(crypto_worker_count(None, 6), 3);
-        assert_eq!(crypto_worker_count(None, 12), 4);
-        assert_eq!(crypto_worker_count(None, 2), 1);
-        assert_eq!(crypto_worker_count(None, 1), 1);
+        // Большой хост — прежняя формула: половина ядер, не больше четырёх.
+        assert_eq!(crypto_worker_count_for(None, 6, Some(64 << 30)), 3);
+        assert_eq!(crypto_worker_count_for(None, 12, Some(64 << 30)), 4);
+        assert_eq!(crypto_worker_count_for(None, 2, Some(64 << 30)), 1);
+        assert_eq!(crypto_worker_count_for(None, 1, Some(64 << 30)), 1);
+        // Небольшой хост (≤ 8 ГиБ) — 2: 51 демон на 4 ГБ иначе упирается в OOM.
+        assert_eq!(crypto_worker_count_for(None, 6, Some(4 << 30)), 2);
+        assert_eq!(crypto_worker_count_for(None, 12, Some(4 << 30)), 2);
+        assert_eq!(crypto_worker_count_for(None, 2, Some(4 << 30)), 1);
+        assert_eq!(crypto_worker_count_for(None, 3, Some(4 << 30)), 1);
+        // Неизвестный объём RAM — как на большом хосте.
+        assert_eq!(crypto_worker_count_for(None, 6, None), 3);
     }
 
     #[test]
     fn worker_count_honours_override() {
-        assert_eq!(crypto_worker_count(Some("2"), 6), 2);
-        assert_eq!(crypto_worker_count(Some("0"), 6), 3);
-        assert_eq!(crypto_worker_count(Some("99"), 6), 6);
-        assert_eq!(crypto_worker_count(Some("99"), 64), MAX_WORKERS);
-        assert_eq!(crypto_worker_count(Some("abc"), 6), 3);
+        assert_eq!(crypto_worker_count_for(Some("2"), 6, Some(4 << 30)), 2);
+        assert_eq!(crypto_worker_count_for(Some("0"), 6, None), 3);
+        assert_eq!(crypto_worker_count_for(Some("99"), 6, None), 6);
+        assert_eq!(crypto_worker_count_for(Some("99"), 64, None), MAX_WORKERS);
+        assert_eq!(crypto_worker_count_for(Some("abc"), 6, None), 3);
     }
 
     #[test]
-    fn queue_depth_defaults_to_256() {
-        assert_eq!(DEFAULT_QUEUE_DEPTH, 256);
+    fn queue_depth_defaults_to_the_minimum() {
+        // Дефолт — минимальная глубина: 51 демон на 50 пиров не должен
+        // упираться в память пула (см. `DEFAULT_QUEUE_DEPTH`).
+        assert_eq!(DEFAULT_QUEUE_DEPTH, MIN_QUEUE_DEPTH);
         assert_eq!(queue_depth_from_env(None), Ok(DEFAULT_QUEUE_DEPTH));
         assert_eq!(queue_depth_from_env(Some("")), Ok(DEFAULT_QUEUE_DEPTH));
         assert_eq!(queue_depth_from_env(Some("   ")), Ok(DEFAULT_QUEUE_DEPTH));
@@ -1536,8 +1780,31 @@ mod tests {
         assert_eq!(mib(queue_bytes(256)), 16);
         assert_eq!(mib(queue_bytes(512)), 32);
         assert_eq!(mib(queue_bytes(1024)), 64);
-        assert_eq!(mib(queue_bytes(DEFAULT_QUEUE_DEPTH)), 16);
-        assert_eq!(mib(queue_bytes(DEFAULT_QUEUE_DEPTH) * 4), 64);
+        assert_eq!(mib(queue_bytes(DEFAULT_QUEUE_DEPTH)), 4);
+        assert_eq!(mib(queue_bytes(DEFAULT_QUEUE_DEPTH) * 4), 16);
+    }
+
+    #[test]
+    fn pool_bytes_is_the_upper_bound_for_all_workers() {
+        assert_eq!(pool_bytes(1, MIN_QUEUE_DEPTH), 64 * MAX_PACKET as u64);
+        assert_eq!(
+            pool_bytes(4, DEFAULT_QUEUE_DEPTH),
+            4 * 64 * MAX_PACKET as u64
+        );
+        assert_eq!(pool_bytes(0, DEFAULT_QUEUE_DEPTH), 0);
+    }
+
+    #[test]
+    fn pool_budget_warns_above_a_quarter_of_available_memory() {
+        let pool = pool_bytes(4, DEFAULT_QUEUE_DEPTH);
+        assert!(!pool_over_budget(pool, pool * 4));
+        assert!(pool_over_budget(pool, pool * 4 - 1));
+        assert!(pool_over_budget(pool, pool));
+        assert!(!pool_over_budget(0, 1));
+        // Переполнение не паникует и не даёт ложного «влезает».
+        assert!(pool_over_budget(u64::MAX, u64::MAX));
+        assert!(!pool_over_budget(1, 4));
+        assert!(pool_over_budget(2, 4));
     }
 
     #[test]
@@ -1551,6 +1818,7 @@ mod tests {
             "UMBRAWG_RX_WORKERS",
             "UMBRAWG_RX_SCHED",
             "UMBRAWG_RX_QUEUE",
+            "UMBRAWG_THREADS",
         ];
         let saved: Vec<(&str, Option<String>)> = names
             .iter()
@@ -1560,12 +1828,32 @@ mod tests {
         std::env::set_var("UMBRAWG_RX_WORKERS", "2");
         std::env::set_var("UMBRAWG_RX_SCHED", "peer");
         std::env::set_var("UMBRAWG_RX_QUEUE", "64");
+        std::env::remove_var("UMBRAWG_THREADS");
         let config = ParallelConfig::from_env(8)
             .expect("valid env")
             .expect("parallel rx is enabled");
         assert_eq!(config.workers, 2);
         assert_eq!(config.sched, RxSchedule::Peer);
         assert_eq!(config.queue_depth, 64);
+        // `UMBRAWG_RX_WORKERS` главнее общей ручки числа потоков.
+        std::env::set_var("UMBRAWG_THREADS", "4");
+        assert_eq!(ParallelConfig::from_env(8).unwrap().unwrap().workers, 2);
+        // Без `UMBRAWG_RX_WORKERS` параллельный приём уважает `UMBRAWG_THREADS`.
+        std::env::remove_var("UMBRAWG_RX_WORKERS");
+        assert_eq!(ParallelConfig::from_env(8).unwrap().unwrap().workers, 4);
+        // Пустой `UMBRAWG_RX_WORKERS` — тоже отсутствие значения.
+        std::env::set_var("UMBRAWG_RX_WORKERS", "  ");
+        assert_eq!(ParallelConfig::from_env(8).unwrap().unwrap().workers, 4);
+        // Нечисловое значение не подменяется дефолтом молча: берётся
+        // `UMBRAWG_THREADS`, о подмене пишется warn.
+        std::env::set_var("UMBRAWG_RX_WORKERS", "abc");
+        std::env::set_var("UMBRAWG_THREADS", "3");
+        assert_eq!(ParallelConfig::from_env(8).unwrap().unwrap().workers, 3);
+        // И без `UMBRAWG_THREADS` остаётся дефолт половины ядер.
+        std::env::remove_var("UMBRAWG_THREADS");
+        assert_eq!(ParallelConfig::from_env(8).unwrap().unwrap().workers, 4);
+        std::env::set_var("UMBRAWG_THREADS", "4");
+        std::env::set_var("UMBRAWG_RX_WORKERS", "2");
         std::env::set_var("UMBRAWG_RX_QUEUE", "100");
         let error = ParallelConfig::from_env(8).expect_err("invalid depth");
         assert!(error.contains("UMBRAWG_RX_QUEUE"));
@@ -1597,6 +1885,142 @@ mod tests {
         assert_eq!(received.slot, slot);
         channel.release(received.slot);
         assert!(channel.allocate().is_some());
+    }
+
+    #[test]
+    fn slot_buffers_are_allocated_lazily() {
+        // Ни один слот не занимает 64 КиБ, пока в него не записали пакет.
+        let channel = WorkerChannel::new(MAX_PACKET, MIN_QUEUE_DEPTH).unwrap();
+        let slot = channel.allocate().unwrap();
+        assert!(channel.buffers().get(slot, 0).is_empty());
+        assert!(channel.write(slot, &[7u8; 3]));
+        assert_eq!(channel.buffers().get(slot, 3).len(), 3);
+        channel.release(slot);
+
+        // Слот растёт до фактического размера.
+        let capacity_after_first = channel.buffers().get(slot, 3).len();
+        assert!(capacity_after_first <= 9_000);
+        assert!(channel.write(slot, &[9u8; 9_000]));
+        assert_eq!(channel.buffers().get(slot, 9_000).len(), 9_000);
+        assert_eq!(&channel.buffers().get(slot, 3)[..3], &[9u8; 3]);
+
+        // Повторная запись короткого пакета в тот же слот не сжимает буфер:
+        // `get(slot, 9_000)` проходит `debug_assert` только если слота
+        // по-прежнему хватает на 9 000 байт, а первые 4 байта — новые.
+        assert!(channel.write(slot, &[1u8; 4]));
+        let data = channel.buffers().get(slot, 9_000);
+        assert_eq!(data.len(), 9_000, "слот не должен сжиматься");
+        assert_eq!(&data[..4], &[1u8; 4]);
+        assert_eq!(&data[4..9_000], &[9u8; 9_000 - 4]);
+        channel.release(slot);
+
+        // Верхняя граница всё ещё MAX_PACKET.
+        assert!(!channel.write(slot, &[0u8; MAX_PACKET + 1]));
+        assert!(channel.write(slot, &[0u8; MAX_PACKET]));
+        assert_eq!(channel.buffers().get(slot, MAX_PACKET).len(), MAX_PACKET);
+        channel.release(slot);
+    }
+
+    #[test]
+    fn control_queue_keeps_a_requeued_job() {
+        let shared = SharedRx::new(1, RxSchedule::Peer, DEFAULT_QUEUE_DEPTH).unwrap();
+        let source: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        let payload = vec![0x5a; 256];
+        assert!(shared.controls.push(&payload, source, control_packet()));
+        let job = shared.controls.pop().expect("queued control");
+        shared.controls.requeue_front(job);
+        assert_eq!(shared.controls.pending(), 1);
+        let job = shared.controls.pop().expect("requeued control");
+        assert_eq!(job.len, payload.len());
+        assert_eq!(&job.buffer[..4], &payload[..4]);
+        shared.controls.recycle(job);
+        assert!(shared.controls.is_empty());
+    }
+
+    #[test]
+    fn control_buffers_grow_to_the_packet_size() {
+        let queue = ControlQueue::new(4).unwrap();
+        let source: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        assert!(queue.push(&[1u8; 200], source, control_packet()));
+        let job = queue.pop().expect("control job");
+        assert_eq!(job.buffer.len(), 200);
+        assert!(job.buffer.capacity() < MAX_PACKET);
+        queue.recycle(job);
+    }
+
+    #[test]
+    fn control_queue_drains_in_one_pass() {
+        let queue = ControlQueue::new(MIN_QUEUE_DEPTH).unwrap();
+        let source: SocketAddr = "10.0.0.9:1234".parse().unwrap();
+        for _ in 0..MIN_QUEUE_DEPTH {
+            assert!(queue.push(&[7u8; 148], source, control_packet()));
+        }
+        // Один уже снятый job (как в `control_loop` на остановке) плюс
+        // остаток очереди возвращаются в пул без ожиданий.
+        let job = queue.pop().expect("first job");
+        queue.recycle(job);
+        queue.recycle_all();
+        assert!(queue.is_empty());
+        assert_eq!(queue.pending(), 0);
+        assert_eq!(queue.free(), MIN_QUEUE_DEPTH);
+        // Очередь снова принимает полный набор.
+        for _ in 0..MIN_QUEUE_DEPTH {
+            assert!(queue.push(&[7u8; 148], source, control_packet()));
+        }
+    }
+
+    #[test]
+    fn worker_drains_the_channel_without_a_socket() {
+        let channel = WorkerChannel::new(MAX_PACKET, MIN_QUEUE_DEPTH).unwrap();
+        for marker in 0..MIN_QUEUE_DEPTH as u64 {
+            let slot = channel.allocate().expect("free slot");
+            assert!(channel.write(slot, &marker.to_le_bytes()));
+            assert!(channel.publish(job(slot)).0);
+        }
+        assert_eq!(channel.pending(), MIN_QUEUE_DEPTH);
+        assert_eq!(channel.available(), 0);
+        // Сокета уже нет: дочитываем одним проходом и возвращаем слоты.
+        assert_eq!(drain_without_socket(&channel), MIN_QUEUE_DEPTH);
+        assert!(channel.is_empty());
+        assert_eq!(channel.available(), MIN_QUEUE_DEPTH);
+        // Повторный вызов на пустом канале ничего не ломает.
+        assert_eq!(drain_without_socket(&channel), 0);
+        assert_eq!(channel.available(), MIN_QUEUE_DEPTH);
+    }
+
+    #[test]
+    fn control_only_datagram_does_not_publish_a_job() {
+        // Initiation с параметрами по умолчанию: type=1 (H1 = 1..=1) и ровно
+        // INITIATION_SIZE байт. Классификация не требует ключей.
+        let device =
+            umbrawg_device::Device::new(umbrawg_device::DeviceConfig::default()).expect("device");
+        let shared = SharedRx::new(2, RxSchedule::Peer, MIN_QUEUE_DEPTH).unwrap();
+        let snapshot = device.incoming_snapshot();
+        let mut packet = [0u8; umbrawg_proto::messages::INITIATION_SIZE];
+        packet[..4].copy_from_slice(&1u32.to_le_bytes());
+        let len = packet.len();
+        let mut cursor = 0usize;
+        enqueue_segments(
+            &device,
+            &shared,
+            &mut cursor,
+            &snapshot,
+            Instant::now(),
+            &mut packet,
+            len,
+            None,
+            "10.0.0.9:1234".parse().unwrap(),
+        );
+        assert_eq!(shared.stats.controls.load(Ordering::Relaxed), 1);
+        assert_eq!(shared.controls.pending(), 1);
+        // Управляющий пакет уже в своей очереди: задание воркеру не нужно,
+        // иначе он тратил бы слот пула и пробуждение на пустую расшифровку.
+        assert_eq!(shared.stats.enqueued.load(Ordering::Relaxed), 0);
+        assert!(shared.channels.iter().all(|channel| channel.pending() == 0));
+        assert!(shared
+            .channels
+            .iter()
+            .all(|channel| channel.available() == MIN_QUEUE_DEPTH));
     }
 
     #[test]
@@ -1782,7 +2206,7 @@ mod tests {
                 let mut markers = Vec::new();
                 while let Some(job) = channel.pop() {
                     let len = job.len as usize;
-                    let data = channel.buffers().get(job.slot);
+                    let data = channel.buffers().get(job.slot, len);
                     let mut bytes = [0u8; 8];
                     bytes[..len].copy_from_slice(&data[..len]);
                     markers.push(u64::from_le_bytes(bytes));
