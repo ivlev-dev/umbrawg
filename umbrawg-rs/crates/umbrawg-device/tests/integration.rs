@@ -1476,6 +1476,109 @@ fn full_mtu_random_trailers_keep_a_small_reserve() {
 }
 
 #[test]
+fn mixed_batches_pad_small_packets_without_splitting_them() {
+    // A TUN batch can mix a full-MTU packet with small inner ACKs. The full
+    // packet has no room inside the UDP window, but the ACKs do: they must
+    // still receive the batch's random addition and stay equal to each other.
+    let mut pair = pair(ObfParams {
+        content_padding_addition: 51..=197,
+        ..ObfParams::default()
+    });
+    let now = Instant::now();
+    complete_handshake(&mut pair, now);
+
+    let big = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[1u8; 1400]);
+    let small = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[2u8; 52]);
+    let plaintexts: [&[u8]; 4] = [&big, &small, &small, &small];
+    let small_base = 16 + small.len() + 16;
+    let mut output = vec![0u8; 65_535];
+    let layout = {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+        pair.a
+            .send_batch(&pair.peer_b, &plaintexts, &mut output, &mut ctx)
+            .unwrap()
+            .layout
+    };
+    assert_eq!(
+        layout.len(),
+        2,
+        "big and small packets are separate GSO groups"
+    );
+    assert_eq!(layout.groups()[0].segments, 1);
+    assert_eq!(layout.groups()[1].segments, 3);
+    assert!(
+        layout.groups()[1].segment_len >= small_base + 51,
+        "small packets keep the content padding addition"
+    );
+}
+
+#[test]
+fn batch_padding_keeps_equal_packets_gso_compatible() {
+    // Both padding policies must draw once per batch: equal plaintexts have to
+    // keep equal wire lengths or UDP GSO degenerates into one datagram per
+    // packet. Small inner packets (TCP ACKs) are where the addition actually
+    // applies, because a full-MTU packet has no room inside the UDP window.
+    for params in [
+        ObfParams {
+            random_trailers: true,
+            ..ObfParams::default()
+        },
+        ObfParams {
+            content_padding_addition: 51..=197,
+            ..ObfParams::default()
+        },
+        ObfParams {
+            random_trailers: true,
+            content_padding_addition: 51..=197,
+            ..ObfParams::default()
+        },
+    ] {
+        let padding_enabled = params.content_padding_addition_enabled() || params.random_trailers;
+        let content_padding_enabled = params.content_padding_addition_enabled();
+        let mut pair = pair(params);
+        let now = Instant::now();
+        complete_handshake(&mut pair, now);
+
+        let packets: Vec<Vec<u8>> = (0..4u8)
+            .map(|index| ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], &[b'a' + index; 52]))
+            .collect();
+        let plaintexts: Vec<&[u8]> = packets.iter().map(Vec::as_slice).collect();
+        let base = 16 + packets[0].len() + 16;
+        let mut output = vec![0u8; 65_535];
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..32 {
+            let layout = {
+                let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
+                let sent = pair
+                    .a
+                    .send_batch(&pair.peer_b, &plaintexts, &mut output, &mut ctx)
+                    .unwrap();
+                sent.layout
+            };
+            assert_eq!(
+                layout.len(),
+                1,
+                "equal plaintexts must coalesce into one GSO group"
+            );
+            assert_eq!(layout.groups()[0].segments, plaintexts.len());
+            if padding_enabled {
+                assert!(layout.groups()[0].segment_len >= base);
+                seen.insert(layout.groups()[0].segment_len);
+            }
+        }
+        if content_padding_enabled {
+            assert!(
+                seen.iter().all(|length| *length >= base + 51),
+                "content padding addition must stay in range: {seen:?}"
+            );
+        }
+        if padding_enabled {
+            assert!(seen.len() > 1, "batch padding must vary between batches");
+        }
+    }
+}
+
+#[test]
 fn fec_shards_fit_an_ethernet_underlay() {
     // 1500-byte underlay with IPv6+UDP headers leaves a 1452-byte datagram
     // budget. A one-shard frame adds 2 (length) + 20 (extension+FEC headers)

@@ -28,12 +28,32 @@ pub enum MessageKind {
 }
 
 impl MessageKind {
-    /// All message kinds in detection order.
+    /// All message kinds in numeric order.
     pub const ALL: [Self; 4] = [
         Self::Initiation,
         Self::Response,
         Self::Cookie,
         Self::Transport,
+    ];
+
+    /// Detection order: transport first.
+    ///
+    /// With `random_trailers` every kind's length gate is relaxed to `>=`, so
+    /// each packet is also compared against the magic ranges of the three
+    /// control kinds. Their ranges are only a few thousand values wide, but a
+    /// transport packet is decoded at the wrong offset for those checks and
+    /// therefore hits a control range completely at random: with the reference
+    /// profile (`H1..H3` ~69k of 2^32) that silently dropped ~4 packets per
+    /// second under full load, and each drop collapsed the TCP congestion
+    /// window. A genuine transport packet always decodes into `H4` at its own
+    /// offset, so checking it first removes the false positives from the hot
+    /// path; only handshakes keep a ~4e-6 chance of matching `H4` by accident,
+    /// which the handshake retry covers.
+    const DETECTION_ORDER: [Self; 4] = [
+        Self::Transport,
+        Self::Initiation,
+        Self::Response,
+        Self::Cookie,
     ];
 
     /// Returns the numeric message type.
@@ -380,7 +400,7 @@ impl<'a> Obfuscator<'a> {
     #[must_use]
     pub fn detect(&self, packet: &[u8]) -> Option<DetectedPacket> {
         let mask = self.type_mask(packet);
-        for kind in MessageKind::ALL {
+        for kind in MessageKind::DETECTION_ORDER {
             if let Some(detected) = self.match_kind(packet, kind, mask.as_ref()) {
                 return Some(detected);
             }
@@ -431,7 +451,7 @@ impl<'a> Obfuscator<'a> {
         let nonce = header_protection::nonce_from_packet(packet)?;
         let mut stream = header_protection::HeaderStream::new(key, &nonce);
         let mask = stream.mask4();
-        let detected = MessageKind::ALL
+        let detected = MessageKind::DETECTION_ORDER
             .into_iter()
             .find_map(|kind| self.match_kind(packet, kind, Some(&mask)))?;
         let end = detected.padding + detected.body_len;

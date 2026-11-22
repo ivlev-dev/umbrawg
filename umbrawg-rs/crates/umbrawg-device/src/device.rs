@@ -1186,23 +1186,37 @@ impl Device {
             ),
             PaddingMode::Data => {
                 if params.content_padding_addition_enabled() {
-                    params
-                        .content_padding_len(rng, base_len, udp_window)
+                    // `batch_padding` carries the one random addition picked
+                    // for the whole batch; see `pick_batch_padding`.
+                    batch_padding
+                        .unwrap_or_else(|| params.content_padding_len(rng, base_len, udp_window))
                         .min(budget)
+                        .min(udp_window.saturating_sub(base_len))
                 } else if params.random_trailers {
-                    // Keep a small reserve even when the observed UDP window
-                    // is already exhausted, otherwise full-size packets all
-                    // leave with an identical length. The reserve is bounded
-                    // by 15 bytes and, once the window grows past the packet
-                    // size, the regular trailer takes over, so the window
-                    // cannot creep upwards without bound.
-                    let trailer = params
-                        .random_trailer_len(rng, base_len, udp_window)
-                        .min(budget);
-                    if trailer > 0 {
-                        trailer
-                    } else {
-                        ObfParams::random_reserve_len(rng, budget.min(MESSAGE_PADDING_MULTIPLE - 1))
+                    match batch_padding {
+                        // The batch-wide trailer keeps equal plaintexts at
+                        // equal wire lengths so UDP GSO can coalesce them.
+                        Some(extra) => extra.min(budget).min(udp_window.saturating_sub(base_len)),
+                        None => {
+                            // Keep a small reserve even when the observed UDP
+                            // window is already exhausted, otherwise full-size
+                            // packets all leave with an identical length. The
+                            // reserve is bounded by 15 bytes and, once the
+                            // window grows past the packet size, the regular
+                            // trailer takes over, so the window cannot creep
+                            // upwards without bound.
+                            let trailer = params
+                                .random_trailer_len(rng, base_len, udp_window)
+                                .min(budget);
+                            if trailer > 0 {
+                                trailer
+                            } else {
+                                ObfParams::random_reserve_len(
+                                    rng,
+                                    budget.min(MESSAGE_PADDING_MULTIPLE - 1),
+                                )
+                            }
+                        }
                     }
                 } else {
                     let aligned = ObfParams::mtu_padding(plaintext.len(), mtu);
@@ -1236,7 +1250,10 @@ impl Device {
         keypair
             .seal_in_place(nonce, &mut dst[header_end..total])
             .ok_or(DeviceError::PacketTooLarge)?;
-        peer.observe_udp_window(total as u32);
+        // Track the unpadded base length, exactly like the kernel
+        // (`uwg_peer_udp_window_max`): observing our own padding would let the
+        // window and therefore the trailer grow on every packet.
+        peer.observe_udp_window(base_len as u32);
         let kind = crate::ext::FrameKind::classify(plaintext);
         peer.extension().on_packet_sent(nonce, total, kind, now);
         Ok(total)
@@ -1418,6 +1435,56 @@ impl Device {
         sent
     }
 
+    /// Picks the padding delta shared by every packet of one batch.
+    ///
+    /// The obfuscation profiles ask for a random addition per packet
+    /// (`content_padding_addition`, `random_trailers`). Drawing it per packet
+    /// also changes the wire length of every datagram, which defeats UDP GSO:
+    /// segmentation only coalesces segments of exactly equal size, so each
+    /// packet used to leave as its own datagram and the reference profile lost
+    /// ~40% of TCP throughput. One draw per batch keeps the obfuscation
+    /// statistics (the addition is still random and changes from batch to
+    /// batch) while equal plaintexts keep equal wire lengths.
+    /// Wire length of a transport packet before any random padding is added.
+    fn base_transport_len(params: &ObfParams, plaintext_len: usize) -> usize {
+        usize::from(params.s4) + TRANSPORT_HEADER_SIZE + plaintext_len + aead::TAG_LEN
+    }
+
+    /// Returns the smallest unpadded length in `plaintexts`.
+    ///
+    /// The draw uses the packet with the most room inside the peer's UDP
+    /// window; every packet is then capped by its own room, so equal
+    /// plaintexts still get equal padding and small ACKs keep their random
+    /// tail even when they share a batch with a full-MTU packet.
+    fn batch_min_base_len(params: &ObfParams, plaintexts: &[&[u8]]) -> usize {
+        plaintexts
+            .iter()
+            .map(|plaintext| Self::base_transport_len(params, plaintext.len()))
+            .min()
+            .unwrap_or_else(|| Self::base_transport_len(params, 0))
+    }
+
+    fn pick_batch_padding<R: RngCore>(
+        params: &ObfParams,
+        rng: &mut R,
+        peer: &Peer,
+        headroom_base_len: usize,
+    ) -> usize {
+        let udp_window = (peer.udp_window() as usize).max(headroom_base_len);
+        let room = udp_window.saturating_sub(headroom_base_len);
+        if params.content_padding_addition_enabled() {
+            usize::from(random::u16_inclusive_with(
+                rng,
+                &params.content_padding_addition,
+            ))
+            .min(room)
+        } else if params.random_trailers && room > 0 {
+            random::below_with(rng, u32::try_from(room).unwrap_or(u32::MAX)) as usize
+        } else {
+            ObfParams::random_reserve_len(rng, MESSAGE_PADDING_MULTIPLE - 1)
+        }
+    }
+
     pub fn encrypt_batch<R: RngCore>(
         &self,
         peer: &Arc<Peer>,
@@ -1441,7 +1508,12 @@ impl Device {
         let mut offset = 0;
         // One random padding value per batch keeps equal-size packets at
         // equal wire lengths so that UDP GSO can still coalesce them.
-        let batch_padding = ObfParams::random_reserve_len(rng, MESSAGE_PADDING_MULTIPLE - 1);
+        let batch_padding = Self::pick_batch_padding(
+            &params,
+            rng,
+            peer,
+            Self::batch_min_base_len(&params, plaintexts),
+        );
         for plaintext in plaintexts {
             if offset >= dst.len() {
                 return Err(DeviceError::BufferTooSmall {
@@ -1519,7 +1591,12 @@ impl Device {
                 fec_caps: [0; MAX_GSO_GROUPS],
             });
         };
-        let batch_padding = ObfParams::random_reserve_len(ctx.rng, MESSAGE_PADDING_MULTIPLE - 1);
+        let batch_padding = Self::pick_batch_padding(
+            &params,
+            ctx.rng,
+            peer,
+            Self::batch_min_base_len(&params, plaintexts),
+        );
         if peer.extension().fec_tx_active() {
             let mut offset = 0usize;
             let mut fec_caps = [0u8; MAX_GSO_GROUPS];

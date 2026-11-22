@@ -553,6 +553,47 @@ fn detect_matches_decode_type_for_all_kinds() {
 }
 
 #[test]
+fn transport_is_detected_before_relaxed_control_lengths() {
+    // `random_trailers` relaxes the length gate of every kind to `>=`, so a
+    // transport packet is also compared against H1..H3 at the wrong offset.
+    // Those ranges are small but not empty, and a hit used to drop the packet.
+    // Transport must win before the relaxed control checks are attempted.
+    let mut params = obfuscated_params();
+    params.set_param("s1", "16").unwrap();
+    params.set_param("s2", "32").unwrap();
+    params.set_param("s3", "48").unwrap();
+    params.set_param("s4", "64").unwrap();
+    params.set_param("h1", "1000-2000").unwrap();
+    params.set_param("h2", "3000-4000").unwrap();
+    params.set_param("h3", "5000-6000").unwrap();
+    params.set_param("h4", "7000-8000").unwrap();
+    params.set_param("header_protection_key", HP_KEY).unwrap();
+    params.set_param("random_trailers", "true").unwrap();
+    params.validate().unwrap();
+    let obfuscator = Obfuscator::new(&params);
+    let mut rng = TestRng::new(31);
+    let mut packet = vec![0u8; 64 + 16 + 32];
+    obfuscator
+        .begin_transport(&mut rng, &mut packet, 0x1122_3344, 9)
+        .unwrap();
+    let nonce = header_protection::nonce_from_packet(&packet).unwrap();
+    let key = obfuscator.header_key().expect("header protection is on");
+    let mask = header_protection::mask4(key, &nonce);
+    // Make the junk bytes at the S1 offset decode into H1: the old detection
+    // order classified this valid transport packet as an initiation.
+    let raw = 1500u32 ^ u32::from_le_bytes(mask);
+    packet[16..20].copy_from_slice(&raw.to_le_bytes());
+
+    let detected = obfuscator.detect(&packet).expect("transport is detected");
+    assert_eq!(detected.kind, MessageKind::Transport);
+    assert_eq!(detected.padding, 64);
+    let opened = obfuscator
+        .open_incoming(&mut packet)
+        .expect("transport is opened");
+    assert_eq!(opened.kind, MessageKind::Transport);
+}
+
+#[test]
 fn transport_obfuscation_draws_from_the_buffered_rng() {
     let params = obfuscated_params();
     let obfuscator = Obfuscator::new(&params);
