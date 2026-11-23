@@ -1,9 +1,9 @@
 # umbrawg-tools
 
-![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.4.1-blue.svg)
+![License](https://img.shields.io/badge/license-GPL--2.0--only-blue.svg) ![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)
 
 Rust-утилиты для настройки UmbraWG: `uwg` и `uwg-quick`.
-Версия 0.4.1 — 2026-11-21.
+Версия 0.5.0 — 2026-11-23.
 
 Работают с обоими бэкендами:
 

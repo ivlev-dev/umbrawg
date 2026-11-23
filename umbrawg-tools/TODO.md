@@ -36,8 +36,8 @@
   `bench/README.md`.
 - Итоговые результаты замеров final5 (2026-11-17) зафиксированы в
   `docs/RESULTS.md`.
-- Бенчмарк-матрица 2026-11-21 (baseline AmneziaWG, потери, FEC/BBR, UDP, RTT,
-  cipher, обфускация, multi-peer) —
+- Бенчмарк-матрица 2026-11-21 (baseline AmneziaWG, потери, FEC, BBR удалён
+  в 0.5.0, UDP, RTT, cipher, обфускация, multi-peer) —
   [`../docs/BENCHMARKS-2026-11-21.md`](../docs/BENCHMARKS-2026-11-21.md);
   сырые артефакты — `/root/bench-matrix/{v2,v3,aes,obf,multi}`.
 - UDP-диагностика: правильная методика — `iperf3 -w 8M` на клиенте и
@@ -47,8 +47,9 @@
 - FEC RTT после исправлений: kernel `2:1` 1.099 мс (было 5.05–5.56),
   Rust 0.343 (было 3.7–3.9), mixed 0.727; slow-link `8:2` — 0% при
   `offered ≤ 0.4 × R`, 0.6 × R даёт 7–9% у ядра и до ~1% у Rust.
-- BBR/FEC: `uwg set/show bbr|fec|underlay-mtu`, `uwg show <if>
-  bbr-stats|fec-stats` для обоих бэкендов; fixed-профили `K=1..8, M=1..2`.
+- FEC: `uwg set/show fec|underlay-mtu`, `uwg show <if> fec-stats` для обоих
+  бэкендов; fixed-профили `K=1..8, M=1..2`, adaptive по умолчанию. BBR и
+  `bbr-stats` удалены в 0.5.0.
 - Env: `WG_COLOR_MODE`/`WG_HIDE_KEYS` — основные, `UWG_COLOR_MODE`/
   `UWG_HIDE_KEYS` — deprecated fallback.
 - Статические проверки упаковки: `scripts/check-packaging.sh` (версии,
@@ -170,7 +171,8 @@ python3 -m unittest discover -s bench/tests -p 'test_*.py'   # тесты отч
 
 Сделано в 0.2.0–0.4.1: упаковка Debian/RPM из `cargo build --release`,
 man-страницы, completions, systemd-юниты, CI fmt/clippy/test, релизные сборки
-x86_64/aarch64/armv7, BBR/FEC/underlay-mtu и статистика для обоих бэкендов.
+x86_64/aarch64/armv7, FEC/underlay-mtu и статистика для обоих бэкендов
+(BBR удалён в 0.5.0).
 
 ## Соглашения
 

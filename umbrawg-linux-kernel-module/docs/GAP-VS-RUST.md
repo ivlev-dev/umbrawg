@@ -12,7 +12,8 @@ data path и числа v4 (`/root/bench-matrix/v4/results.csv`) — из про
 
 v4 (`v4.sh` → `multi/run-multi2.sh`): 6 vCPU (7950X3D), veth MTU 9000, туннель
 MTU 1420, `TUNNEL_CPUS=0-3`, `IPERF_CPU=4-5`, RPS выключен, обфускация off,
-BBR/FEC off, ChaCha. `cpu_pct` — занятость **всей машины** (включая iperf3).
+FEC off (BBR удалён в 0.5.0), ChaCha. `cpu_pct` — занятость **всей машины**
+(включая iperf3).
 
 | Пиров | kernel, Гбит/с | kernel CPU | Rust, Гбит/с | Rust CPU | разрыв |
 |---:|---:|---:|---:|---:|---:|

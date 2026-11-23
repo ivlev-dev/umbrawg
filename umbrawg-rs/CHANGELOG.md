@@ -3,7 +3,7 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
-## [Unreleased]
+## [0.5.0] — 2026-11-23
 
 ### Удалено
 
@@ -11,7 +11,8 @@
   `BbrMode`/`Bbr`/`BbrConfig`/`BbrStats`/`BbrQueue`, ACK-трекер, сборка и
   разбор ACK, пейсинг и `cwnd`. Wire-kind ACK остаётся зарезервированным и
   молча игнорируется на приёме; флаги CAPS `BBR`/`ACK` удалены без сдвига
-  битов `FEC`/`FEC_ADAPTIVE`/`FEC_PARTIAL`.
+  битов `FEC`/`FEC_ADAPTIVE`/`FEC_PARTIAL`. Netlink-атрибуты 36 (BBR) и
+  39 (BBR_STATS) зарезервированы и не переиспользуются.
 - UAPI-ключ `bbr=` больше не принимается (ошибка `UnknownKey`), env
   `UMBRAWG_BBR` и `UMBRAWG_ACK_INTERVAL` удалены, секции `bbr_stats` в
   ответе `get=1` больше нет.

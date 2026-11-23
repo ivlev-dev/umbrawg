@@ -1,10 +1,13 @@
 # UmbraWG userspace (Rust)
 
-![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.4.1-blue.svg)
+![License](https://img.shields.io/badge/license-MIT-blue.svg) ![Version](https://img.shields.io/badge/version-0.5.0-blue.svg)
 
 Userspace daemon for the UmbraWG protocol (WireGuard-compatible Noise IK with
 UmbraWG 3.1 obfuscation). Wire-compatible with the `umbrawg` kernel module.
-Версия 0.4.1 — 2026-11-21.
+Версия 0.5.0 — 2026-11-23. В 0.5.0 BBR и ACK удалены: крейт `umbrawg-cc`,
+ACK-трекер, пейсинг и `cwnd` больше не поставляются; FEC adaptive включён
+по умолчанию. ACK-kind (2) зарезервирован и молча игнорируется, а ключ
+`bbr` в конфиге отвергается.
 
 ## Workspace
 
@@ -113,7 +116,7 @@ duplicate the `tar.gz` archives from `rs-ci.yml`:
 Release mechanics:
 
 - the tag has to match `rs-<version>` from `Cargo.toml`
-  (`rs-v0.4.1` for this release); `workflow_dispatch` takes an optional
+  (`rs-v0.5.0` for this release); `workflow_dispatch` takes an optional
   `version` input for a manual check;
 - no secrets are needed — the AUR upload stays manual;
 - the release job uses `concurrency: release-<ref>` with `cancel-in-progress:

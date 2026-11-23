@@ -3,19 +3,20 @@
 ## Текущее состояние
 
 - Ветка `main`, всё слито и запушено.
-- Крейт `netlink-packet-umbrawg` 0.4.1 (2026-11-21): пакет
+- Крейт `netlink-packet-umbrawg` 0.5.0 (2026-11-23): пакет
   `netlink-packet-umbrawg`, типы `Umbrawg*`, константы `UWG_*`.
 - Полное покрытие AmneziaWG/UmbraWG 3.1, включая `RandomTrailers`, `DisableCookies`,
   `HeaderProtectionKey`, `ContentPaddingAddition`, `H1..H4`, `S1..S4`, `Jc/Jmin/Jmax`,
-  `I1..I5`, rekey/keepalive-параметры, `ExtraPorts`, `UnderlayMtu`, `Bbr`,
-  `Fec` (только `1..8 / 1..2`), `FecStats`, `BbrStats`.
+  `I1..I5`, rekey/keepalive-параметры, `ExtraPorts`, `UnderlayMtu`,
+  `Fec` (только `1..8 / 1..2`), `FecStats`. BBR/`BbrStats` удалены в 0.5.0,
+  номера 36/39 зарезервированы.
 - Паритет с `uapi/umbrawg.h`: `AdvancedSecurity`, `UWGPEER_F_HAS_ADVANCED_SECURITY`,
   `UWGALLOWEDIP_A_FLAGS`, `UWGALLOWEDIP_F_REMOVE_ME`, `UmbrawgCmd::UnknownPeer`.
 - Тесты: 38 unit, 42 builder-теста (`tests/builders.rs`), 7 интеграционных против
   реального модуля `umbrawg`, 15 property-тестов (`proptest`), каркас фаззинга
   в `fuzz/`; форматирование — nightly `rustfmt`.
 - `scripts/check-uapi-parity.sh` сверяет константы с заголовком ядра, включая
-  `UWGDEVICE_A_FEC_STATS` (38), `BBR_STATS` (39) и `UNDERLAY_MTU` (40).
+  `UWGDEVICE_A_FEC_STATS` (38), зарезервированные 36/39 и `UNDERLAY_MTU` (40).
 - Интеграционные тесты и примеры проверены на сервере с загруженным модулем.
 
 ## Сборка и тесты
@@ -56,20 +57,20 @@ cargo run --example set_umbrawg -- uwg0
    исправлена паника на пустом `UWGALLOWEDIP_A_CIDR_MASK`; парсер магических
    заголовков сохраняет проводной формат (`H*`, `H*Range`, `H*Legacy`) и
    отклоняет перевёрнутые диапазоны.
-4. Публикация 0.4.1 в crates.io (после проверки интеграции на сервере).
+4. Публикация 0.5.0 в crates.io (после проверки интеграции на сервере).
 5. ~~Синхронизировать README с текущим API и CI.~~ Сделано: таблица атрибутов
    включает `ExtraPorts`/`UnderlayMtu`/`RandomTrailers`/`DisableCookies`/
-   `FecStats`/`BbrStats`, теги и workflow называются `netlink-v*` и
+   `FecStats`, теги и workflow называются `netlink-v*` и
    `netlink-packaging.yml`.
 
 ## Пакетирование и релиз
 
 - `.github/workflows/netlink-packaging.yml`: `cargo test --all-targets`, сборка
   `contrib/arch/rust-netlink-packet-umbrawg-git` в `archlinux:latest` с проверкой
-  содержимого `/usr/share/cargo/registry/netlink-packet-umbrawg-0.4.1` и офлайновой
+  содержимого `/usr/share/cargo/registry/netlink-packet-umbrawg-0.5.0` и офлайновой
   сборки потребителя через `[source] replace`, `cargo package`, `cargo publish --dry-run`;
   на тег `netlink-v*` в GitHub Release попадают `.pkg.tar.zst`, `.crate` и `SHA256SUMS`.
-- Тег должен совпадать с версией из `Cargo.toml` (`netlink-v0.4.1`);
+- Тег должен совпадать с версией из `Cargo.toml` (`netlink-v0.5.0`);
   иначе job `версия` падает до сборки.
 - Секреты не нужны: crates.io и AUR не затрагиваются. Публикация крейта остаётся
   ручной (`cargo publish` с `CARGO_REGISTRY_TOKEN`), AUR — копированием

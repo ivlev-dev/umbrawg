@@ -6,7 +6,7 @@
 
 A Rust crate for parsing and emitting **Umbra WireGuard** generic netlink packets on Linux.
 
-Версия крейта — `0.4.1` (2026-11-21).
+Версия крейта — `0.5.0` (2026-11-23).
 
 This is a specialized fork focused specifically on **UmbraWG** kernel module support.  
 For plain WireGuard, use the original [`netlink-packet-wireguard`](https://crates.io/crates/netlink-packet-wireguard) crate.
@@ -161,7 +161,11 @@ In addition to standard WireGuard attributes (`PrivateKey`, `PublicKey`, `Peers`
 
 `FecStats` приходит только в ответе `GET_DEVICE` и не отправляется в
 `SET_DEVICE`. `ExtraPorts = 0` — дефолт: один сокет на воркера; включайте
-дополнительные порты только в сетях без port-restricted NAT.
+дополнительные порты только в сетях без port-restricted NAT. Если `Fec` не
+задан, ядро и демон используют `adaptive`: parity `2:1` появляется только
+после потерь > 1%, а TUN MTU не понижается, пока parity не активен. Fixed
+`(K<<8)|M` резервирует MTU сразу; формула и floor — в
+[`../docs/PROTOCOL-EXT.md`](../docs/PROTOCOL-EXT.md).
 
 BBR удалён в 0.5.0: атрибуты 36 и 39 зарезервированы, а ответы старого ядра
 с ними разбираются как неизвестные атрибуты без ошибки.
@@ -213,7 +217,7 @@ so use the preflight when you need a trustworthy result.
 Release mechanics:
 
 - the tag has to match `netlink-v<version>` from `Cargo.toml`
-  (`netlink-v0.4.1` for this release); otherwise the `версия` job fails
+  (`netlink-v0.5.0` for this release); otherwise the `версия` job fails
   before anything is built;
 - `workflow_dispatch` takes an optional `version` input for a manual dry check;
 - no secrets are required: nothing is pushed to crates.io or the AUR. Publishing

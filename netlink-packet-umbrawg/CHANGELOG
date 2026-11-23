@@ -8,6 +8,16 @@
    (39) stay reserved and are not reused. `GET_DEVICE` replies from older
    kernels that still carry them parse as unknown attributes instead of
    failing.
+ - The companion pieces of the same release (`umbrawg-cc`, the ACK frame)
+   are gone from the protocol; this crate never exposed them and only keeps
+   the BBR attribute numbers reserved.
+
+### Changed
+ - FEC is adaptive by default in both backends: `Fec` unset means `adaptive`,
+   `2:1` only after measured loss above 1%, off below 0.2% for five seconds.
+ - `UnderlayMtu` docs describe the lazy MTU policy: fixed `K:M` lowers the
+   interface MTU immediately, adaptive only after parity is active on at
+   least one peer. `FecStats` (38) remains nested and `GET_DEVICE`-only.
 
 ## [0.4.1] — 2026-11-21
 ### Fixes
