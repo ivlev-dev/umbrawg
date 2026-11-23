@@ -26,9 +26,15 @@ struct uwg_peer;
  */
 #define UWG_EXT_KIND_ACK 2
 #define UWG_EXT_KIND_FEC_SHARD 3
+/* Loss report from a receiver to the sender: the share of the incoming
+ * stream this side lost, in 1/65536. It describes the peer's *transmit*
+ * direction, which is exactly where adaptive parity belongs.
+ */
+#define UWG_EXT_KIND_LOSS 4
 
 #define UWG_EXT_CAPS_LEN 12
 #define UWG_EXT_FEC_HEADER_LEN 12
+#define UWG_EXT_LOSS_LEN 4
 
 #define UWG_EXT_MAX_FRAME_LEN (UWG_EXT_HEADER_LEN + UWG_EXT_CAPS_LEN)
 
@@ -67,15 +73,33 @@ struct uwg_peer;
  * consulted for shards from a peer that also advertises FEC.
  */
 #define UWG_EXT_CAP_FEC_PARTIAL BIT(4)
+/* The peer understands a LOSS report (kind 4) and measures loss itself, so it
+ * both wants our estimate and will send its own. Advertised by the adaptive
+ * profile only (a fixed profile does not measure loss); a peer that never
+ * sets it only ever receives the legacy CAPS/FEC_SHARD traffic.
+ */
+#define UWG_EXT_CAP_FEEDBACK BIT(5)
 
 #define UWG_EXT_FEC_FLAG_PARITY BIT(0)
 
 /* Bits 0 and 1 used to mean BBR and ACK. They are no longer advertised and
  * must be ignored when an older peer still sets them: only the FEC bits take
- * part in the profile comparison.
+ * part in the profile comparison. FEEDBACK is a known bit but, like the
+ * reserved fields, it does not change the FEC profile.
  */
 #define UWG_EXT_CAPS_KNOWN_FLAGS \
-	(UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_ADAPTIVE | UWG_EXT_CAP_FEC_PARTIAL)
+	(UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_ADAPTIVE | UWG_EXT_CAP_FEC_PARTIAL | \
+	 UWG_EXT_CAP_FEEDBACK)
+
+/* Loss reports are pushed by the receive path, at most ten per second. A gap
+ * of 100 ms or a change of the estimate by more than 0.25 % is worth a frame;
+ * a clean stream only needs the zero heartbeat every 500 ms and stops after
+ * five of them, so an idle clean tunnel falls silent again.
+ */
+#define UWG_EXT_LOSS_MIN_MS 100
+#define UWG_EXT_LOSS_IDLE_MS 500
+#define UWG_EXT_LOSS_CHANGE_Q16 164
+#define UWG_EXT_LOSS_ZERO_MAX 5
 
 #define UWG_EXT_DEFAULT_FEC_K 10
 #define UWG_EXT_DEFAULT_FEC_M 1
@@ -111,6 +135,16 @@ struct uwg_ext_fec_shard {
 	const u8 *payload;
 };
 
+/* Per-peer state of the LOSS transmitter: the last value actually put on the
+ * wire, when, and how many consecutive zero reports already went out.
+ */
+struct uwg_ext_loss_tx {
+	ktime_t last;
+	u16 last_q16;
+	u8 zero_count;
+	bool have;
+};
+
 struct uwg_peer_caps {
 	struct uwg_ext_caps local;
 	struct uwg_ext_caps peer;
@@ -139,6 +173,10 @@ struct uwg_peer_caps {
 	 * rate-limit answers to a peer that keeps changing its profile.
 	 */
 	ktime_t last_sent;
+	/* LOSS report pacing. Protected by the same lock: it is written from
+	 * the receive path of the packets we report on.
+	 */
+	struct uwg_ext_loss_tx loss;
 	spinlock_t lock;
 };
 
@@ -150,6 +188,8 @@ int uwg_ext_parse_caps(const u8 *payload, size_t len,
 bool uwg_ext_caps_selftest(void);
 int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
 			    struct uwg_ext_fec_shard *shard);
+int uwg_ext_parse_loss(const u8 *payload, size_t len, u16 *loss_q16);
+bool uwg_ext_loss_selftest(void);
 
 void uwg_ext_local_caps(const struct uwg_device *uwg,
 			struct uwg_ext_caps *caps);
@@ -161,6 +201,8 @@ bool uwg_ext_enabled(const struct uwg_device *uwg);
 int uwg_ext_build_caps(u8 *buf, size_t len, const struct uwg_ext_caps *caps);
 int uwg_ext_build_fec_shard_header(u8 *buf, size_t len,
 				   const struct uwg_ext_fec_shard *shard);
+int uwg_ext_build_loss(u8 *buf, size_t len, u16 loss_q16);
+void uwg_ext_maybe_send_loss(struct uwg_peer *peer, u16 loss_q16);
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer);
 void uwg_ext_caps_changed(struct uwg_device *uwg);
 void uwg_ext_caps_keypair_changed(struct uwg_peer *peer);

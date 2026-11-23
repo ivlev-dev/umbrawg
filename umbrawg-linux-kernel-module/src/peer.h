@@ -45,6 +45,13 @@ struct uwg_peer {
 	struct uwg_device *device;
 	struct prev_queue tx_queue, rx_queue;
 	struct sk_buff_head staged_packet_queue;
+	/* Serializes the steal -> nonce -> tx_queue enqueue sequence of
+	 * uwg_packet_send_staged_packets(). Two producers that steal batches
+	 * in one order and enqueue the chains in the other would let later
+	 * inner TCP data overtake earlier data; the per-peer crypt queue only
+	 * fixes the encryption order, not the enqueue order.
+	 */
+	spinlock_t tx_order_lock;
 	int serial_work_cpu;
 	bool is_dead;
 	bool timer_need_another_keepalive;
@@ -215,6 +222,16 @@ static inline bool uwg_peer_caps_may_send(const struct uwg_peer *peer)
 	       READ_ONCE(peer->caps.extension_seen) ||
 	       READ_ONCE(peer->caps.resend) ||
 	       READ_ONCE(peer->caps.retry);
+}
+
+/* Cheap gate for the per-packet LOSS report: without the peer's FEEDBACK bit
+ * the frame must not be built at all. Reading the flags racily is enough --
+ * the real check is repeated under caps.lock in uwg_ext_maybe_send_loss().
+ */
+static inline bool uwg_peer_feedback_capable(const struct uwg_peer *peer)
+{
+	return READ_ONCE(peer->caps.peer_valid) &&
+	       (READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_FEEDBACK);
 }
 
 #endif /* _UWG_PEER_H */

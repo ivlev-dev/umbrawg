@@ -215,7 +215,19 @@ ping_loss() { # $1 = ns, $2 = target
 	out=$(ip netns exec "$1" ping -c "$PING_COUNT" -i "$PING_INTERVAL" -W 1 "$2" 2>&1)
 	rc=$?
 	printf '%s\n' "$out" >"$WORK/ping-$1-$2.log"
-	loss=$(printf '%s\n' "$out" | sed -n 's/.* \([0-9]*\)% packet loss.*/\1/p' | head -1)
+	# The loss percentage is fractional on any real loss (e.g. "4.5%"), so
+	# the old integer-only sed pattern silently produced "no summary" and the
+	# caller treated it as a 100% black hole. Round to an integer, which is
+	# what the callers compare against.
+	loss=$(printf '%s\n' "$out" |
+		awk '/% packet loss/ {
+			for (i = 1; i <= NF; i++)
+				if ($i ~ /^[0-9.]+%$/) {
+					sub(/%$/, "", $i);
+					printf "%.0f\n", $i;
+					exit
+				}
+		}')
 	if [ -z "$loss" ]; then
 		say "ping $1 -> $2 produced no summary (rc=$rc, $(printf '%s' "$out" | wc -c) bytes)"
 	fi

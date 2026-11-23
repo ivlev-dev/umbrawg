@@ -62,6 +62,10 @@
  * segments and lets the receiver observe them out of order. 0 keeps the
  * stack default.
  */
+static bool disable_gso;
+module_param(disable_gso, bool, 0644);
+MODULE_PARM_DESC(disable_gso, "Clear GSO features on the interface (debug)");
+
 static unsigned int tun_gso_max_segs;
 module_param(tun_gso_max_segs, uint, 0644);
 MODULE_PARM_DESC(tun_gso_max_segs,
@@ -374,6 +378,11 @@ static void uwg_setup(struct net_device *dev)
 	dev->features |= UWG_NETDEV_FEATURES;
 	dev->hw_features |= UWG_NETDEV_FEATURES;
 	dev->hw_enc_features |= UWG_NETDEV_FEATURES;
+	if (disable_gso) {
+		dev->features &= ~(NETIF_F_GSO | NETIF_F_GSO_SOFTWARE | NETIF_F_TSO);
+		dev->hw_features &= ~(NETIF_F_GSO | NETIF_F_GSO_SOFTWARE | NETIF_F_TSO);
+		dev->hw_enc_features &= ~(NETIF_F_GSO | NETIF_F_GSO_SOFTWARE | NETIF_F_TSO);
+	}
 	if (tun_gso_max_segs)
 		dev->gso_max_segs = (u16)clamp_t(unsigned int,
 						 tun_gso_max_segs, 1,

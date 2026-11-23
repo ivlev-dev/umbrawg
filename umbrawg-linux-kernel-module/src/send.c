@@ -567,41 +567,23 @@ static bool uwg_packet_send_gso(struct uwg_peer *peer, struct sk_buff **pkts,
 	return true;
 }
 
-static void uwg_packet_create_data_done(struct uwg_peer *peer,
-					struct sk_buff **entries,
-					unsigned int entries_len)
+/* Send one window of encrypted skbs in order, aggregating neighbours of equal
+ * size into UDP GSO superdatagrams. FEC shards of a block have the same
+ * length by construction, so they aggregate the same way transport packets
+ * do, but never together with non-FEC traffic: every GSO segment has to
+ * remain a standalone ext frame with its own shard header.
+ *
+ * A GSO superdatagram is lost as a whole by the underlay, so a FEC group is
+ * limited to the block's parity count: m shards may vanish without making the
+ * block unrepairable. With m == 1 (and for blocks whose parity encoding
+ * failed) shards are sent one per datagram, exactly like before the
+ * aggregation existed.
+ */
+static void uwg_packet_send_batch(struct uwg_peer *peer, struct sk_buff **skbs,
+				  unsigned int nskbs, bool *data_sent)
 {
-	struct sk_buff *skbs[UWG_TX_MAX_SKBS];
-	unsigned int nskbs = 0, i, j;
-	bool data_sent = false;
+	unsigned int i, j;
 
-	for (i = 0; i < entries_len; ++i) {
-		struct sk_buff *skb, *next;
-
-		skb_list_walk_safe(entries[i], skb, next) {
-			skb_mark_not_on_list(skb);
-			if (likely(nskbs < UWG_TX_MAX_SKBS))
-				skbs[nskbs++] = skb;
-			else
-				uwg_packet_send_one(peer, skb, &data_sent);
-		}
-	}
-
-	uwg_timers_any_authenticated_packet_traversal(peer);
-	uwg_timers_any_authenticated_packet_sent(peer);
-
-	/* Neighbouring datagrams of equal size share one GSO skb. FEC shards of
-	 * a block have the same length by construction, so they aggregate the
-	 * same way transport packets do, but never together with non-FEC
-	 * traffic: every GSO segment has to remain a standalone ext frame with
-	 * its own shard header.
-	 *
-	 * A GSO superdatagram is lost as a whole by the underlay, so a FEC
-	 * group is limited to the block's parity count: m shards may vanish
-	 * without making the block unrepairable. With m == 1 (and for blocks
-	 * whose parity encoding failed) shards are sent one per datagram,
-	 * exactly like before the aggregation existed.
-	 */
 	for (i = 0; i < nskbs; ) {
 		unsigned int len = skbs[i]->len;
 		unsigned int segs_max = clamp_t(unsigned int,
@@ -631,14 +613,50 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 		}
 
 		if (j - i > 1 &&
-		    uwg_packet_send_gso(peer, skbs + i, j - i, &data_sent)) {
+		    uwg_packet_send_gso(peer, skbs + i, j - i, data_sent)) {
 			i = j;
 			continue;
 		}
 
 		for (; i < j; ++i)
-			uwg_packet_send_one(peer, skbs[i], &data_sent);
+			uwg_packet_send_one(peer, skbs[i], data_sent);
 	}
+}
+
+static void uwg_packet_create_data_done(struct uwg_peer *peer,
+					struct sk_buff **entries,
+					unsigned int entries_len)
+{
+	struct sk_buff *skbs[UWG_TX_MAX_SKBS];
+	unsigned int nskbs = 0, i;
+	bool data_sent = false;
+
+	/* Flatten the crypted chains into wire-order batches. The window is
+	 * bounded so the array stays on the stack; it must be flushed before
+	 * more skbs are appended. Draining the overflow out of band (the old
+	 * behaviour) sent later packets first and put inner TCP out of order,
+	 * which is exactly the GSO burst the superpacket segmentation was
+	 * supposed to prevent.
+	 */
+	for (i = 0; i < entries_len; ++i) {
+		struct sk_buff *skb, *next;
+
+		skb_list_walk_safe(entries[i], skb, next) {
+			skb_mark_not_on_list(skb);
+			if (unlikely(nskbs == UWG_TX_MAX_SKBS)) {
+				uwg_packet_send_batch(peer, skbs, nskbs,
+						      &data_sent);
+				nskbs = 0;
+			}
+			skbs[nskbs++] = skb;
+		}
+	}
+
+	uwg_timers_any_authenticated_packet_traversal(peer);
+	uwg_timers_any_authenticated_packet_sent(peer);
+
+	if (nskbs)
+		uwg_packet_send_batch(peer, skbs, nskbs, &data_sent);
 
 	if (likely(data_sent))
 		uwg_timers_data_sent(peer);
@@ -843,11 +861,83 @@ void uwg_packet_send_fec_frames(struct uwg_peer *peer,
 	uwg_packet_send_staged_packets(peer);
 }
 
+/* A GSO superpacket hands a whole burst of inner segments to the TX path at
+ * once. The xmit path segments before FEC, so uwg_fec_tx_push() only sees
+ * packets that fit one shard; this repeats the invariant for any other
+ * producer of the staged queue, and gives every segment its own nonce and its
+ * own place in the ciphertext order instead of one nonce for a burst.
+ *
+ * Segments replace the superpacket in place, so the queue order stays the
+ * inner TCP order. A segmentation failure keeps the original: dropping it
+ * here would lose a whole burst, and the legacy path at least delivers it.
+ */
+static void uwg_segment_gso(struct sk_buff_head *packets)
+{
+	struct sk_buff *skb, *next, *prev = NULL;
+
+	skb_queue_walk_safe(packets, skb, next) {
+		struct sk_buff *segs, *seg, *seg_next;
+		struct packet_cb cb;
+
+		if (!skb_is_gso(skb)) {
+			prev = skb;
+			continue;
+		}
+		segs = skb_gso_segment(skb, 0);
+		if (IS_ERR_OR_NULL(segs)) {
+			prev = skb;
+			continue;
+		}
+
+		/* The superpacket's CB carries what the xmit path decided: the
+		 * MTU it was checked against and the FEC/keepalive flags. Copy
+		 * it before the original is freed; nonce, keypair and state
+		 * stay unset for the per-segment pass below.
+		 */
+		cb.mtu = PACKET_CB(skb)->mtu;
+		cb.ds = PACKET_CB(skb)->ds;
+		cb.type = PACKET_CB(skb)->type;
+		cb.padding = PACKET_CB(skb)->padding;
+		cb.is_keepalive = PACKET_CB(skb)->is_keepalive;
+		cb.is_fec = PACKET_CB(skb)->is_fec;
+		cb.fec_m = PACKET_CB(skb)->fec_m;
+
+		__skb_unlink(skb, packets);
+		kfree_skb(skb);
+
+		for (seg = segs; seg; seg = seg_next) {
+			seg_next = seg->next;
+			skb_mark_not_on_list(seg);
+			PACKET_CB(seg)->mtu = cb.mtu;
+			PACKET_CB(seg)->ds = cb.ds;
+			PACKET_CB(seg)->type = cb.type;
+			PACKET_CB(seg)->padding = cb.padding;
+			PACKET_CB(seg)->is_keepalive = cb.is_keepalive;
+			PACKET_CB(seg)->is_fec = cb.is_fec;
+			PACKET_CB(seg)->fec_m = cb.fec_m;
+			if (prev)
+				__skb_queue_after(packets, prev, seg);
+			else
+				__skb_queue_head(packets, seg);
+			prev = seg;
+		}
+	}
+}
+
 void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 {
 	struct noise_keypair *keypair;
 	struct sk_buff_head packets;
 	struct sk_buff *skb;
+
+	/* The steal -> nonce -> tx_queue enqueue sequence must be atomic per
+	 * peer. Otherwise two producers can steal their batches in one order
+	 * (old packets first) and enqueue the chains in the other (a later
+	 * batch wins the race), and the TX worker sends newer inner TCP data
+	 * before older data. The per-peer crypt queue already fixes the
+	 * encryption order; this fixes the order the chains enter it.
+	 */
+	spin_lock_bh(&peer->tx_order_lock);
 
 	/* Steal the current queue into our local one. */
 	__skb_queue_head_init(&packets);
@@ -855,7 +945,15 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 	skb_queue_splice_init(&peer->staged_packet_queue, &packets);
 	spin_unlock_bh(&peer->staged_packet_queue.lock);
 	if (unlikely(skb_queue_empty(&packets)))
-		return;
+		goto out_empty;
+
+	/* Must run before nonces are handed out: one nonce per inner segment
+	 * is what keeps replay protection, FEC coverage and the ciphertext
+	 * order aligned with the inner TCP sequence.
+	 */
+	uwg_segment_gso(&packets);
+	if (unlikely(skb_queue_empty(&packets)))
+		goto out_empty;
 
 	/* First we make sure we have a valid reference to a valid key. */
 	rcu_read_lock_bh();
@@ -900,12 +998,18 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 	uwg_peer_get(keypair->entry.peer);
 	PACKET_CB(packets.next)->keypair = keypair;
 	uwg_packet_create_data(peer, packets.next);
+	spin_unlock_bh(&peer->tx_order_lock);
+	return;
+
+out_empty:
+	spin_unlock_bh(&peer->tx_order_lock);
 	return;
 
 out_invalid:
 	WRITE_ONCE(keypair->sending.is_valid, false);
 out_nokey:
 	uwg_noise_keypair_put(keypair, false);
+	spin_unlock_bh(&peer->tx_order_lock);
 
 	/* We orphan the packets if we're waiting on a handshake, so that they
 	 * don't block a socket's pool.

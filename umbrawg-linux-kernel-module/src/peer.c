@@ -60,6 +60,7 @@ struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 	rwlock_init(&peer->endpoint_lock);
 	kref_init(&peer->refcount);
 	skb_queue_head_init(&peer->staged_packet_queue);
+	spin_lock_init(&peer->tx_order_lock);
 	uwg_peer_reset_last_sent_handshake(peer);
 	set_bit(NAPI_STATE_NO_BUSY_POLL, &peer->napi.state);
 	netif_napi_add(uwg->dev, &peer->napi, uwg_packet_rx_poll);

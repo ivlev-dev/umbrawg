@@ -212,18 +212,22 @@ except Exception:
     print("FAIL")' "$WORK/$2.json"
 }
 
-probe_encoded() { # label: packets encoded by NS1 during a small reverse burst
-	local label=$1 pre post d
-	pre=$(stat "$NS1" blocks_encoded)
+probe_encoded_ns() { # ns target label: blocks encoded by $ns during a short burst
+	local ns=$1 tgt=$2 label=$3 pre post d
+	pre=$(stat "$ns" blocks_encoded)
 	pre=${pre:-0}
-	ip netns exec "$NS1" ping -f -c 200 -W 1 "$T0" >/dev/null 2>&1 || true
+	ip netns exec "$ns" ping -f -c 200 -W 1 "$tgt" >/dev/null 2>&1 || true
 	sleep 0.3
-	post=$(stat "$NS1" blocks_encoded)
+	post=$(stat "$ns" blocks_encoded)
 	post=${post:-0}
 	d=$((post - pre))
 	[ "$d" -ge 0 ] || d=0
-	note "  $label: $NS1 blocks_encoded +$d"
+	note "  $label: $ns blocks_encoded +$d"
 	printf '%s' "$d"
+}
+
+probe_encoded() { # label: packets encoded by NS1 during a small reverse burst
+	probe_encoded_ns "$NS1" "$T0" "$1"
 }
 
 declare -A BASE_D BASE_E BASE_C
@@ -482,9 +486,16 @@ if command -v iperf3 >/dev/null 2>&1 && command -v tc >/dev/null 2>&1 &&
 	iperf_tcp 5 adloss >/dev/null
 	ip netns exec "$NS0" tc qdisc del dev "$VA" root 2>/dev/null
 	sleep 0.3
-	L_ENC=$(probe_encoded loss)
+	# The loss is on NS0 -> NS1. NS1 reports it with LOSS frames, so NS0 --
+	# the side that actually transmits into the lossy direction -- must
+	# arm, while NS1's own (clean) TX direction must stay in legacy.
+	# Probing NS1 instead was the old, wrong-direction expectation.
+	L_ENC=$(probe_encoded_ns "$NS0" "$T1" loss)
 	[ "${L_ENC:-0}" -ge 10 ] ||
-		fail "adaptive did not arm on 2% loss (blocks_encoded +$L_ENC)"
+		fail "adaptive did not arm on the lossy TX direction (NS0 blocks_encoded +$L_ENC)"
+	L_REV=$(probe_encoded_ns "$NS1" "$T0" loss-reverse)
+	[ "${L_REV:-0}" -le 2 ] ||
+		fail "adaptive armed on the clean reverse direction (NS1 blocks_encoded +$L_REV)"
 else
 	note "iperf3/tc/python3 missing: adaptive reorder check skipped"
 fi

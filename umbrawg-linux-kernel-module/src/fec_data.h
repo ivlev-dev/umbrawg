@@ -100,6 +100,12 @@ struct uwg_fec_counters {
 	atomic64_t decode_fail;
 	atomic64_t dropped_bounds;
 	atomic64_t dropped_disabled;
+	/* LOSS reports received from the peer, and the last ratio they carried
+	 * (1/65536 of the stream this side transmits). The ratio lives in a
+	 * 64 bit counter so it can be read without the FEC lock.
+	 */
+	atomic64_t loss_report_rx;
+	atomic64_t feedback_loss_q16;
 };
 
 struct uwg_fec_stats {
@@ -110,6 +116,8 @@ struct uwg_fec_stats {
 	u64 decode_fail;
 	u64 dropped_bounds;
 	u64 dropped_disabled;
+	u64 loss_report_rx;
+	u32 feedback_loss_q16;
 };
 
 void uwg_fec_stats_fill(const struct uwg_peer *peer, struct uwg_fec_stats *stats);
@@ -118,6 +126,7 @@ void uwg_fec_stats_fill_device(struct uwg_device *uwg,
 
 void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter,
 			      u64 keypair_id);
+void uwg_fec_feedback_receive(struct uwg_peer *peer, u16 loss_q16);
 
 bool uwg_fec_mode_config(u32 mode, u8 *k, u8 *m, bool *adaptive);
 bool uwg_fec_peer_tx_ready(const struct uwg_peer *peer);

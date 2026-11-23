@@ -47,6 +47,23 @@ struct uwg_fec_tx {
 	u32 adaptive_loss_q16;
 	unsigned long adaptive_clean_since;
 	unsigned long adaptive_segment_start;
+	/* Loss report received from the peer: the share of the stream *this*
+	 * side transmits that the peer lost. It is the direction adaptive
+	 * parity protects, unlike adaptive_loss_q16 above, which measures the
+	 * incoming (reverse) direction.
+	 */
+	unsigned long feedback_ts;
+	bool feedback_valid;
+	/* The peer speaks LOSS: its reports, not the local (reverse
+	 * direction) estimate, decide whether parity is armed. Set from the
+	 * peer flags on every observed packet.
+	 */
+	bool feedback_peer;
+	/* The running clean timer was started by a peer report, not by the
+	 * local estimate. It stays authoritative after the report goes stale,
+	 * so a lossy reverse direction cannot keep parity armed forever.
+	 */
+	bool feedback_clean;
 	u8 count;
 	u16 lens[UWG_FEC_DATA_MAX_K];
 	u8 *shards;
@@ -295,6 +312,17 @@ static unsigned int uwg_fec_tx_limit(const struct uwg_peer *peer)
 #define UWG_FEC_ADAPTIVE_MIN_WINDOW 256
 #define UWG_FEC_ADAPTIVE_MAX_WINDOW (1U << 24)
 #define UWG_FEC_ADAPTIVE_SETTLE_JIFFIES HZ
+/* Adaptive thresholds in 1/65536: arm above 1 %, disarm below 0.2 % once the
+ * clean timer has run out. The same values are used for the local estimate
+ * and for a peer loss report.
+ */
+#define UWG_FEC_ADAPTIVE_ON_Q16 655
+#define UWG_FEC_ADAPTIVE_OFF_Q16 131
+#define UWG_FEC_ADAPTIVE_CLEAN_JIFFIES (5 * HZ)
+/* A loss report older than this no longer says anything about the current
+ * path: it may predate a route change or a rekey.
+ */
+#define UWG_FEC_FEEDBACK_TTL_JIFFIES (2 * HZ)
 
 static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter,
 					  unsigned long now)
@@ -307,7 +335,40 @@ static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter,
 	tx->adaptive_loss_q16 = 0;
 	tx->adaptive_have_sample = false;
 	tx->adaptive_clean_since = 0;
+	tx->feedback_clean = false;
 	tx->adaptive_segment_start = now;
+}
+
+/* Switching parity off is the same transition whoever asked for it: drop the
+ * clean timer, the warmup counter and the estimate, so a re-arm starts from
+ * scratch instead of inheriting a stale window.
+ */
+static void uwg_fec_adaptive_disarm(struct uwg_fec_tx *tx)
+{
+	tx->adaptive_on = false;
+	tx->adaptive_clean_since = 0;
+	tx->feedback_clean = false;
+	tx->adaptive_observed = 0;
+	tx->adaptive_loss_q16 = 0;
+	tx->adaptive_have_sample = false;
+}
+
+/* Expire a clean timer that a peer report started. Reports stop after five
+ * zeros, so the timer outlives the report: the first authenticated packet
+ * after it ran out turns parity off even though the report is stale and the
+ * local (reverse direction) estimate may still look lossy.
+ */
+static bool uwg_fec_feedback_expire_locked(struct uwg_fec_tx *tx,
+					   unsigned long now)
+{
+	if (!tx->feedback_clean || !tx->adaptive_on ||
+	    !tx->adaptive_clean_since)
+		return false;
+	if (!time_after(now, tx->adaptive_clean_since +
+			     UWG_FEC_ADAPTIVE_CLEAN_JIFFIES))
+		return false;
+	uwg_fec_adaptive_disarm(tx);
+	return true;
 }
 
 static bool uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
@@ -381,9 +442,28 @@ static bool uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 	 */
 	tx_delta = tx->adaptive_tx_now - tx->adaptive_tx_mark;
 	tx->adaptive_tx_mark = tx->adaptive_tx_now;
+	/* A fresh report from the peer describes the direction we transmit on;
+	 * the local estimate describes the reverse one. Deciding the transmit
+	 * direction from the reverse estimate armed parity on the wrong side.
+	 * The estimate is still tracked (it is what we report back), but while
+	 * the peer speaks LOSS it alone arms or disarms: its silence after the
+	 * five clean zeros means "clean", not "unknown", and falling back to
+	 * the local estimate would arm the reverse direction again.
+	 */
+	if (tx->feedback_peer) {
+		if (tx->feedback_valid &&
+		    time_before(now, tx->feedback_ts +
+				     UWG_FEC_FEEDBACK_TTL_JIFFIES))
+			return changed;
+		/* A clean timer started by a report outlives the reports
+		 * themselves; expire it here so an idle flow still leaves
+		 * parity off on the next packet.
+		 */
+		return uwg_fec_feedback_expire_locked(tx, now);
+	}
 	if (!tx->adaptive_on) {
 		if (tx->adaptive_observed >= 1024 &&
-		    tx->adaptive_loss_q16 > 655 &&
+		    tx->adaptive_loss_q16 > UWG_FEC_ADAPTIVE_ON_Q16 &&
 		    (!tx->adaptive_tx_now ||
 		     tx_delta >= (u64)expected * 256)) {
 			tx->adaptive_on = true;
@@ -394,16 +474,13 @@ static bool uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 			 */
 			tx->adaptive_clean_since = 0;
 		}
-	} else if (tx->adaptive_loss_q16 < 131) {
+	} else if (tx->adaptive_loss_q16 < UWG_FEC_ADAPTIVE_OFF_Q16) {
 		if (!tx->adaptive_clean_since)
 			tx->adaptive_clean_since = now;
-		else if (time_after(now, tx->adaptive_clean_since + 5 * HZ)) {
-			tx->adaptive_on = false;
+		else if (time_after(now, tx->adaptive_clean_since +
+					 UWG_FEC_ADAPTIVE_CLEAN_JIFFIES)) {
+			uwg_fec_adaptive_disarm(tx);
 			changed = true;
-			tx->adaptive_clean_since = 0;
-			tx->adaptive_observed = 0;
-			tx->adaptive_loss_q16 = 0;
-			tx->adaptive_have_sample = false;
 		}
 	} else {
 		tx->adaptive_clean_since = 0;
@@ -411,12 +488,84 @@ static bool uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 	return changed;
 }
 
+/* Apply one LOSS report from the peer. Called with tx->lock held by both the
+ * receive path and the load-time self-test. Returns true on an armed/disarmed
+ * transition, which is what schedules the deferred MTU refresh.
+ *
+ * The report is the peer's estimate of the stream we send, so it is applied
+ * directly: above 1 % arm 2:1, below 0.2 % start the same five second clean
+ * timer the local estimator uses, and the middle band only resets it.
+ */
+static bool uwg_fec_feedback_locked(struct uwg_fec_tx *tx, u16 loss_q16,
+				    unsigned long now)
+{
+	bool changed = false;
+
+	tx->feedback_valid = true;
+	tx->feedback_ts = now;
+
+	if (loss_q16 > UWG_FEC_ADAPTIVE_ON_Q16) {
+		tx->adaptive_clean_since = 0;
+		tx->feedback_clean = false;
+		if (!tx->adaptive_on) {
+			tx->adaptive_on = true;
+			changed = true;
+		}
+	} else if (loss_q16 < UWG_FEC_ADAPTIVE_OFF_Q16) {
+		if (tx->adaptive_on) {
+			if (!tx->adaptive_clean_since) {
+				tx->adaptive_clean_since = now;
+				tx->feedback_clean = true;
+			} else if (time_after(now, tx->adaptive_clean_since +
+						 UWG_FEC_ADAPTIVE_CLEAN_JIFFIES)) {
+				uwg_fec_adaptive_disarm(tx);
+				changed = true;
+			}
+		}
+	} else {
+		tx->adaptive_clean_since = 0;
+		tx->feedback_clean = false;
+	}
+	return changed;
+}
+
+void uwg_fec_feedback_receive(struct uwg_peer *peer, u16 loss_q16)
+{
+	struct uwg_device *uwg = peer->device;
+	struct uwg_fec_tx *tx;
+	bool changed = false;
+
+	atomic64_inc(&peer->fec_counters.loss_report_rx);
+	atomic64_set(&peer->fec_counters.feedback_loss_q16, loss_q16);
+
+	/* Fixed profiles do not adapt, so the report is only accounted for. A
+	 * peer that sends it anyway is not an error: it may run adaptive on
+	 * its own side.
+	 */
+	rcu_read_lock();
+	tx = rcu_dereference(peer->fec_tx);
+	if (!tx || !tx->adaptive)
+		goto out;
+	spin_lock_bh(&tx->lock);
+	tx->feedback_peer = true;
+	changed = uwg_fec_feedback_locked(tx, loss_q16, jiffies);
+	spin_unlock_bh(&tx->lock);
+out:
+	rcu_read_unlock();
+
+	if (changed)
+		uwg_fec_mtu_refresh_schedule(uwg);
+}
+
 void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter,
 			      u64 keypair_id)
 {
 	struct uwg_device *uwg = peer->device;
 	struct uwg_fec_tx *tx;
+	u32 loss_q16 = 0;
+	bool feedback = uwg_peer_feedback_capable(peer);
 	bool changed = false;
+	bool report = false;
 
 	rcu_read_lock();
 	tx = rcu_dereference(peer->fec_tx);
@@ -424,9 +573,15 @@ void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter,
 		goto out;
 	spin_lock_bh(&tx->lock);
 	tx->adaptive_tx_now = atomic64_read(&peer->tx_bytes);
+	tx->feedback_peer = feedback;
 	changed = uwg_fec_adaptive_observe_locked(tx, counter, keypair_id,
 						  jiffies);
+	/* Snapshot the estimate under the lock: it is reported to the peer,
+	 * for which it is the loss of the direction it transmits on.
+	 */
+	loss_q16 = tx->adaptive_loss_q16;
 	spin_unlock_bh(&tx->lock);
+	report = true;
 out:
 	rcu_read_unlock();
 
@@ -437,6 +592,9 @@ out:
 	 */
 	if (changed)
 		uwg_fec_mtu_refresh_schedule(uwg);
+	if (report && feedback)
+		uwg_ext_maybe_send_loss(peer, (u16)min_t(u32, loss_q16,
+							 0xffffU));
 }
 
 bool uwg_fec_peer_tx_ready(const struct uwg_peer *peer)
@@ -1425,6 +1583,10 @@ void uwg_fec_stats_fill(const struct uwg_peer *peer,
 		atomic64_read(&peer->fec_counters.dropped_bounds);
 	stats->dropped_disabled =
 		atomic64_read(&peer->fec_counters.dropped_disabled);
+	stats->loss_report_rx =
+		atomic64_read(&peer->fec_counters.loss_report_rx);
+	stats->feedback_loss_q16 =
+		(u32)atomic64_read(&peer->fec_counters.feedback_loss_q16);
 }
 
 /* Caller must hold device_update_lock, which keeps peer_list stable; the
@@ -1447,6 +1609,12 @@ void uwg_fec_stats_fill_device(struct uwg_device *uwg,
 		stats->decode_fail += peer_stats.decode_fail;
 		stats->dropped_bounds += peer_stats.dropped_bounds;
 		stats->dropped_disabled += peer_stats.dropped_disabled;
+		stats->loss_report_rx += peer_stats.loss_report_rx;
+		/* A ratio does not sum across peers: keep the worst one, like
+		 * the Rust device dump does.
+		 */
+		if (peer_stats.feedback_loss_q16 > stats->feedback_loss_q16)
+			stats->feedback_loss_q16 = peer_stats.feedback_loss_q16;
 	}
 }
 
@@ -1611,6 +1779,149 @@ static bool uwg_fec_adaptive_selftest(void)
 	A_CHECK(tx.adaptive_on);
 
 #undef A_CHECK
+	return ok;
+}
+
+/* Guards the direction split introduced with LOSS (kind 4): a report from the
+ * peer describes the stream we transmit, so it may arm parity while the local
+ * estimate must not; and a clean timer started by a report outlives it.
+ */
+static bool uwg_fec_feedback_selftest(void)
+{
+	struct uwg_fec_tx tx;
+	unsigned long now = jiffies;
+	u64 i;
+	bool ok = true;
+
+#define F_CHECK(cond) do {						\
+		if (!(cond)) {						\
+			pr_err("FEC feedback self-test: FAIL (%s)\n",	\
+			       #cond);					\
+			ok = false;					\
+		}							\
+	} while (0)
+
+	/* The peer reports 2 % loss of our transmit stream while our own
+	 * incoming stream is clean: adaptive must arm.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	uwg_fec_adaptive_observe_locked(&tx, 0, 1, now);
+	for (i = 1; i <= 4096; i++)
+		uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+	now += HZ;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now);
+	F_CHECK(!tx.adaptive_on);
+	F_CHECK(uwg_fec_feedback_locked(&tx, 1310, now));
+	F_CHECK(tx.adaptive_on);
+	F_CHECK(tx.feedback_valid);
+	/* The transition is reported exactly once, or the MTU worker is
+	 * scheduled on every report.
+	 */
+	F_CHECK(!uwg_fec_feedback_locked(&tx, 1310, now));
+
+	/* The 0.2..1 % band neither arms nor disarms. */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	F_CHECK(!uwg_fec_feedback_locked(&tx, 400, now));
+	F_CHECK(!tx.adaptive_on);
+
+	/* A clean report starts the five second timer and disarms; the local
+	 * estimate stays clean, so only the report can drive it.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	F_CHECK(uwg_fec_feedback_locked(&tx, 1310, now));
+	F_CHECK(!uwg_fec_feedback_locked(&tx, 0, now));
+	F_CHECK(tx.adaptive_on);
+	F_CHECK(!uwg_fec_feedback_locked(&tx, 0, now + 5 * HZ - 1));
+	F_CHECK(tx.adaptive_on);
+	F_CHECK(uwg_fec_feedback_locked(&tx, 0, now + 5 * HZ + 1));
+	F_CHECK(!tx.adaptive_on);
+
+	/* A clean timer started by a report outlives it: the peer stops after
+	 * its five zeros, the report goes stale, and the next packet must
+	 * still turn parity off instead of leaving the local (possibly
+	 * lossy) reverse direction in charge.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	F_CHECK(uwg_fec_feedback_locked(&tx, 1310, now));
+	F_CHECK(!uwg_fec_feedback_locked(&tx, 0, now));
+	F_CHECK(tx.feedback_clean);
+	F_CHECK(!uwg_fec_feedback_expire_locked(&tx, now + 4 * HZ));
+	F_CHECK(tx.adaptive_on);
+	F_CHECK(uwg_fec_feedback_expire_locked(&tx, now + 5 * HZ + 1));
+	F_CHECK(!tx.adaptive_on);
+	F_CHECK(!tx.feedback_clean);
+
+	/* A local lossy estimate must not reset that timer: it measures the
+	 * reverse direction.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	tx.feedback_peer = true;
+	tx.adaptive_valid = true;
+	tx.adaptive_keypair_id = 1;
+	uwg_fec_feedback_locked(&tx, 1310, now);
+	uwg_fec_feedback_locked(&tx, 0, now);
+	tx.feedback_ts = now - UWG_FEC_FEEDBACK_TTL_JIFFIES - 1;
+	now += HZ;
+	for (i = 0; i <= 4096; i++)
+		if (i % 50)
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+	F_CHECK(tx.adaptive_on);
+	F_CHECK(tx.adaptive_clean_since);
+	F_CHECK(tx.adaptive_loss_q16 > UWG_FEC_ADAPTIVE_ON_Q16);
+
+	/* With feedback enabled the local estimate must not arm: our reverse
+	 * direction lost 2 %, the peer reports 0.1 %.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	tx.feedback_peer = true;
+	uwg_fec_feedback_locked(&tx, 65, now);
+	uwg_fec_adaptive_observe_locked(&tx, 0, 1, now);
+	for (i = 1; i <= 4096; i++)
+		if (i % 50)
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+	now += HZ;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now);
+	F_CHECK(!tx.adaptive_on);
+	/* The estimate itself is still tracked: it is what we report back. */
+	F_CHECK(tx.adaptive_loss_q16 > UWG_FEC_ADAPTIVE_ON_Q16);
+
+	/* A feedback-capable peer that went silent (five clean zeros, or lost
+	 * frames) must not hand the decision back to the local estimate: that
+	 * would arm the reverse direction again after a few seconds of
+	 * one-way loss.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	tx.feedback_peer = true;
+	tx.adaptive_valid = true;
+	tx.adaptive_keypair_id = 1;
+	now += HZ;
+	for (i = 0; i <= 4096; i++)
+		if (i % 50)
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+	F_CHECK(!tx.adaptive_on);
+	F_CHECK(tx.adaptive_loss_q16 > UWG_FEC_ADAPTIVE_ON_Q16);
+
+	/* Without the peer's FEEDBACK capability the local estimate is the
+	 * only signal -- the pre-LOSS behaviour must be untouched.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	uwg_fec_adaptive_observe_locked(&tx, 0, 1, now);
+	for (i = 1; i <= 4096; i++)
+		if (i % 50)
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+	now += HZ;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now);
+	F_CHECK(tx.adaptive_on);
+
+#undef F_CHECK
 	return ok;
 }
 
@@ -1785,7 +2096,9 @@ int uwg_fec_mtu_selftest(void)
 	T_CHECK(!uwg_fec_shard_profile_ok(8, 1, 7, 2));
 
 	T_CHECK(uwg_fec_adaptive_selftest());
+	T_CHECK(uwg_fec_feedback_selftest());
 	T_CHECK(uwg_ext_caps_selftest());
+	T_CHECK(uwg_ext_loss_selftest());
 
 	if (!ok)
 		return -EINVAL;

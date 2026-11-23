@@ -13,6 +13,7 @@
 #include <linux/ktime.h>
 #include <linux/module.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/unaligned.h>
 
@@ -29,7 +30,8 @@ static bool uwg_ext_kind_valid(u8 kind)
 {
 	return kind == UWG_EXT_KIND_CAPS ||
 	       kind == UWG_EXT_KIND_ACK ||
-	       kind == UWG_EXT_KIND_FEC_SHARD;
+	       kind == UWG_EXT_KIND_FEC_SHARD ||
+	       kind == UWG_EXT_KIND_LOSS;
 }
 
 bool uwg_ext_detect(const u8 *data, size_t len)
@@ -214,6 +216,24 @@ int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
 	return 0;
 }
 
+/* LOSS carries a 16 bit ratio, so the "<= 65535" bound is the field width.
+ * The reserved tail must be zero: a non-zero value is either a future,
+ * incompatible extension of the frame or corruption, and guessing would make
+ * the sender arm on a garbage estimate.
+ */
+int uwg_ext_parse_loss(const u8 *payload, size_t len, u16 *loss_q16)
+{
+	u16 reserved;
+
+	if (len != UWG_EXT_LOSS_LEN)
+		return -EINVAL;
+	reserved = get_unaligned_le16(payload + 2);
+	if (reserved)
+		return -EINVAL;
+	*loss_q16 = get_unaligned_le16(payload);
+	return 0;
+}
+
 void uwg_ext_local_caps(const struct uwg_device *uwg,
 			struct uwg_ext_caps *caps)
 {
@@ -227,8 +247,15 @@ void uwg_ext_local_caps(const struct uwg_device *uwg,
 	if (uwg->fec_mode != UWG_FEC_MODE_OFF &&
 	    uwg_fec_mode_config(uwg->fec_mode, &k, &m, &adaptive)) {
 		flags |= UWG_EXT_CAP_FEC;
-		if (adaptive)
+		if (adaptive) {
 			flags |= UWG_EXT_CAP_FEC_ADAPTIVE;
+			/* Only the adaptive profile measures loss, so only it
+			 * promises LOSS reports. Advertising the bit in a
+			 * fixed profile would invite frames this side then
+			 * suppresses.
+			 */
+			flags |= UWG_EXT_CAP_FEEDBACK;
+		}
 		if (READ_ONCE(uwg_ext_fec_partial))
 			flags |= UWG_EXT_CAP_FEC_PARTIAL;
 		caps->fec_k = k;
@@ -304,6 +331,109 @@ int uwg_ext_build_fec_shard_header(u8 *buf, size_t len,
 	put_unaligned_le16(shard->shard_len, buf + 16);
 	put_unaligned_le16(shard->reserved, buf + 18);
 	return UWG_EXT_HEADER_LEN + UWG_EXT_FEC_HEADER_LEN;
+}
+
+int uwg_ext_build_loss(u8 *buf, size_t len, u16 loss_q16)
+{
+	size_t total = UWG_EXT_HEADER_LEN + UWG_EXT_LOSS_LEN;
+
+	if (len < total)
+		return -EMSGSIZE;
+
+	uwg_ext_write_header(buf, UWG_EXT_KIND_LOSS, UWG_EXT_LOSS_LEN);
+	put_unaligned_le16(loss_q16, buf + UWG_EXT_HEADER_LEN);
+	put_unaligned_le16(0, buf + UWG_EXT_HEADER_LEN + 2);
+	return (int)total;
+}
+
+/* Pacing of the LOSS transmitter, kept pure so the 10/s cap, the clean
+ * heartbeat and the shutdown after five zeros are covered by the load-time
+ * self-test.
+ */
+static bool uwg_ext_loss_due(ktime_t now, const struct uwg_ext_loss_tx *loss,
+			     u16 loss_q16)
+{
+	s64 ms;
+	u16 diff;
+
+	if (!loss->have)
+		return true;
+	ms = ktime_ms_delta(now, loss->last);
+	if (!loss_q16) {
+		/* Clean stream: a heartbeat every 500 ms, five in total, then
+		 * silence until the estimate becomes non-zero again.
+		 */
+		return loss->zero_count < UWG_EXT_LOSS_ZERO_MAX &&
+		       ms >= UWG_EXT_LOSS_IDLE_MS;
+	}
+	if (ms < UWG_EXT_LOSS_MIN_MS)
+		return false;
+	diff = loss_q16 > loss->last_q16 ?
+		       loss_q16 - loss->last_q16 :
+		       loss->last_q16 - loss_q16;
+	/* A change is reported on the first allowed tick; an unchanged
+	 * estimate is only refreshed at the slower rate, so a stable lossy
+	 * channel does not keep the control path busy at 10 Hz.
+	 */
+	return diff > UWG_EXT_LOSS_CHANGE_Q16 || ms >= UWG_EXT_LOSS_IDLE_MS;
+}
+
+static void uwg_ext_loss_sent(struct uwg_ext_loss_tx *loss, ktime_t now,
+			      u16 loss_q16)
+{
+	loss->last = now;
+	loss->last_q16 = loss_q16;
+	loss->have = true;
+	if (loss_q16)
+		loss->zero_count = 0;
+	else if (loss->zero_count < UWG_EXT_LOSS_ZERO_MAX)
+		++loss->zero_count;
+}
+
+static bool uwg_ext_loss_peer_ok(u32 peer_flags)
+{
+	return peer_flags & UWG_EXT_CAP_FEEDBACK;
+}
+
+void uwg_ext_maybe_send_loss(struct uwg_peer *peer, u16 loss_q16)
+{
+	u8 frame[UWG_EXT_HEADER_LEN + UWG_EXT_LOSS_LEN];
+	struct uwg_device *uwg = peer->device;
+	ktime_t now;
+	bool due;
+	int len;
+
+	if (unlikely(READ_ONCE(peer->is_dead) || !uwg_ext_enabled(uwg)))
+		return;
+
+	now = ktime_get();
+	spin_lock_bh(&peer->caps.lock);
+	/* A peer that never advertised FEEDBACK runs a stack without kind 4;
+	 * it must not receive the frame at all.
+	 */
+	if (!peer->caps.peer_valid ||
+	    !uwg_ext_loss_peer_ok(peer->caps.peer.flags)) {
+		/* Forget the pacing, so a peer that re-enables feedback is
+		 * answered with a fresh report instead of an old schedule.
+		 */
+		peer->caps.loss.have = false;
+		peer->caps.loss.zero_count = 0;
+		spin_unlock_bh(&peer->caps.lock);
+		return;
+	}
+	due = uwg_ext_loss_due(now, &peer->caps.loss, loss_q16);
+	spin_unlock_bh(&peer->caps.lock);
+	if (!due)
+		return;
+
+	len = uwg_ext_build_loss(frame, sizeof(frame), loss_q16);
+	if (unlikely(len <= 0 || uwg_packet_send_control(peer, frame,
+							 (size_t)len)))
+		return;
+
+	spin_lock_bh(&peer->caps.lock);
+	uwg_ext_loss_sent(&peer->caps.loss, now, loss_q16);
+	spin_unlock_bh(&peer->caps.lock);
 }
 
 void uwg_ext_caps_changed(struct uwg_device *uwg)
@@ -517,8 +647,16 @@ void uwg_ext_maybe_send_caps(struct uwg_peer *peer)
 static bool uwg_ext_caps_same(const struct uwg_ext_caps *a,
 			      const struct uwg_ext_caps *b)
 {
-	return a->flags == b->flags &&
-	       a->ack_interval == b->ack_interval &&
+	/* Only the FEC profile describes the block shape. FEEDBACK and the
+	 * reserved fields are informational: a peer that starts or stops
+	 * reporting loss did not change its profile, and a flapping bit must
+	 * not reset the bounded CAPS budget. ack_interval is legacy padding
+	 * that the two stacks fill with different constants.
+	 */
+	const u32 mask = UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_ADAPTIVE |
+			 UWG_EXT_CAP_FEC_PARTIAL;
+
+	return (a->flags & mask) == (b->flags & mask) &&
 	       a->fec_k == b->fec_k &&
 	       a->fec_m == b->fec_m;
 }
@@ -539,8 +677,12 @@ static void uwg_ext_sanitize_caps(struct uwg_peer *peer,
 	net_dbg_ratelimited("%s: Peer %llu advertised unsupported FEC %u:%u\n",
 			    peer->device->dev->name, peer->internal_id,
 			    caps->fec_k, caps->fec_m);
+	/* FEEDBACK goes with the profile: it promises loss reports for a
+	 * direction this peer cannot decode anyway. Rust does the same, so a
+	 * mixed pair keeps the same flags.
+	 */
 	caps->flags &= ~(UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_ADAPTIVE |
-			 UWG_EXT_CAP_FEC_PARTIAL);
+			 UWG_EXT_CAP_FEC_PARTIAL | UWG_EXT_CAP_FEEDBACK);
 	caps->fec_k = 0;
 	caps->fec_m = 0;
 }
@@ -676,7 +818,176 @@ enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 			return UWG_EXT_RX_INVALID;
 		return uwg_ext_handle_fec_shard(peer, skb, fecbuf,
 						header.payload_len);
+	case UWG_EXT_KIND_LOSS: {
+		u8 lossbuf[UWG_EXT_LOSS_LEN];
+		u16 loss_q16;
+
+		if (header.payload_len != UWG_EXT_LOSS_LEN ||
+		    skb_copy_bits(skb, UWG_EXT_HEADER_LEN, lossbuf,
+				  UWG_EXT_LOSS_LEN) ||
+		    uwg_ext_parse_loss(lossbuf, UWG_EXT_LOSS_LEN, &loss_q16))
+			return UWG_EXT_RX_INVALID;
+		uwg_fec_feedback_receive(peer, loss_q16);
+		return UWG_EXT_RX_CONSUMED;
+	}
 	default:
 		return UWG_EXT_RX_INVALID;
 	}
+}
+
+/* Wire, pacing and capability coverage for the LOSS report: the frame has to
+ * round-trip through the same header parser the receive path uses, the
+ * rate limit must cap it at ten per second, the clean heartbeat must stop
+ * after five zeros, and a peer without FEEDBACK must never be a target.
+ */
+bool uwg_ext_loss_selftest(void)
+{
+	u8 frame[UWG_EXT_HEADER_LEN + UWG_EXT_LOSS_LEN];
+	struct uwg_ext_loss_tx st;
+	struct uwg_ext_header hdr;
+	struct uwg_ext_caps a, b;
+	struct uwg_device *uwg;
+	struct uwg_peer *peer;
+	ktime_t now = ktime_set(1000, 0);
+	u16 loss = 0;
+	bool ok = true;
+	int i;
+
+#define L_CHECK(cond) do {						\
+		if (!(cond)) {						\
+			pr_err("EXT LOSS self-test: FAIL (%s)\n",	\
+			       #cond);					\
+			ok = false;					\
+		}							\
+	} while (0)
+
+	L_CHECK(uwg_ext_build_loss(frame, sizeof(frame), 1310) ==
+		(int)sizeof(frame));
+	L_CHECK(frame[5] == UWG_EXT_KIND_LOSS);
+	L_CHECK(uwg_ext_detect(frame, sizeof(frame)));
+	L_CHECK(!uwg_ext_parse_header(frame, sizeof(frame), &hdr));
+	L_CHECK(hdr.kind == UWG_EXT_KIND_LOSS);
+	L_CHECK(hdr.payload_len == UWG_EXT_LOSS_LEN);
+	L_CHECK(!uwg_ext_parse_loss(hdr.payload, hdr.payload_len, &loss));
+	L_CHECK(loss == 1310);
+	/* A zero estimate is a valid frame, not an empty one. */
+	L_CHECK(uwg_ext_build_loss(frame, sizeof(frame), 0) ==
+		(int)sizeof(frame));
+	L_CHECK(!uwg_ext_parse_loss(frame + UWG_EXT_HEADER_LEN,
+				    UWG_EXT_LOSS_LEN, &loss));
+	L_CHECK(!loss);
+
+	/* Malformed frames are rejected without touching the estimator: the
+	 * payload length is exact, the reserved tail must be zero, and a
+	 * header whose payload does not fit is not a frame at all.
+	 */
+	L_CHECK(uwg_ext_build_loss(frame, sizeof(frame), 700) > 0);
+	L_CHECK(uwg_ext_parse_loss(frame + UWG_EXT_HEADER_LEN, 3, &loss));
+	L_CHECK(uwg_ext_parse_loss(frame + UWG_EXT_HEADER_LEN, 5, &loss));
+	frame[UWG_EXT_HEADER_LEN + 3] = 1;
+	L_CHECK(uwg_ext_parse_loss(frame + UWG_EXT_HEADER_LEN,
+				   UWG_EXT_LOSS_LEN, &loss));
+	frame[UWG_EXT_HEADER_LEN + 3] = 0;
+	L_CHECK(uwg_ext_parse_header(frame, UWG_EXT_HEADER_LEN, &hdr) ==
+		-EMSGSIZE);
+	L_CHECK(uwg_ext_build_loss(frame, UWG_EXT_HEADER_LEN, 0) == -EMSGSIZE);
+
+	/* FEEDBACK is advertised whenever the extension is active, and never
+	 * while it is off (the zero CAPS revoke relies on that).
+	 */
+	uwg = kzalloc(sizeof(*uwg), GFP_KERNEL);
+	if (!uwg) {
+		pr_err("EXT LOSS self-test: FAIL (no memory)\n");
+		return false;
+	}
+	uwg->fec_mode = UWG_FEC_MODE_ADAPTIVE;
+	uwg_ext_local_caps(uwg, &a);
+	L_CHECK(a.flags & UWG_EXT_CAP_FEEDBACK);
+	L_CHECK(a.flags & UWG_EXT_CAP_FEC);
+	/* A fixed profile does not measure loss and must not promise
+	 * reports.
+	 */
+	uwg->fec_mode = 2 << 8 | 1;
+	uwg_ext_local_caps(uwg, &a);
+	L_CHECK(!(a.flags & UWG_EXT_CAP_FEEDBACK));
+	L_CHECK(a.flags & UWG_EXT_CAP_FEC);
+	uwg->fec_mode = UWG_FEC_MODE_OFF;
+	uwg_ext_local_caps(uwg, &a);
+	L_CHECK(!a.flags);
+	kfree(uwg);
+
+	/* A peer flipping FEEDBACK is not a profile change; a FEC bit still
+	 * is.
+	 */
+	memset(&a, 0, sizeof(a));
+	b = a;
+	a.flags = UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_PARTIAL;
+	b.flags = a.flags | UWG_EXT_CAP_FEEDBACK;
+	L_CHECK(uwg_ext_caps_same(&a, &b));
+	b.flags = a.flags | UWG_EXT_CAP_FEC_ADAPTIVE;
+	L_CHECK(!uwg_ext_caps_same(&a, &b));
+
+	/* Gating: no FEEDBACK bit, no report. */
+	L_CHECK(!uwg_ext_loss_peer_ok(0));
+	L_CHECK(!uwg_ext_loss_peer_ok(UWG_EXT_CAP_FEC |
+				      UWG_EXT_CAP_FEC_PARTIAL));
+	L_CHECK(uwg_ext_loss_peer_ok(UWG_EXT_CAP_FEC |
+				     UWG_EXT_CAP_FEEDBACK));
+
+	/* The hot-path gate must agree with it: a peer without the bit never
+	 * reaches the frame builder at all.
+	 */
+	peer = kzalloc(sizeof(*peer), GFP_KERNEL);
+	if (!peer) {
+		pr_err("EXT LOSS self-test: FAIL (no memory)\n");
+		return false;
+	}
+	L_CHECK(!uwg_peer_feedback_capable(peer));
+	WRITE_ONCE(peer->caps.peer_valid, true);
+	WRITE_ONCE(peer->caps.peer.flags, UWG_EXT_CAP_FEC);
+	L_CHECK(!uwg_peer_feedback_capable(peer));
+	WRITE_ONCE(peer->caps.peer.flags,
+		   UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEEDBACK);
+	L_CHECK(uwg_peer_feedback_capable(peer));
+	kfree(peer);
+
+	/* Pacing: the first report is immediate, then at most 10/s. */
+	memset(&st, 0, sizeof(st));
+	L_CHECK(uwg_ext_loss_due(now, &st, 1310));
+	uwg_ext_loss_sent(&st, now, 1310);
+	L_CHECK(!uwg_ext_loss_due(ktime_add_ms(now, 99), &st, 5000));
+	/* A change above 0.25 % goes out on the first allowed tick ... */
+	L_CHECK(uwg_ext_loss_due(ktime_add_ms(now, 100), &st, 5000));
+	/* ... but an unchanged estimate is only refreshed at the slower rate,
+	 * so a stable lossy channel does not run at 10 Hz.
+	 */
+	L_CHECK(!uwg_ext_loss_due(ktime_add_ms(now, 499), &st, 1310));
+	L_CHECK(uwg_ext_loss_due(ktime_add_ms(now, 500), &st, 1310));
+	/* A change below the threshold also waits for the refresh. */
+	L_CHECK(!uwg_ext_loss_due(ktime_add_ms(now, 300), &st, 1470));
+
+	/* Clean stream: one zero every 500 ms, five in total, then silence. */
+	memset(&st, 0, sizeof(st));
+	uwg_ext_loss_sent(&st, now, 0);
+	L_CHECK(st.zero_count == 1);
+	for (i = 0; i < UWG_EXT_LOSS_ZERO_MAX - 1; i++) {
+		L_CHECK(!uwg_ext_loss_due(ktime_add_ms(now, 499), &st, 0));
+		L_CHECK(uwg_ext_loss_due(ktime_add_ms(now, 500), &st, 0));
+		now = ktime_add_ms(now, 500);
+		uwg_ext_loss_sent(&st, now, 0);
+	}
+	L_CHECK(st.zero_count == UWG_EXT_LOSS_ZERO_MAX);
+	L_CHECK(!uwg_ext_loss_due(ktime_add_ms(now, 60000), &st, 0));
+
+	/* Loss after the shutdown resumes reporting, and one non-zero report
+	 * re-arms the zero heartbeat.
+	 */
+	L_CHECK(uwg_ext_loss_due(ktime_add_ms(now, 60000), &st, 700));
+	uwg_ext_loss_sent(&st, ktime_add_ms(now, 60000), 700);
+	L_CHECK(!st.zero_count);
+	L_CHECK(!uwg_ext_loss_due(ktime_add_ms(now, 60100), &st, 700));
+	L_CHECK(uwg_ext_loss_due(ktime_add_ms(now, 60500), &st, 700));
+
+#undef L_CHECK
+	return ok;
 }
