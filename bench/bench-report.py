@@ -35,6 +35,7 @@ class Row:
     frag: int
     cpu_hot: int | None = None
     cpu_total: float | None = None
+    fec: str = "off"
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,7 @@ class CellKey:
     obf: str
     peers: int
     rate: str
+    fec: str = "off"
 
     @property
     def streams(self) -> str:
@@ -149,6 +151,7 @@ def load_rows(path: Path) -> list[Row]:
                     frag=_int(raw, "frag", 0),
                     cpu_hot=_opt_int(raw, "cpu_hot"),
                     cpu_total=_opt_float(raw, "cpu_total"),
+                    fec=_text(raw, "fec", "off"),
                 )
             )
     return rows
@@ -163,6 +166,7 @@ def cell_key(row: Row) -> CellKey:
         obf=row.obf,
         peers=row.peers,
         rate=row.rate,
+        fec=row.fec,
     )
 
 
@@ -196,10 +200,20 @@ def impl_order(rows: Sequence[Row]) -> list[str]:
     return ordered
 
 
-def cell_sort_key(key: CellKey) -> tuple[int, int, str, int, str, int, str, float]:
+def cell_sort_key(key: CellKey) -> tuple[int, int, str, int, str, int, str, float, str]:
     stream_rank = 0 if key.streams == STREAM_SINGLE else 1
     mode_rank = 0 if key.mode == "1c" else 1
-    return (stream_rank, mode_rank, key.proto, key.conns, key.obf, key.peers, key.rate, key.loss)
+    return (
+        stream_rank,
+        mode_rank,
+        key.proto,
+        key.conns,
+        key.obf,
+        key.peers,
+        key.rate,
+        key.loss,
+        key.fec,
+    )
 
 
 def fmt_stat(stat: Stat | None) -> str:
@@ -302,6 +316,8 @@ def cell_label(key: CellKey) -> str:
     parts.append(f"loss={key.loss:g}")
     parts.append(f"obf={key.obf}")
     parts.append(f"peers={key.peers}")
+    if key.fec and key.fec != "-":
+        parts.append(f"fec={key.fec}")
     return " ".join(parts)
 
 

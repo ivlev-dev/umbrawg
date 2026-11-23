@@ -10,6 +10,7 @@
 ```bash
 SMOKE=1 DURATION=1 IMPL_LIST="kernel-umbrawg" bash bench.sh
 PLAN_ONLY=1 SMOKE=1 FORCE=1 bash bench.sh            # план без трафика
+PLAN_ONLY=1 SMOKE=1 FORCE=1 FEC_LIST="off adaptive 2:1 8:2" bash bench.sh  # план FEC-оси
 IMPL_LIST="kernel-umbrawg kernel-amneziawg" MODE_LIST="1c 3c" REPEATS=5 bash bench.sh
 PROTO_LIST=udp UDP_RATE_LIST="1G 0" CONNS_LIST="1 10" bash bench.sh
 python3 bench-report.py results-20261116-120000.csv --md report.md --agg agg.csv
@@ -266,6 +267,8 @@ uwg pubkey < priv.key                 # публичный ключ
 | `GSO_SEGMENTS` | пусто | `UMBRAWG_GSO_SEGMENTS` для Rust-демона (алиас `UMBRAWG_GSO_SEGMENTS` тоже читается) |
 | `RUST_PARALLEL` | 0 | 1 — добавить `rust-par` (`UMBRAWG_PARALLEL_RX=1`) в список реализаций |
 | `RUST_RX_SCHED` | peer | планировщик RX для `rust-par` (`UMBRAWG_RX_SCHED`) |
+| `FEC` | пусто | одиночный FEC-режим; если задан, переопределяет `FEC_LIST` |
+| `FEC_LIST` | off | ось FEC: `off`, `adaptive`, `K:M`; действует только на umbrawg-реализации |
 | `CIPHER` | пусто | значение `Cipher =` в сгенерированных конфигах |
 | `RUN_ID` | timestamp | метка прогона, пишется в CSV |
 | `FORCE` | 0 | 1 — обойти проверку занятости стенда |
@@ -282,6 +285,42 @@ uwg pubkey < priv.key                 # публичный ключ
 Списки задаются явно: `IMPL_LIST=""` означает «не запускать ни одной
 реализации» (полезно вместе с `PLAN_ONLY=1`), а не «взять значения по
 умолчанию».
+
+## FEC
+
+`FEC_LIST` — ось FEC-режимов: `off`, `adaptive` или фиксированный `K:M`
+(например, `2:1`, `8:2`). По умолчанию `FEC_LIST=off`: стенд явно выключает
+FEC и не полагается на дефолт 0.5.0 (`adaptive`), иначе матрица была бы
+невоспроизводимой. `FEC=<значение>` задаёт один режим и переопределяет
+`FEC_LIST`; недопустимое значение завершает запуск с `FEC_INVALID` и кодом 6.
+
+| impl | как применяется | `fec` в CSV и логе |
+|---|---|---|
+| `kernel-umbrawg` | после `uwg setconf` для `bn0`/`bn1` выполняется `uwg set <if> fec <value>`, затем `wait_tunnel` | значение |
+| `rust`, `rust-par` | `UMBRAWG_FEC=<value>` в env демона при старте, плюс `uwg set <if> fec <value>` после `setconf` | значение |
+| `kernel-amneziawg`, `go` | FEC не поддерживается, ось игнорируется, лишних прогонов нет | `none` |
+
+Явный `uwg set fec` после `setconf` нужен и для Rust: `uwg setconf` в 0.5.0
+отправляет `fec=adaptive`, если ключа нет в конфиге, и иначе перетирает
+`UMBRAWG_FEC`. Порядок применения: `start_impl` → `setconf` → `uwg set fec` →
+`wait_tunnel`. Для `kernel-amneziawg` и `go` FEC-ось не размножает ячейки: на
+каждый `impl` выполняется один набор с `fec=none`.
+
+Полная матрица:
+
+```bash
+PLAN_ONLY=1 SMOKE=1 FORCE=1 \
+  IMPL_LIST="kernel-umbrawg kernel-amneziawg rust go" \
+  FEC_LIST="off adaptive 2:1 8:2" bash bench.sh
+sudo IMPL_LIST="kernel-umbrawg kernel-amneziawg rust go" \
+  FEC_LIST="off adaptive 2:1 8:2" bash bench.sh
+```
+
+В `PLAN`-строках и в логе каждого прогона есть поле `fec=<value>`, в CSV —
+колонка `fec`. `bench-report.py` читает CSV по именам колонок и `fec`
+игнорирует, поэтому при нескольких режимах в одном CSV агрегат смешивает их.
+Для отчёта по отдельному режиму запускайте его с `FEC=<value>` и своим
+`RESULT` (например, `FEC=2:1 RESULT=results-fec21.csv`).
 
 ## Методика
 
@@ -328,14 +367,17 @@ uwg pubkey < priv.key                 # публичный ключ
 
 ## CSV
 
-`impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total`
+`impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total,fec`
 
 Первые 9 колонок совместимы со старым форматом (`extra`: retransmits для TCP,
 lost_percent для UDP). `mbit` — `sum_received`, то есть goodput.
 `FAIL` в `mbit` — прогон не удался. `cpu_hot`/`cpu_total` — необязательные:
 число ядер с busy ≥ `CPU_HOT_PCT` и суммарная busy% машины за ряд; при
-недоступности `/proc/stat` там `-`. Старые парсеры, читающие первые 16
-колонок, не ломаются. Старый `results.csv` (другая схема) не
+недоступности `/proc/stat` там `-`. `fec` — применённый режим (`off`,
+`adaptive`, `K:M`) или `none` для `kernel-amneziawg`/`go`. Старые парсеры,
+читающие первые 18 колонок, не ломаются; старые CSV без `fec` читаются
+`bench-report.py`, потому что он разбирает файл по именам колонок.
+Старый `results.csv` (другая схема) не
 перезаписывается: при несовпадении заголовка скрипт пишет в
 `results-<RUN_ID>.csv`.
 

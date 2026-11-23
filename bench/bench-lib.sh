@@ -295,6 +295,24 @@ bench_busy_reasons() {
     return 1
 }
 
+valid_fec() {
+    local value=$1 k m
+    case "$value" in
+        off|adaptive)
+            return 0
+            ;;
+        *:*)
+            k=${value%%:*}
+            m=${value#*:}
+            case "$k" in ""|*[!0-9]*) return 1 ;; esac
+            case "$m" in ""|*[!0-9]*) return 1 ;; esac
+            [ "$k" -ge 1 ] && [ "$m" -ge 1 ]
+            return
+            ;;
+    esac
+    return 1
+}
+
 obf_block_from_conf() {
     local conf=$1
     shift

@@ -171,7 +171,7 @@ plan_rc=$?
 check_eq "bench.sh PLAN_ONLY rc" "0" "$plan_rc"
 check_contains "bench.sh PLAN_ONLY RESULTS" "RESULTS=$tmp/plan.csv" "$plan_out"
 check_contains "bench.sh PLAN_ONLY PATHS" "PATHS bench_dir=" "$plan_out"
-check_eq "bench.sh PLAN_ONLY csv header" "impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total" "$(head -1 "$tmp/plan.csv")"
+check_eq "bench.sh PLAN_ONLY csv header" "impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total,fec" "$(head -1 "$tmp/plan.csv")"
 legacy_root="/root/""umbrawg"
 if printf '%s' "$plan_out" | grep -qF "$legacy_root"; then
     total=$((total + 1))

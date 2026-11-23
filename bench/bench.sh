@@ -33,6 +33,11 @@ PLAN_ONLY=${PLAN_ONLY:-0}
 DURATION=${DURATION:-3}
 UDP_RATE=${UDP_RATE:-1G}
 UDP_RATE_LIST=${UDP_RATE_LIST:-}
+FEC=${FEC:-}
+FEC_LIST=${FEC_LIST:-${FEC:-off}}
+if [ -n "$FEC" ]; then
+    FEC_LIST=$FEC
+fi
 RUN_ID=${RUN_ID:-$(date +%Y%m%d-%H%M%S)}
 FORCE=${FORCE:-0}
 ALLOW_FRAGMENT=${ALLOW_FRAGMENT:-0}
@@ -92,7 +97,7 @@ if [ -z "$UDP_RATE_LIST" ]; then
     UDP_RATE_LIST=$UDP_RATE
 fi
 
-RESULT_HEADER="impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total"
+RESULT_HEADER="impl,mode,proto,conns,loss,obf,peers,mbit,extra,run,repeat,lost_percent,udp_rate,udp_mode,streams,frag,cpu_hot,cpu_total,fec"
 
 CAPTURE_DIR=${CAPTURE_DIR:-}
 CAPTURE_PACKETS=${CAPTURE_PACKETS:-100000}
@@ -317,6 +322,64 @@ awg_ns() {
     ip netns exec "$ns" awg "$@"
 }
 
+fec_supported() {
+    case "$1" in
+        kernel-umbrawg|rust|rust-par) return 0 ;;
+    esac
+    return 1
+}
+
+fec_axis() {
+    if fec_supported "$1"; then
+        printf '%s' "$FEC_LIST"
+    else
+        printf '%s' "none"
+    fi
+}
+
+validate_fec_list() {
+    local fec
+    for fec in $FEC_LIST; do
+        if ! valid_fec "$fec"; then
+            echo "FEC_INVALID: fec=$fec, ожидается off, adaptive или K:M (K,M >= 1); FEC_LIST=$FEC_LIST" >&2
+            exit 6
+        fi
+    done
+}
+
+plan_walk() {
+    local action=$1 total=${2:-0} impl mode fec obf peers loss proto rate conns axis rates
+    for impl in $IMPL_LIST; do
+        axis=$(fec_axis "$impl")
+        for mode in $MODE_LIST; do
+            for fec in $axis; do
+                for obf in $OBF_LIST; do
+                    for peers in $PEERS_LIST; do
+                        for loss in $LOSS_LIST; do
+                            for proto in $PROTO_LIST; do
+                                if [ "$proto" = "udp" ]; then
+                                    rates=$UDP_RATE_LIST
+                                else
+                                    rates="-"
+                                fi
+                                for rate in $rates; do
+                                    for conns in $CONNS_LIST; do
+                                        PLAN_CELLS=$((PLAN_CELLS + 1))
+                                        if [ "$action" = "print" ]; then
+                                            printf 'PLAN %d/%d impl=%s mode=%s proto=%s conns=%s rate=%s loss=%s obf=%s peers=%s fec=%s\n' \
+                                                "$PLAN_CELLS" "$total" "$impl" "$mode" "$proto" "$conns" "$rate" "$loss" "$obf" "$peers" "$fec"
+                                        fi
+                                    done
+                                done
+                            done
+                        done
+                    done
+                done
+            done
+        done
+    done
+}
+
 setup_topology() {
     ip netns add "$NS0"
     ip netns add "$NS1"
@@ -408,8 +471,9 @@ bring_up_addrs() {
 start_impl() {
     local impl=$1
     local mode=$2
+    local fec=$3
     local threads=1
-    local cpus rc=0
+    local cpus rc=0 fec_env=""
     if [ "$mode" = "3c" ]; then
         cpus=$TUNNEL_CPUS_3
         threads=3
@@ -447,9 +511,12 @@ start_impl() {
             else
                 rx_env="UMBRAWG_PARALLEL_RX=0"
             fi
-            env $rx_env UMBRAWG_THREADS=$threads UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU ${GSO_SEGMENTS:+UMBRAWG_GSO_SEGMENTS=$GSO_SEGMENTS} ip netns exec "$NS0" taskset -c "$cpus" "$DAEMON" --foreground "$IF0" >/tmp/bench-$IF0.log 2>&1 &
+            if [ "$fec" != "none" ] && [ -n "$fec" ]; then
+                fec_env="UMBRAWG_FEC=$fec"
+            fi
+            env $rx_env $fec_env UMBRAWG_THREADS=$threads UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU ${GSO_SEGMENTS:+UMBRAWG_GSO_SEGMENTS=$GSO_SEGMENTS} ip netns exec "$NS0" taskset -c "$cpus" "$DAEMON" --foreground "$IF0" >/tmp/bench-$IF0.log 2>&1 &
             DAEMON_PIDS+=($!)
-            env $rx_env UMBRAWG_THREADS=$threads UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU ${GSO_SEGMENTS:+UMBRAWG_GSO_SEGMENTS=$GSO_SEGMENTS} ip netns exec "$NS1" taskset -c "$cpus" "$DAEMON" --foreground "$IF1" >/tmp/bench-$IF1.log 2>&1 &
+            env $rx_env $fec_env UMBRAWG_THREADS=$threads UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU ${GSO_SEGMENTS:+UMBRAWG_GSO_SEGMENTS=$GSO_SEGMENTS} ip netns exec "$NS1" taskset -c "$cpus" "$DAEMON" --foreground "$IF1" >/tmp/bench-$IF1.log 2>&1 &
             DAEMON_PIDS+=($!)
             for _ in $(seq 1 50); do
                 [ -S "/var/run/umbrawg/$IF0.sock" ] && [ -S "/var/run/umbrawg/$IF1.sock" ] && break
@@ -479,6 +546,7 @@ apply_config() {
     local impl=$1
     local conf0=$2
     local conf1=$3
+    local fec=${4:-none}
     local out rc0=0 rc1=0
     case "$impl" in
         kernel-amneziawg|go)
@@ -492,6 +560,14 @@ apply_config() {
             if [ "$rc0" != "0" ]; then echo "SETCONF_FAILED ns=$NS0 rc=$rc0 out=$out" >&2; return 1; fi
             out=$(uwg_ns "$NS1" setconf "$IF1" "$conf1" 2>&1) || rc1=$?
             if [ "$rc1" != "0" ]; then echo "SETCONF_FAILED ns=$NS1 rc=$rc1 out=$out" >&2; return 1; fi
+            if [ "$fec" != "none" ] && [ -n "$fec" ]; then
+                rc0=0
+                out=$(uwg_ns "$NS0" set "$IF0" fec "$fec" 2>&1) || rc0=$?
+                if [ "$rc0" != "0" ]; then echo "SET_FEC_FAILED ns=$NS0 fec=$fec rc=$rc0 out=$out" >&2; return 1; fi
+                rc1=0
+                out=$(uwg_ns "$NS1" set "$IF1" fec "$fec" 2>&1) || rc1=$?
+                if [ "$rc1" != "0" ]; then echo "SET_FEC_FAILED ns=$NS1 fec=$fec rc=$rc1 out=$out" >&2; return 1; fi
+            fi
             ;;
     esac
     return 0
@@ -596,11 +672,11 @@ PY
 emit_row() {
     local impl=$1 mode=$2 proto=$3 conns=$4 loss=$5 obf=$6 peers=$7
     local mbit=$8 extra=$9 lost=${10} rate=${11} rm=${12} streams=${13} repeat=${14} frag=${15}
-    local cpu_hot=${16} cpu_total=${17}
-    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
+    local cpu_hot=${16} cpu_total=${17} fec=${18:-none}
+    printf '%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n' \
         "$impl" "$mode" "$proto" "$conns" "$loss" "$obf" "$peers" "$mbit" "$extra" \
         "$RUN_ID" "$repeat" "$lost" "$rate" "$rm" "$streams" "$frag" \
-        "$cpu_hot" "$cpu_total" >> "$RESULT"
+        "$cpu_hot" "$cpu_total" "$fec" >> "$RESULT"
 }
 
 run_report() {
@@ -618,8 +694,8 @@ run_report() {
 
 resolve_result
 snapshot_state
+validate_fec_list
 mtu_guard
-idle_guard
 HARNESS_STARTED=1
 init_result
 
@@ -627,10 +703,16 @@ echo "RUN_ID=$RUN_ID"
 echo "RESULT=$RESULT"
 echo "DIAG=$DIAG"
 echo "PATHS bench_dir=$BENCH_DIR uwg=$UWG moddir=$MODDIR rustdir=$RUSTDIR daemon=$DAEMON go_baseline=$GO_BASELINE obf=$OBF"
-echo "PLAN impls=[$IMPL_LIST] modes=[$MODE_LIST] protos=[$PROTO_LIST] conns=[$CONNS_LIST] obf=[$OBF_LIST] peers=[$PEERS_LIST] repeats=$REPEATS cpu_hot_pct=$CPU_HOT_PCT iperf_cpu=$IPERF_CPU tunnel_cpus_1=$TUNNEL_CPUS_1 tunnel_cpus_3=$TUNNEL_CPUS_3"
+echo "PLAN impls=[$IMPL_LIST] modes=[$MODE_LIST] protos=[$PROTO_LIST] conns=[$CONNS_LIST] obf=[$OBF_LIST] peers=[$PEERS_LIST] loss=[$LOSS_LIST] fec=[$FEC_LIST] repeats=$REPEATS cpu_hot_pct=$CPU_HOT_PCT iperf_cpu=$IPERF_CPU tunnel_cpus_1=$TUNNEL_CPUS_1 tunnel_cpus_3=$TUNNEL_CPUS_3"
 echo "ENV UMBRAWG_UNDERLAY_MTU=$UNDERLAY_MTU UMBRAWG_GSO_SEGMENTS=${GSO_SEGMENTS:-} RUST_PARALLEL=$RUST_PARALLEL RUST_RX_SCHED=$RUST_RX_SCHED"
 
 if [ "$PLAN_ONLY" = "1" ]; then
+    PLAN_CELLS=0
+    plan_walk count
+    PLAN_TOTAL_CELLS=$PLAN_CELLS
+    PLAN_CELLS=0
+    plan_walk print "$PLAN_TOTAL_CELLS"
+    echo "PLAN cells=$PLAN_TOTAL_CELLS rows=$((PLAN_TOTAL_CELLS * REPEATS)) repeats=$REPEATS"
     echo "PLAN_ONLY: прогоны не запускаются"
     run_report
     echo "RESULTS=$RESULT"
@@ -638,6 +720,7 @@ if [ "$PLAN_ONLY" = "1" ]; then
     exit 0
 fi
 
+idle_guard
 require_tools
 mkdir -p /var/run/umbrawg
 
@@ -652,101 +735,104 @@ for impl in $IMPL_LIST; do
             echo "$(cpu_mask "$cpus")" > /sys/devices/virtual/workqueue/cpumask 2>/dev/null || true
             WORKQUEUE_CHANGED=1
         fi
-        for obf in $OBF_LIST; do
-            for peers in $PEERS_LIST; do
-                cleanup
-                sleep 0.3
-                if ! setup_topology; then
-                    echo "TOPOLOGY_FAILED impl=$impl mode=$mode obf=$obf peers=$peers" | tee -a "$DIAG" >&2
-                    continue
-                fi
-                if ! start_impl "$impl" "$mode"; then
-                    echo "START_FAILED impl=$impl mode=$mode obf=$obf peers=$peers" | tee -a "$DIAG" >&2
-                    tail -5 "/tmp/bench-$IF1.log" 2>/dev/null | tee -a "$DIAG" || true
-                    continue
-                fi
-                bring_up_addrs
-                conf0=$(mktemp)
-                conf1=$(mktemp)
-                make_configs "$obf" "$peers" "$conf0" "$conf1"
-                if ! apply_config "$impl" "$conf0" "$conf1"; then
-                    echo "APPLY_FAILED impl=$impl mode=$mode obf=$obf peers=$peers" | tee -a "$DIAG" >&2
-                    tail -5 "/tmp/bench-$IF1.log" 2>/dev/null | tee -a "$DIAG" || true
-                    rm -f "$conf0" "$conf1"
-                    continue
-                fi
-                if ! wait_tunnel; then
-                    echo "TUNNEL_FAILED impl=$impl mode=$mode obf=$obf peers=$peers" | tee -a "$DIAG" >&2
-                    tail -5 "/tmp/bench-$IF1.log" 2>/dev/null | tee -a "$DIAG" || true
-                    rm -f "$conf0" "$conf1"
-                    continue
-                fi
-                for loss in $LOSS_LIST; do
-                    set_loss "$loss"
-                    for proto in $PROTO_LIST; do
-                        if [ "$proto" = "udp" ]; then
-                            rates=$UDP_RATE_LIST
-                        else
-                            rates="-"
-                        fi
-                        for rate in $rates; do
-                            if [ "$proto" = "udp" ] && [ "$rate" = "0" ]; then
-                                udp_mode=unlimited
-                            elif [ "$proto" = "udp" ]; then
-                                udp_mode=fixed
+        fec_values=$(fec_axis "$impl")
+        for fec in $fec_values; do
+            for obf in $OBF_LIST; do
+                for peers in $PEERS_LIST; do
+                    cleanup
+                    sleep 0.3
+                    if ! setup_topology; then
+                        echo "TOPOLOGY_FAILED impl=$impl mode=$mode fec=$fec obf=$obf peers=$peers" | tee -a "$DIAG" >&2
+                        continue
+                    fi
+                    if ! start_impl "$impl" "$mode" "$fec"; then
+                        echo "START_FAILED impl=$impl mode=$mode fec=$fec obf=$obf peers=$peers" | tee -a "$DIAG" >&2
+                        tail -5 "/tmp/bench-$IF1.log" 2>/dev/null | tee -a "$DIAG" || true
+                        continue
+                    fi
+                    bring_up_addrs
+                    conf0=$(mktemp)
+                    conf1=$(mktemp)
+                    make_configs "$obf" "$peers" "$conf0" "$conf1"
+                    if ! apply_config "$impl" "$conf0" "$conf1" "$fec"; then
+                        echo "APPLY_FAILED impl=$impl mode=$mode fec=$fec obf=$obf peers=$peers" | tee -a "$DIAG" >&2
+                        tail -5 "/tmp/bench-$IF1.log" 2>/dev/null | tee -a "$DIAG" || true
+                        rm -f "$conf0" "$conf1"
+                        continue
+                    fi
+                    if ! wait_tunnel; then
+                        echo "TUNNEL_FAILED impl=$impl mode=$mode fec=$fec obf=$obf peers=$peers" | tee -a "$DIAG" >&2
+                        tail -5 "/tmp/bench-$IF1.log" 2>/dev/null | tee -a "$DIAG" || true
+                        rm -f "$conf0" "$conf1"
+                        continue
+                    fi
+                    for loss in $LOSS_LIST; do
+                        set_loss "$loss"
+                        for proto in $PROTO_LIST; do
+                            if [ "$proto" = "udp" ]; then
+                                rates=$UDP_RATE_LIST
                             else
-                                udp_mode=-
+                                rates="-"
                             fi
-                            for conns in $CONNS_LIST; do
-                                if [ "$conns" -le 1 ]; then
-                                    streams=single
+                            for rate in $rates; do
+                                if [ "$proto" = "udp" ] && [ "$rate" = "0" ]; then
+                                    udp_mode=unlimited
+                                elif [ "$proto" = "udp" ]; then
+                                    udp_mode=fixed
                                 else
-                                    streams=multi
+                                    udp_mode=-
                                 fi
-                                for repeat in $(seq 1 "$REPEATS"); do
-                                    frag_before=$(( $(frag_total "$NS0") + $(frag_total "$NS1") ))
-                                    cpu_snap_before=$(mktemp)
-                                    proc_stat_snapshot "$cpu_snap_before" || true
-                                    capture_name="${impl}-${mode}-${proto}-c${conns}-obf${obf}-r${repeat}"
-                                    start_capture "$capture_name"
-                                    if ! out=$(run_iperf "$proto" "$conns" "$rate"); then
+                                for conns in $CONNS_LIST; do
+                                    if [ "$conns" -le 1 ]; then
+                                        streams=single
+                                    else
+                                        streams=multi
+                                    fi
+                                    for repeat in $(seq 1 "$REPEATS"); do
+                                        frag_before=$(( $(frag_total "$NS0") + $(frag_total "$NS1") ))
+                                        cpu_snap_before=$(mktemp)
+                                        proc_stat_snapshot "$cpu_snap_before" || true
+                                        capture_name="${impl}-${mode}-${proto}-c${conns}-obf${obf}-fec${fec//:/_}-r${repeat}"
+                                        start_capture "$capture_name"
+                                        if ! out=$(run_iperf "$proto" "$conns" "$rate"); then
+                                            stop_capture
+                                            rm -f "$cpu_snap_before"
+                                            echo "IPERF_FAILED impl=$impl mode=$mode proto=$proto conns=$conns rate=$rate obf=$obf fec=$fec" | tee -a "$DIAG" >&2
+                                            emit_row "$impl" "$mode" "$proto" "$conns" "$loss" "$obf" "$peers" FAIL 0 - "$rate" "$udp_mode" "$streams" "$repeat" -1 - - "$fec"
+                                            continue
+                                        fi
                                         stop_capture
-                                        rm -f "$cpu_snap_before"
-                                        echo "IPERF_FAILED impl=$impl mode=$mode proto=$proto conns=$conns rate=$rate obf=$obf" | tee -a "$DIAG" >&2
-                                        emit_row "$impl" "$mode" "$proto" "$conns" "$loss" "$obf" "$peers" FAIL 0 - "$rate" "$udp_mode" "$streams" "$repeat" -1 - -
-                                        continue
-                                    fi
-                                    stop_capture
-                                    cpu_snap_after=$(mktemp)
-                                    proc_stat_snapshot "$cpu_snap_after" || true
-                                    cpu_line=$(cpu_busy_summary "$cpu_snap_before" "$cpu_snap_after" "$CPU_HOT_PCT" || true)
-                                    rm -f "$cpu_snap_before" "$cpu_snap_after"
-                                    cpu_hot=-
-                                    cpu_total=-
-                                    if [ -n "$cpu_line" ]; then
-                                        cpu_hot=$(printf '%s' "$cpu_line" | sed -n 's/.*hot_cpus=\([0-9][0-9]*\).*/\1/p')
-                                        cpu_total=$(printf '%s' "$cpu_line" | sed -n 's/.*total=\([0-9][0-9]*\).*/\1/p')
-                                        [ -n "$cpu_hot" ] || cpu_hot=-
-                                        [ -n "$cpu_total" ] || cpu_total=-
-                                        printf 'CPU_BUSY impl=%s mode=%s proto=%s conns=%s obf=%s run=%s %s iperf_cpu=%s tunnel_cpus=%s\n' \
-                                            "$impl" "$mode" "$proto" "$conns" "$obf" "$repeat" "$cpu_line" "$IPERF_CPU" "$cpus" >> "$DIAG"
-                                    fi
-                                    frag_after=$(( $(frag_total "$NS0") + $(frag_total "$NS1") ))
-                                    frag=$((frag_after - frag_before))
-                                    mbit=$(echo "$out" | awk '{print $1}')
-                                    extra=$(echo "$out" | awk '{print $2}')
-                                    lost=$(echo "$out" | awk '{print $3}')
-                                    emit_row "$impl" "$mode" "$proto" "$conns" "$loss" "$obf" "$peers" "$mbit" "$extra" "$lost" "$rate" "$udp_mode" "$streams" "$repeat" "$frag" "$cpu_hot" "$cpu_total"
-                                    if [ "$frag" -gt 0 ]; then
-                                        echo "FRAGMENTED impl=$impl mode=$mode proto=$proto conns=$conns rate=$rate new_frag=$frag" | tee -a "$DIAG" >&2
-                                    fi
-                                    echo "$impl $mode $proto c=$conns rate=$rate loss=$loss obf=$obf peers=$peers rep=$repeat -> $mbit Mbit/s (extra=$extra) cpu_hot=$cpu_hot cpu_total=$cpu_total"
+                                        cpu_snap_after=$(mktemp)
+                                        proc_stat_snapshot "$cpu_snap_after" || true
+                                        cpu_line=$(cpu_busy_summary "$cpu_snap_before" "$cpu_snap_after" "$CPU_HOT_PCT" || true)
+                                        rm -f "$cpu_snap_before" "$cpu_snap_after"
+                                        cpu_hot=-
+                                        cpu_total=-
+                                        if [ -n "$cpu_line" ]; then
+                                            cpu_hot=$(printf '%s' "$cpu_line" | sed -n 's/.*hot_cpus=\([0-9][0-9]*\).*/\1/p')
+                                            cpu_total=$(printf '%s' "$cpu_line" | sed -n 's/.*total=\([0-9][0-9]*\).*/\1/p')
+                                            [ -n "$cpu_hot" ] || cpu_hot=-
+                                            [ -n "$cpu_total" ] || cpu_total=-
+                                            printf 'CPU_BUSY impl=%s mode=%s proto=%s conns=%s obf=%s fec=%s run=%s %s iperf_cpu=%s tunnel_cpus=%s\n' \
+                                                "$impl" "$mode" "$proto" "$conns" "$obf" "$fec" "$repeat" "$cpu_line" "$IPERF_CPU" "$cpus" >> "$DIAG"
+                                        fi
+                                        frag_after=$(( $(frag_total "$NS0") + $(frag_total "$NS1") ))
+                                        frag=$((frag_after - frag_before))
+                                        mbit=$(echo "$out" | awk '{print $1}')
+                                        extra=$(echo "$out" | awk '{print $2}')
+                                        lost=$(echo "$out" | awk '{print $3}')
+                                        emit_row "$impl" "$mode" "$proto" "$conns" "$loss" "$obf" "$peers" "$mbit" "$extra" "$lost" "$rate" "$udp_mode" "$streams" "$repeat" "$frag" "$cpu_hot" "$cpu_total" "$fec"
+                                        if [ "$frag" -gt 0 ]; then
+                                            echo "FRAGMENTED impl=$impl mode=$mode proto=$proto conns=$conns rate=$rate fec=$fec new_frag=$frag" | tee -a "$DIAG" >&2
+                                        fi
+                                        echo "$impl $mode $proto c=$conns rate=$rate loss=$loss obf=$obf peers=$peers fec=$fec rep=$repeat -> $mbit Mbit/s (extra=$extra) cpu_hot=$cpu_hot cpu_total=$cpu_total"
+                                    done
                                 done
                             done
                         done
                     done
+                    rm -f "$conf0" "$conf1"
                 done
-                rm -f "$conf0" "$conf1"
             done
         done
     done
