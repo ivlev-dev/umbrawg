@@ -142,10 +142,9 @@ fn get_response_with_cipher(value: &str) -> String {
     )
 }
 
-fn get_response_with_bbr_fec(bbr: &str, fec: &str) -> String {
+fn get_response_with_fec(fec: &str) -> String {
     format!(
         "listen_port=51820\n\
-         bbr={bbr}\n\
          fec={fec}\n\
          public_key={RUNTIME_PEER_HEX}\n\
          endpoint=192.0.2.1:51820\n\
@@ -492,16 +491,9 @@ fn showconf_prints_advanced_security_from_uapi() {
 }
 
 #[test]
-fn show_reports_bbr_and_fec_from_uapi() {
+fn show_reports_fec_from_uapi() {
     let directory = runtime_dir();
-    let _fake = FakeUapi::start(&directory, get_response_with_bbr_fec("monitor", "8:2"));
-
-    let output = run(&directory, &["show", "uwg0", "bbr"]);
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("utf-8"),
-        "monitor\n"
-    );
+    let _fake = FakeUapi::start(&directory, get_response_with_fec("8:2"));
 
     let output = run(&directory, &["show", "uwg0", "fec"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -509,33 +501,57 @@ fn show_reports_bbr_and_fec_from_uapi() {
 }
 
 #[test]
-fn show_reports_missing_bbr_and_fec_as_none() {
+fn show_rejects_removed_bbr_parameters() {
     let directory = runtime_dir();
-    let _fake = FakeUapi::start(&directory, get_response());
+    let _fake = FakeUapi::start(&directory, get_response_with_fec("8:2"));
 
-    for parameter in ["bbr", "fec"] {
+    for parameter in ["bbr", "bbr-stats"] {
         let output = run(&directory, &["show", "uwg0", parameter]);
-        assert!(output.status.success(), "stderr: {}", stderr(&output));
-        assert_eq!(
-            String::from_utf8(output.stdout).expect("utf-8"),
-            "(none)\n",
-            "{parameter}"
+        assert_eq!(output.status.code(), Some(1), "{parameter}");
+        let stderr = stderr(&output);
+        assert!(
+            stderr.contains("BBR удалён в 0.5.0, используйте fec"),
+            "{parameter}: {stderr}"
         );
     }
 }
 
 #[test]
-fn set_sends_bbr_and_fec_to_userspace() {
+fn show_reports_missing_fec_as_none() {
+    let directory = runtime_dir();
+    let _fake = FakeUapi::start(&directory, get_response());
+
+    let output = run(&directory, &["show", "uwg0", "fec"]);
+    assert!(output.status.success(), "stderr: {}", stderr(&output));
+    assert_eq!(String::from_utf8(output.stdout).expect("utf-8"), "(none)\n");
+}
+
+#[test]
+fn set_sends_fec_to_userspace() {
     let directory = runtime_dir();
     let fake = FakeUapi::start(&directory, get_response());
 
-    let output = run(&directory, &["set", "uwg0", "bbr", "on", "fec", "8:2"]);
+    let output = run(&directory, &["set", "uwg0", "fec", "8:2"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     assert!(stderr(&output).is_empty());
     let requests = fake.set_requests();
     let request = requests.last().expect("request");
-    assert!(request.contains("bbr=on\n"), "{request}");
     assert!(request.contains("fec=8:2\n"), "{request}");
+}
+
+#[test]
+fn set_rejects_removed_bbr() {
+    let directory = runtime_dir();
+    let fake = FakeUapi::start(&directory, get_response());
+
+    let output = run(&directory, &["set", "uwg0", "bbr", "on"]);
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = stderr(&output);
+    assert!(
+        stderr.contains("BBR удалён в 0.5.0, используйте fec"),
+        "{stderr}"
+    );
+    assert!(fake.set_requests().is_empty());
 }
 
 #[test]
@@ -577,24 +593,13 @@ fn show_prints_underlay_mtu_from_uapi() {
 }
 
 #[test]
-fn show_reports_daemon_bbr_and_fec_stats() {
+fn show_reports_daemon_fec_stats() {
     let directory = runtime_dir();
     let response = "listen_port=51820\n\
-                    bbr_stats=1\nbbr_mode=monitor\nbbr_cwnd=131072\nbbr_inflight=4096\n\
-                    bbr_pacing_rate=1000000\nbbr_btl_bw=2000000\nbbr_min_rtt_ns=12345\n\
-                    bbr_round_lost=8\nbbr_peers=1\nbbr_peers_no_ack=1\n\
                     fec_stats=1\nfec_blocks_encoded=10\nfec_shards_sent=12\n\
                     fec_blocks_decoded=9\nfec_packets_recovered=1\nfec_decode_fail=2\n\
                     fec_dropped_bounds=3\nfec_dropped_disabled=4\nfec_dropped_control=5\nerrno=0\n\n";
     let _fake = FakeUapi::start(&directory, response.to_owned());
-
-    let output = run(&directory, &["show", "uwg0", "bbr-stats"]);
-    assert!(output.status.success(), "stderr: {}", stderr(&output));
-    assert_eq!(
-        String::from_utf8(output.stdout).expect("utf-8"),
-        "mode=monitor\ncwnd=131072\ninflight=4096\npacing_rate=1000000\nbtl_bw=2000000\n\
-         min_rtt_ns=12345\nround_lost=8\npeers=1\npeers_no_ack=1\n"
-    );
 
     let output = run(&directory, &["show", "uwg0", "fec-stats"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
@@ -694,35 +699,30 @@ fn show_all_with_unreadable_runtime_directory_fails() {
 }
 
 #[test]
-fn set_rejects_invalid_bbr_and_fec() {
+fn set_rejects_invalid_fec() {
     let directory = runtime_dir();
     let fake = FakeUapi::start(&directory, get_response());
 
-    for arguments in [
-        &["set", "uwg0", "bbr", "maybe"][..],
-        &["set", "uwg0", "fec", "1:300"][..],
-    ] {
-        let output = run(&directory, arguments);
-        assert_eq!(output.status.code(), Some(1), "{arguments:?}");
-        assert!(!stderr(&output).is_empty(), "{arguments:?}");
-    }
+    let output = run(&directory, &["set", "uwg0", "fec", "1:300"]);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(!stderr(&output).is_empty());
     assert!(fake.set_requests().is_empty());
 }
 
 #[test]
-fn showconf_prints_bbr_and_fec_from_uapi() {
+fn showconf_prints_fec_from_uapi() {
     let directory = runtime_dir();
-    let _fake = FakeUapi::start(&directory, get_response_with_bbr_fec("on", "adaptive"));
+    let _fake = FakeUapi::start(&directory, get_response_with_fec("adaptive"));
 
     let output = run(&directory, &["showconf", "uwg0"]);
     assert!(output.status.success(), "stderr: {}", stderr(&output));
     let stdout = String::from_utf8(output.stdout).expect("utf-8");
-    assert!(stdout.contains("BBR = on\n"), "{stdout}");
     assert!(stdout.contains("FEC = adaptive\n"), "{stdout}");
+    assert!(!stdout.contains("BBR"), "{stdout}");
 }
 
 #[test]
-fn showconf_omits_unreported_bbr_and_fec() {
+fn showconf_omits_unreported_fec() {
     let directory = runtime_dir();
     let _fake = FakeUapi::start(&directory, get_response());
 

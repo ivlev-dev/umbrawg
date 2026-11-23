@@ -83,7 +83,8 @@ If \fBtrue\fP, the interface configuration is saved on \fBdown\fP.
 Accepted from
 .BR uwg (8)
 and applied to both the kernel and the userspace backend. They select the FEC
-mode and the MTU of the path between the peers respectively.
+mode and the MTU of the path between the peers respectively. When \fBFEC\fP is
+absent, \fBadaptive\fP is used.
 
 .SH ENVIRONMENT
 .TP

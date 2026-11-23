@@ -14,11 +14,11 @@ use netlink_packet_umbrawg::{
         UWGPEER_F_REPLACE_ALLOWEDIPS, UWGPEER_F_UPDATE_ONLY,
     },
     range::{u16_range_pack, u32_range_pack},
-    BbrMode, FecMode, UmbrawgAddressFamily, UmbrawgAllowedIp,
-    UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd,
-    UmbrawgConfigError, UmbrawgDeviceConfig, UmbrawgMagicHeader,
-    UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgPeerConfig,
-    UmbrawgTimeSpec, HEADER_PROTECTION_NONCE_LEN, INTERMEDIATE_SPEC_MAX_LEN,
+    FecMode, UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
+    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgConfigError,
+    UmbrawgDeviceConfig, UmbrawgMagicHeader, UmbrawgMessage, UmbrawgPeer,
+    UmbrawgPeerAttribute, UmbrawgPeerConfig, UmbrawgTimeSpec,
+    HEADER_PROTECTION_NONCE_LEN, INTERMEDIATE_SPEC_MAX_LEN,
 };
 
 fn roundtrip_msg(msg: UmbrawgMessage) -> UmbrawgMessage {
@@ -917,29 +917,6 @@ fn device_from_message_keeps_index_without_name() {
 }
 
 #[test]
-fn device_bbr_modes_roundtrip() {
-    for (mode, wire) in
-        [(BbrMode::Off, 0u8), (BbrMode::Monitor, 1), (BbrMode::On, 2)]
-    {
-        let config = UmbrawgDeviceConfig::by_name("uwg0").bbr(mode);
-        let msg = config.clone().build().unwrap();
-
-        assert_eq!(
-            msg.attributes,
-            vec![
-                UmbrawgAttribute::IfName("uwg0".into()),
-                UmbrawgAttribute::Bbr(wire),
-            ]
-        );
-        assert_eq!(roundtrip_msg(msg.clone()), msg);
-
-        let restored = UmbrawgDeviceConfig::from_message(&msg).unwrap();
-        assert_eq!(restored, config);
-        assert_eq!(restored.build().unwrap(), msg);
-    }
-}
-
-#[test]
 fn device_fec_modes_roundtrip() {
     for (mode, wire) in [
         (FecMode::Off, 0u32),
@@ -997,8 +974,8 @@ fn device_from_message_ignores_unknown_attributes() {
         cmd: UmbrawgCmd::GetDevice,
         attributes: vec![
             UmbrawgAttribute::IfName("uwg0".into()),
-            UmbrawgAttribute::Bbr(2),
             UmbrawgAttribute::Fec(1),
+            UmbrawgAttribute::Other(DefaultNla::new(36, vec![2])),
             UmbrawgAttribute::Other(DefaultNla::new(99, vec![1, 2, 3, 4])),
         ],
     };
@@ -1006,34 +983,19 @@ fn device_from_message_ignores_unknown_attributes() {
     let config = UmbrawgDeviceConfig::from_message(&msg).unwrap();
     assert_eq!(
         config,
-        UmbrawgDeviceConfig::by_name("uwg0")
-            .bbr(BbrMode::On)
-            .fec(FecMode::Adaptive)
+        UmbrawgDeviceConfig::by_name("uwg0").fec(FecMode::Adaptive)
     );
     assert_eq!(
         config.build().unwrap().attributes,
         vec![
             UmbrawgAttribute::IfName("uwg0".into()),
-            UmbrawgAttribute::Bbr(2),
             UmbrawgAttribute::Fec(1),
         ]
     );
 }
 
 #[test]
-fn device_from_message_rejects_invalid_bbr_and_fec() {
-    let bbr = UmbrawgMessage {
-        cmd: UmbrawgCmd::GetDevice,
-        attributes: vec![
-            UmbrawgAttribute::IfName("uwg0".into()),
-            UmbrawgAttribute::Bbr(3),
-        ],
-    };
-    assert_eq!(
-        UmbrawgDeviceConfig::from_message(&bbr),
-        Err(UmbrawgConfigError::InvalidBbrMode { value: 3 })
-    );
-
+fn device_from_message_rejects_invalid_fec() {
     let fec = UmbrawgMessage {
         cmd: UmbrawgCmd::GetDevice,
         attributes: vec![

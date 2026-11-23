@@ -210,9 +210,6 @@ fn device_attributes(config: &SetDevice, version: u32) -> Result<Vec<UmbrawgAttr
     if let Some(extra_ports) = device.extra_ports {
         attributes.push(UmbrawgAttribute::ExtraPorts(extra_ports));
     }
-    if let Some(bbr) = &device.bbr {
-        attributes.push(UmbrawgAttribute::Bbr(bbr_value(bbr)?));
-    }
     if let Some(fec) = &device.fec {
         attributes.push(UmbrawgAttribute::Fec(fec_value(fec)?));
     }
@@ -418,13 +415,9 @@ impl DeviceBuilder {
                 }
                 UmbrawgAttribute::ListenPort(value) => self.device.listen_port = *value,
                 UmbrawgAttribute::ExtraPorts(value) => self.device.extra_ports = Some(*value),
-                UmbrawgAttribute::Bbr(value) => self.device.bbr = Some(bbr_text(*value)?),
                 UmbrawgAttribute::Fec(value) => self.device.fec = Some(fec_text(*value)?),
                 UmbrawgAttribute::UnderlayMtu(value) => {
                     self.device.underlay_mtu = Some(*value);
-                }
-                UmbrawgAttribute::BbrStats(value) => {
-                    self.device.bbr_stats = Some((*value).into());
                 }
                 UmbrawgAttribute::FecStats(value) => {
                     self.device.fec_stats = Some((*value).into());
@@ -603,27 +596,6 @@ fn allowed_ip_from_netlink(value: &UmbrawgAllowedIp) -> Result<AllowedIp, Error>
 fn parse_header(name: &str, value: &str) -> Result<U32Range, Error> {
     U32Range::parse(value)
         .map_err(|error| Error::Protocol(format!("invalid {name} from kernel: {error}")))
-}
-
-fn bbr_value(text: &str) -> Result<u8, Error> {
-    let normalized = text.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "off" => Ok(0),
-        "monitor" => Ok(1),
-        "on" => Ok(2),
-        _ => Err(Error::Protocol(format!("invalid BBR mode `{text}`"))),
-    }
-}
-
-fn bbr_text(value: u8) -> Result<String, Error> {
-    match value {
-        0 => Ok("off".to_owned()),
-        1 => Ok("monitor".to_owned()),
-        2 => Ok("on".to_owned()),
-        _ => Err(Error::Protocol(format!(
-            "invalid BBR value {value} from kernel"
-        ))),
-    }
 }
 
 fn fec_value(text: &str) -> Result<u32, Error> {
@@ -907,7 +879,6 @@ mod tests {
                 UmbrawgAttribute::IfIndex(7),
                 UmbrawgAttribute::ListenPort(51820),
                 UmbrawgAttribute::ExtraPorts(7),
-                UmbrawgAttribute::Bbr(2),
                 UmbrawgAttribute::Fec(0x0802),
                 UmbrawgAttribute::Fwmark(0x12),
                 UmbrawgAttribute::PrivateKey([1u8; 32]),
@@ -964,7 +935,6 @@ mod tests {
         assert_eq!(device.ifindex, Some(7));
         assert_eq!(device.listen_port, 51820);
         assert_eq!(device.extra_ports, Some(7));
-        assert_eq!(device.bbr.as_deref(), Some("on"));
         assert_eq!(device.fec.as_deref(), Some("8:2"));
         assert_eq!(device.fwmark, 0x12);
         assert_eq!(device.obfuscation.jc, Some(4));
@@ -1136,39 +1106,28 @@ mod tests {
     }
 
     #[test]
-    fn sends_bbr_and_fec_only_when_configured() {
+    fn sends_fec_only_when_configured() {
         let mut config = config();
-        assert_eq!(config.device.bbr, None);
         assert_eq!(config.device.fec, None);
         let messages = build_set_messages(&config, 3).expect("valid");
         assert!(!messages[0]
             .attributes
             .iter()
-            .any(|attribute| matches!(attribute, UmbrawgAttribute::Bbr(_))));
-        assert!(!messages[0]
-            .attributes
-            .iter()
             .any(|attribute| matches!(attribute, UmbrawgAttribute::Fec(_))));
 
-        config.device.bbr = Some("monitor".to_owned());
         config.device.fec = Some("8:2".to_owned());
         let messages = build_set_messages(&config, 3).expect("valid");
         let attributes = &messages[0].attributes;
-        assert!(attributes.contains(&UmbrawgAttribute::Bbr(1)));
         assert!(attributes.contains(&UmbrawgAttribute::Fec(0x0802)));
 
-        config.device.bbr = Some("on".to_owned());
         config.device.fec = Some("adaptive".to_owned());
         let messages = build_set_messages(&config, 3).expect("valid");
         let attributes = &messages[0].attributes;
-        assert!(attributes.contains(&UmbrawgAttribute::Bbr(2)));
         assert!(attributes.contains(&UmbrawgAttribute::Fec(1)));
 
-        config.device.bbr = Some("off".to_owned());
         config.device.fec = Some("off".to_owned());
         let messages = build_set_messages(&config, 3).expect("valid");
         let attributes = &messages[0].attributes;
-        assert!(attributes.contains(&UmbrawgAttribute::Bbr(0)));
         assert!(attributes.contains(&UmbrawgAttribute::Fec(0)));
     }
 
@@ -1198,21 +1157,6 @@ mod tests {
     }
 
     #[test]
-    fn encodes_bbr_modes() {
-        assert_eq!(bbr_value("off").expect("valid"), 0);
-        assert_eq!(bbr_value("monitor").expect("valid"), 1);
-        assert_eq!(bbr_value("on").expect("valid"), 2);
-        assert_eq!(bbr_value(" ON ").expect("valid"), 2);
-        for value in ["", "maybe", "true", "1", "bbr"] {
-            assert!(bbr_value(value).is_err(), "{value}");
-        }
-        assert_eq!(bbr_text(0).expect("valid"), "off");
-        assert_eq!(bbr_text(1).expect("valid"), "monitor");
-        assert_eq!(bbr_text(2).expect("valid"), "on");
-        assert!(bbr_text(3).is_err());
-    }
-
-    #[test]
     fn encodes_fec_modes() {
         assert_eq!(fec_value("off").expect("valid"), 0);
         assert_eq!(fec_value("adaptive").expect("valid"), 1);
@@ -1237,11 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_bbr_and_fec_from_config() {
-        let mut set = config();
-        set.device.bbr = Some("maybe".to_owned());
-        assert!(build_set_messages(&set, 3).is_err());
-
+    fn rejects_invalid_fec_from_config() {
         let mut set = config();
         set.device.fec = Some("0:0".to_owned());
         assert!(build_set_messages(&set, 3).is_err());
@@ -1252,22 +1192,13 @@ mod tests {
     }
 
     #[test]
-    fn reads_bbr_and_fec_from_netlink() {
+    fn reads_fec_from_netlink() {
         let mut builder = DeviceBuilder::new("test0");
         builder
-            .apply(&[UmbrawgAttribute::Bbr(2), UmbrawgAttribute::Fec(0x0802)])
+            .apply(&[UmbrawgAttribute::Fec(0x0802)])
             .expect("apply");
         let device = builder.finish();
-        assert_eq!(device.bbr.as_deref(), Some("on"));
         assert_eq!(device.fec.as_deref(), Some("8:2"));
-
-        for (mode, expected) in [(0u8, "off"), (1, "monitor"), (2, "on")] {
-            let mut builder = DeviceBuilder::new("test0");
-            builder
-                .apply(&[UmbrawgAttribute::Bbr(mode)])
-                .expect("apply");
-            assert_eq!(builder.finish().bbr.as_deref(), Some(expected));
-        }
 
         for (value, expected) in [(0u32, "off"), (1, "adaptive"), (0x0101, "1:1")] {
             let mut builder = DeviceBuilder::new("test0");
@@ -1278,13 +1209,11 @@ mod tests {
         }
 
         let mut builder = DeviceBuilder::new("test0");
-        assert!(builder.apply(&[UmbrawgAttribute::Bbr(3)]).is_err());
-        let mut builder = DeviceBuilder::new("test0");
         assert!(builder.apply(&[UmbrawgAttribute::Fec(2)]).is_err());
     }
 
     #[test]
-    fn reads_fec_and_bbr_stats() {
+    fn reads_fec_stats() {
         let kernel_fec = netlink_packet_umbrawg::FecStats {
             blocks_encoded: 1,
             shards_sent: 2,
@@ -1294,23 +1223,9 @@ mod tests {
             dropped_bounds: 6,
             dropped_disabled: 7,
         };
-        let kernel_bbr = netlink_packet_umbrawg::BbrStats {
-            mode: 2,
-            cwnd: 131_072,
-            inflight: 4096,
-            pacing_rate: 1_000_000,
-            btl_bw: 2_000_000,
-            min_rtt_ns: 12_345,
-            round_lost: 8,
-            peers: 1,
-            peers_no_ack: 2,
-        };
         let mut builder = DeviceBuilder::new("test0");
         builder
-            .apply(&[
-                UmbrawgAttribute::FecStats(kernel_fec),
-                UmbrawgAttribute::BbrStats(kernel_bbr),
-            ])
+            .apply(&[UmbrawgAttribute::FecStats(kernel_fec)])
             .expect("apply");
         let device = builder.finish();
         let expected = crate::FecStats::from(kernel_fec);
@@ -1319,13 +1234,6 @@ mod tests {
             device.fec_stats.expect("stats").dropped_control,
             0,
             "the kernel has no dropped_control counter"
-        );
-        let expected = crate::BbrStats::from(kernel_bbr);
-        assert_eq!(device.bbr_stats, Some(expected));
-        assert_eq!(
-            device.bbr_stats.expect("stats").peers_no_ack,
-            2,
-            "the kernel reports the ACK-gated peers"
         );
     }
 
@@ -1337,6 +1245,5 @@ mod tests {
             .expect("apply");
         let device = builder.finish();
         assert_eq!(device.fec_stats, None);
-        assert_eq!(device.bbr_stats, None);
     }
 }

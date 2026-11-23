@@ -3,6 +3,24 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
+## [0.5.0] — 2026-11-23
+
+### Удалено
+
+- BBR: команды `uwg set <if> bbr`, `uwg show <if> bbr|bbr-stats`, ключ
+  `BBR` в `[Interface]`, UAPI-поля `bbr=`/`bbr_*` и netlink-атрибуты
+  `UWGDEVICE_A_BBR` (36) и `UWGDEVICE_A_BBR_STATS` (39). Номера атрибутов
+  зарезервированы и не переиспользуются. Попытка `bbr` завершается ошибкой
+  «BBR удалён в 0.5.0, используйте fec». Исторические записи 0.3/0.4
+  оставлены как есть.
+
+### Изменено
+
+- `FEC = adaptive` — значение по умолчанию, если ключ `FEC` не задан.
+- `BBR` в INI-конфиге теперь отвергается как неизвестный/удалённый ключ;
+  `uwg showconf` больше не печатает BBR.
+- Man `uwg(8)`, README, completions и `uwg-quick`-примеры приведены к FEC.
+
 ## [0.4.1] — 2026-11-23
 
 ### Добавлено

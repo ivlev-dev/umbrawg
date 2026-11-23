@@ -1,4 +1,14 @@
 # Changelog
+## [0.5.0] — 2026-11-23
+### Removed
+ - BBR support: `UmbrawgAttribute::Bbr`/`BbrStats`, the `BbrMode` type,
+   `UmbrawgDeviceConfig::bbr`, `UWGDEVICE_BBR_STATS_A_*` constants and
+   `UmbrawgConfigError::InvalidBbrMode`. Use FEC (`FecMode`/`FecStats`).
+ - The attribute numbers `UWGDEVICE_A_BBR` (36) and `UWGDEVICE_A_BBR_STATS`
+   (39) stay reserved and are not reused. `GET_DEVICE` replies from older
+   kernels that still carry them parse as unknown attributes instead of
+   failing.
+
 ## [0.4.1] — 2026-11-21
 ### Fixes
  - FEC limits now match the kernel data path: `FecMode`/`fec_pack` accept only

@@ -16,10 +16,9 @@
 //!   traits and can be used as a `GenlMessage` payload.
 //! - [`UmbrawgAttribute`] covers all `UWGDEVICE_A_*` attributes, including the
 //!   UmbraWG 3.0 header protection key, the UmbraWG 3.1
-//!   `RandomTrailers`/`DisableCookies` switches and the BBR/FEC modes.
-//! - [`FecStats`] and [`BbrStats`] carry the read-only device-wide FEC
-//!   counters and BBR state of `UWGDEVICE_A_FEC_STATS` and
-//!   `UWGDEVICE_A_BBR_STATS`.
+//!   `RandomTrailers`/`DisableCookies` switches and the FEC mode.
+//! - [`FecStats`] carries the read-only device-wide FEC counters of
+//!   `UWGDEVICE_A_FEC_STATS`.
 //! - [`UmbrawgPeer`] and [`UmbrawgPeerAttribute`] describe the nested peer
 //!   list, [`UmbrawgAllowedIp`] the nested allowed IP entries.
 //! - [`UmbrawgDeviceConfig`] and [`UmbrawgPeerConfig`] are validated builders
@@ -46,9 +45,9 @@
 //! - `HeaderProtectionKey` is exactly 32 bytes.
 //! - With a header protection key configured, the kernel requires `S1`..`S4` to
 //!   be at least [`HEADER_PROTECTION_NONCE_LEN`] bytes.
-//! - `Bbr` is a `u8` mode (`0` off, `1` monitor, `2` on), `Fec` a `u32` payload
-//!   (`0` off, `1` adaptive, otherwise `(K << 8) | M`). The builders accept
-//!   [`BbrMode`] and [`FecMode`] and convert them to these payloads.
+//! - `Fec` is a `u32` payload (`0` off, `1` adaptive, otherwise
+//!   `(K << 8) | M`). The builders accept [`FecMode`] and convert it to this
+//!   payload.
 //!
 //! # Building a configuration
 //!
@@ -78,7 +77,6 @@
 //!     .header_protection_key([5u8; 32])
 //!     .content_padding_addition(51, 197)
 //!     .random_trailers(true)
-//!     .bbr(netlink_packet_umbrawg::BbrMode::On)
 //!     .fec(netlink_packet_umbrawg::FecMode::Adaptive)
 //!     .peer(peer)
 //!     .build()?;
@@ -124,7 +122,6 @@ pub mod range;
 
 mod allowedip;
 mod attribute;
-mod bbr;
 mod cipher;
 mod device;
 mod error;
@@ -141,10 +138,9 @@ mod test;
 pub use self::{
     allowedip::{UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr},
     attribute::{
-        fec_pack, fec_unpack, UmbrawgAttribute, BBR_MAX, FEC_ADAPTIVE,
-        FEC_MAX_K, FEC_MAX_M, FEC_MAX_SHARDS, FEC_OFF,
+        fec_pack, fec_unpack, UmbrawgAttribute, FEC_ADAPTIVE, FEC_MAX_K,
+        FEC_MAX_M, FEC_MAX_SHARDS, FEC_OFF,
     },
-    bbr::BbrMode,
     cipher::UmbrawgCipher,
     device::{
         UmbrawgDeviceConfig, UmbrawgMagicHeader, EXTRA_PORTS_MAX,
@@ -156,5 +152,5 @@ pub use self::{
     message::{UmbrawgCmd, UmbrawgMessage},
     peer::{UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgTimeSpec},
     peer_config::UmbrawgPeerConfig,
-    stats::{BbrStats, FecStats},
+    stats::FecStats,
 };

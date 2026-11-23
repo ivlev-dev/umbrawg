@@ -315,7 +315,6 @@ uwg syncconf uwg0 <(uwg-quick strip uwg0)
 uwg set uwg0 listen-port 51820
 uwg set uwg0 underlay-mtu 9000
 uwg show uwg0 underlay-mtu
-uwg show uwg0 bbr-stats
 uwg show uwg0 fec-stats
 uwg-quick up uwg0
 uwg-quick down uwg0
@@ -329,11 +328,15 @@ uwg-quick strip uwg0
 команда печатает kernel-интерфейсы (или ничего, если их нет) и завершается
 кодом 0. Существующий, но нечитаемый runtime-каталог — ошибка с кодом 1.
 
-`uwg show <if> bbr-stats` для kernel-бэкенда отдаёт поля `bbr_stats`;
-`peers_no_ack` (пиры без `ACK` в CAPS, к которым BBR не применяется) —
-netlink-атрибут 9, CLI печатает его как `peers_no_ack`. FEC
+`uwg show <if> fec-stats` печатает счётчики FEC для обоих бэкендов. FEC
 `FEC_PARTIAL`/partial parity отдельной команды не требует: это автосогласуемый
-CAPS-флаг при включённом `fec`.
+CAPS-флаг при включённом `fec`. Если ключ `FEC` не задан в конфиге,
+используется `adaptive`.
+
+BBR удалён в 0.5.0: команды `uwg set/show bbr` и `bbr-stats`, ключ `BBR` в
+`[Interface]` и UAPI-поля BBR больше не поддерживаются. Попытка использовать
+`bbr` завершается ошибкой с подсказкой перейти на `fec`; номера netlink-
+атрибутов 36 и 39 остаются зарезервированными.
 
 Коды возврата: `0` — успех, а также `--help`/`-h`/`help` и
 `--version`/`-v`/`version`; `1` — ошибка использования (неизвестная команда

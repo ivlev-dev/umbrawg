@@ -143,11 +143,6 @@ pub enum UmbrawgConfigError {
         /// The rejected protocol version.
         version: u32,
     },
-    /// A BBR mode outside `0..=2` was parsed from a message.
-    InvalidBbrMode {
-        /// The rejected `UWGDEVICE_A_BBR` payload.
-        value: u8,
-    },
     /// An FEC payload is neither `0`, `1` nor a valid `(K << 8) | M` pair.
     InvalidFecValue {
         /// The rejected `UWGDEVICE_A_FEC` payload.
@@ -252,11 +247,6 @@ impl fmt::Display for UmbrawgConfigError {
             Self::UnsupportedProtocolVersion { version } => write!(
                 f,
                 "unsupported peer protocol version {version}: only 1 is valid"
-            ),
-            Self::InvalidBbrMode { value } => write!(
-                f,
-                "invalid BBR mode {value}: expected 0 (off), 1 (monitor) or 2 \
-                 (on)"
             ),
             Self::InvalidFecValue { value } => write!(
                 f,

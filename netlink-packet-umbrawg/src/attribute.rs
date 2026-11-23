@@ -10,10 +10,10 @@ use netlink_packet_core::{
 
 use super::peer::UmbrawgPeers;
 use crate::{
-    constants::{UWGDEVICE_A_BBR_STATS, UWGDEVICE_A_FEC_STATS, UWG_KEY_LEN},
+    constants::{UWGDEVICE_A_FEC_STATS, UWG_KEY_LEN},
     device::EXTRA_PORTS_MAX,
     range::u32_range_unpack,
-    BbrStats, FecStats, UmbrawgPeer,
+    FecStats, UmbrawgPeer,
 };
 
 const UWGDEVICE_A_IFINDEX: u16 = 1;
@@ -56,15 +56,14 @@ const UWGDEVICE_A_RANDOM_TRAILERS: u16 = 33;
 const UWGDEVICE_A_DISABLE_COOKIES: u16 = 34;
 // UmbraWG multi-port attributes
 const UWGDEVICE_A_EXTRA_PORTS: u16 = 35;
-// UmbraWG BBR/FEC attributes
-const UWGDEVICE_A_BBR: u16 = 36;
+// UmbraWG FEC attributes
+// Attribute numbers 36 and 39 belonged to the removed congestion-control
+// support in 0.5.0; they stay reserved in `constants.rs` and replies from
+// older kernels carrying them are parsed as unknown attributes.
 const UWGDEVICE_A_FEC: u16 = 37;
 const UWGDEVICE_A_UNDERLAY_MTU: u16 = 40;
 
 const HEADER_PROTECTION_KEY_LEN: usize = 32;
-
-/// Highest valid `UWGDEVICE_A_BBR` value (`on`).
-pub const BBR_MAX: u8 = 2;
 
 /// `UWGDEVICE_A_FEC` value that disables FEC.
 pub const FEC_OFF: u32 = 0;
@@ -350,11 +349,6 @@ pub enum UmbrawgAttribute {
     /// (`u8`, `0..=8`), `0` by default. The kernel opens one extra socket
     /// per configured port and sends over them round-robin.
     ExtraPorts(u8),
-    /// `UWGDEVICE_A_BBR`: BBR congestion control mode (`u8`).
-    ///
-    /// `0` disables BBR, `1` only monitors it and `2` enables it. Values above
-    /// [`BBR_MAX`] are rejected when parsing.
-    Bbr(u8),
     /// `UWGDEVICE_A_FEC`: forward error correction mode (`u32`).
     ///
     /// `0` disables FEC, `1` selects adaptive FEC, and any other valid value
@@ -376,11 +370,6 @@ pub enum UmbrawgAttribute {
     /// Read-only: the kernel fills it in `UWG_CMD_GET_DEVICE` replies and
     /// ignores it in `UWG_CMD_SET_DEVICE` requests.
     FecStats(FecStats),
-    /// `UWGDEVICE_A_BBR_STATS`: nested device-wide BBR state.
-    ///
-    /// Read-only: the kernel fills it in `UWG_CMD_GET_DEVICE` replies and
-    /// ignores it in `UWG_CMD_SET_DEVICE` requests.
-    BbrStats(BbrStats),
     /// An attribute this crate does not know; kept verbatim.
     Other(DefaultNla),
 }
@@ -426,12 +415,10 @@ impl Nla for UmbrawgAttribute {
             | Self::H4Range(_) => 8,
             Self::RandomTrailers(_)
             | Self::DisableCookies(_)
-            | Self::ExtraPorts(_)
-            | Self::Bbr(_) => 1,
+            | Self::ExtraPorts(_) => 1,
             Self::Fec(_) => 4,
             Self::UnderlayMtu(_) => 2,
             Self::FecStats(v) => v.value_len(),
-            Self::BbrStats(v) => v.value_len(),
             // Umbra Specific Fields
             Self::Peer(v) => v.attributes_len(),
             Self::JC(_)
@@ -493,11 +480,9 @@ impl Nla for UmbrawgAttribute {
             Self::RandomTrailers(_) => UWGDEVICE_A_RANDOM_TRAILERS,
             Self::DisableCookies(_) => UWGDEVICE_A_DISABLE_COOKIES,
             Self::ExtraPorts(_) => UWGDEVICE_A_EXTRA_PORTS,
-            Self::Bbr(_) => UWGDEVICE_A_BBR,
             Self::Fec(_) => UWGDEVICE_A_FEC,
             Self::UnderlayMtu(_) => UWGDEVICE_A_UNDERLAY_MTU,
             Self::FecStats(_) => UWGDEVICE_A_FEC_STATS | NLA_F_NESTED,
-            Self::BbrStats(_) => UWGDEVICE_A_BBR_STATS | NLA_F_NESTED,
             Self::Other(attr) => attr.kind(),
         }
     }
@@ -552,11 +537,9 @@ impl Nla for UmbrawgAttribute {
                 buffer[0] = u8::from(*v)
             }
             Self::ExtraPorts(v) => buffer[0] = *v,
-            Self::Bbr(v) => buffer[0] = *v,
             Self::Fec(v) => emit_u32(buffer, *v).unwrap(),
             Self::UnderlayMtu(v) => emit_u16(buffer, *v).unwrap(),
             Self::FecStats(v) => v.emit_value(buffer),
-            Self::BbrStats(v) => v.emit_value(buffer),
             Self::Other(attr) => attr.emit_value(buffer),
         }
     }
@@ -712,16 +695,6 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
                 }
                 Self::ExtraPorts(ports)
             }
-            UWGDEVICE_A_BBR => {
-                let mode = parse_u8(payload)
-                    .context("invalid UWGDEVICE_A_BBR value")?;
-                if mode > BBR_MAX {
-                    return Err(DecodeError::from(format!(
-                        "UWGDEVICE_A_BBR value {mode} exceeds {BBR_MAX}"
-                    )));
-                }
-                Self::Bbr(mode)
-            }
             UWGDEVICE_A_FEC => {
                 let value = parse_u32(payload)
                     .context("invalid UWGDEVICE_A_FEC value")?;
@@ -739,10 +712,6 @@ impl<'a, T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&'a T>>
             UWGDEVICE_A_FEC_STATS => Self::FecStats(
                 FecStats::parse(buf)
                     .context("invalid UWGDEVICE_A_FEC_STATS value")?,
-            ),
-            UWGDEVICE_A_BBR_STATS => Self::BbrStats(
-                BbrStats::parse(buf)
-                    .context("invalid UWGDEVICE_A_BBR_STATS value")?,
             ),
             kind => Self::Other(
                 DefaultNla::parse(buf)

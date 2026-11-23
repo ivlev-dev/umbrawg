@@ -3,7 +3,7 @@ use std::io::IsTerminal;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use umbrawg_config::{format_endpoint, Key, U16Range, U32Range};
-use umbrawg_ctl::{BbrStats, Device, FecStats, Peer, TimeSpec};
+use umbrawg_ctl::{Device, FecStats, Peer, TimeSpec};
 
 const RESET: &str = "\x1b[0m";
 const BOLD: &str = "\x1b[1m";
@@ -138,9 +138,6 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
     if let Some(underlay_mtu) = device.underlay_mtu {
         let _ = writeln!(output, "  {}: {underlay_mtu}", style.bold("underlay mtu"));
     }
-    if let Some(bbr) = &device.bbr {
-        let _ = writeln!(output, "  {}: {bbr}", style.bold("bbr"));
-    }
     if let Some(fec) = &device.fec {
         let _ = writeln!(output, "  {}: {fec}", style.bold("fec"));
     }
@@ -239,15 +236,6 @@ pub fn pretty_at(device: &Device, color: bool, now: i64) -> String {
             style.bold("disable cookies"),
             bool_text(value)
         );
-    }
-    match &device.bbr_stats {
-        Some(stats) => {
-            let _ = writeln!(output, "  {}:", style.bold("bbr stats"));
-            output.push_str(&bbr_stats_text(stats, "    "));
-        }
-        None => {
-            let _ = writeln!(output, "  {}: (none)", style.bold("bbr stats"));
-        }
     }
     match &device.fec_stats {
         Some(stats) => {
@@ -464,8 +452,8 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
                 let _ = writeln!(output, "{prefix}off");
             }
         }
-        "bbr" => {
-            let _ = writeln!(output, "{prefix}{}", option_text(&device.bbr, "(none)"));
+        "bbr" | "bbr-stats" => {
+            return Err("BBR удалён в 0.5.0, используйте fec".to_owned());
         }
         "fec" => {
             let _ = writeln!(output, "{prefix}{}", option_text(&device.fec, "(none)"));
@@ -480,12 +468,6 @@ pub fn ugly(device: &Device, parameter: &str, with_interface: bool) -> Result<St
                     .unwrap_or_else(|| "(none)".to_owned())
             );
         }
-        "bbr-stats" => match &device.bbr_stats {
-            Some(stats) => output.push_str(&bbr_stats_text(stats, &prefix)),
-            None => {
-                let _ = writeln!(output, "{prefix}(none)");
-            }
-        },
         "fec-stats" => match &device.fec_stats {
             Some(stats) => output.push_str(&fec_stats_text(stats, &prefix)),
             None => {
@@ -779,33 +761,6 @@ fn u32_range_text(value: Option<U32Range>) -> String {
     value.unwrap_or_default().to_string()
 }
 
-fn bbr_mode_text(mode: u8) -> &'static str {
-    match mode {
-        0 => "off",
-        1 => "monitor",
-        2 => "on",
-        _ => "unknown",
-    }
-}
-
-fn bbr_stats_text(stats: &BbrStats, prefix: &str) -> String {
-    let mut output = String::new();
-    for (name, value) in [
-        ("mode", bbr_mode_text(stats.mode).to_owned()),
-        ("cwnd", stats.cwnd.to_string()),
-        ("inflight", stats.inflight.to_string()),
-        ("pacing_rate", stats.pacing_rate.to_string()),
-        ("btl_bw", stats.btl_bw.to_string()),
-        ("min_rtt_ns", stats.min_rtt_ns.to_string()),
-        ("round_lost", stats.round_lost.to_string()),
-        ("peers", stats.peers.to_string()),
-        ("peers_no_ack", stats.peers_no_ack.to_string()),
-    ] {
-        let _ = writeln!(output, "{prefix}{name}={value}");
-    }
-    output
-}
-
 fn fec_stats_text(stats: &FecStats, prefix: &str) -> String {
     let mut output = String::new();
     for (name, value) in [
@@ -929,20 +884,8 @@ mod tests {
         device.listen_port = 51820;
         device.extra_ports = Some(4);
         device.fwmark = 0x1234;
-        device.bbr = Some("monitor".to_owned());
         device.fec = Some("8:2".to_owned());
         device.underlay_mtu = Some(9000);
-        device.bbr_stats = Some(BbrStats {
-            mode: 2,
-            cwnd: 131_072,
-            inflight: 4096,
-            pacing_rate: 1_000_000,
-            btl_bw: 2_000_000,
-            min_rtt_ns: 12_345,
-            round_lost: 8,
-            peers: 1,
-            peers_no_ack: 2,
-        });
         device.fec_stats = Some(FecStats {
             blocks_encoded: 10,
             shards_sent: 12,
@@ -975,15 +918,18 @@ mod tests {
     }
 
     #[test]
-    fn shows_bbr_and_fec_state() {
+    fn shows_fec_state() {
         let device = sample_device();
-        assert_eq!(ugly(&device, "bbr", false).expect("valid"), "monitor\n");
         assert_eq!(ugly(&device, "fec", false).expect("valid"), "8:2\n");
+        assert!(ugly(&device, "bbr", false)
+            .expect_err("BBR must be rejected")
+            .contains("BBR удалён в 0.5.0, используйте fec"));
+        assert!(ugly(&device, "bbr-stats", false)
+            .expect_err("BBR must be rejected")
+            .contains("BBR удалён в 0.5.0, используйте fec"));
 
         let mut device = sample_device();
-        device.bbr = None;
         device.fec = None;
-        assert_eq!(ugly(&device, "bbr", false).expect("valid"), "(none)\n");
         assert_eq!(ugly(&device, "fec", false).expect("valid"), "(none)\n");
         let output = showconf(&device);
         assert!(!output.contains("BBR"), "{output}");
@@ -1014,12 +960,8 @@ mod tests {
     }
 
     #[test]
-    fn shows_bbr_and_fec_stats() {
+    fn shows_fec_stats() {
         let device = sample_device();
-        assert_eq!(
-            ugly(&device, "bbr-stats", false).expect("valid"),
-            "mode=on\ncwnd=131072\ninflight=4096\npacing_rate=1000000\nbtl_bw=2000000\nmin_rtt_ns=12345\nround_lost=8\npeers=1\npeers_no_ack=2\n"
-        );
         assert_eq!(
             ugly(&device, "fec-stats", false).expect("valid"),
             "blocks_encoded=10\nshards_sent=12\nblocks_decoded=9\npackets_recovered=1\ndecode_fail=2\ndropped_bounds=3\ndropped_disabled=4\ndropped_control=5\n"
@@ -1030,37 +972,23 @@ mod tests {
         );
 
         let mut device = sample_device();
-        device.bbr_stats = None;
         device.fec_stats = None;
-        assert_eq!(
-            ugly(&device, "bbr-stats", false).expect("valid"),
-            "(none)\n"
-        );
         assert_eq!(
             ugly(&device, "fec-stats", false).expect("valid"),
             "(none)\n"
         );
         let output = pretty_at(&device, false, 1_700_000_060);
-        assert!(output.contains("  bbr stats: (none)\n"), "{output}");
+        assert!(!output.contains("bbr stats"), "{output}");
         assert!(output.contains("  fec stats: (none)\n"), "{output}");
     }
 
     #[test]
-    fn bbr_stats_mode_names() {
-        assert_eq!(bbr_mode_text(0), "off");
-        assert_eq!(bbr_mode_text(1), "monitor");
-        assert_eq!(bbr_mode_text(2), "on");
-        assert_eq!(bbr_mode_text(3), "unknown");
-    }
-
-    #[test]
-    fn pretty_shows_bbr_and_fec_modes() {
+    fn pretty_shows_fec_mode() {
         let output = pretty_at(&sample_device(), false, 1_700_000_060);
-        assert!(output.contains("  bbr: monitor\n"), "{output}");
         assert!(output.contains("  fec: 8:2\n"), "{output}");
+        assert!(!output.contains("  bbr:"), "{output}");
 
         let mut device = sample_device();
-        device.bbr = None;
         device.fec = None;
         let output = pretty_at(&device, false, 1_700_000_060);
         assert!(!output.contains("  bbr:"), "{output}");
@@ -1083,7 +1011,6 @@ mod tests {
         assert!(output.contains("  latest handshake: 1 minute ago\n"));
         assert!(output.contains("  transfer: 2.00 KiB received, 10 B sent\n"));
         assert!(output.contains("  persistent keepalive: 25\n"));
-        assert!(output.contains("  bbr stats:\n    mode=on\n    cwnd=131072\n"));
         assert!(output.contains("  fec stats:\n    blocks_encoded=10\n"));
     }
 
@@ -1119,7 +1046,6 @@ mod tests {
             .starts_with(&device.public_key.clone().expect("key").to_base64()));
         assert_eq!(ugly(&device, "fwmark", false).expect("valid"), "0x1234\n");
         assert_eq!(ugly(&device, "extra-ports", false).expect("valid"), "4\n");
-        assert_eq!(ugly(&device, "bbr", false).expect("valid"), "monitor\n");
         assert_eq!(ugly(&device, "fec", false).expect("valid"), "8:2\n");
         assert_eq!(ugly(&device, "jc", false).expect("valid"), "4\n");
         assert_eq!(ugly(&device, "h1", false).expect("valid"), "10-20\n");
@@ -1195,7 +1121,6 @@ mod tests {
         assert!(output.contains("ListenPort = 51820\n"));
         assert!(output.contains("ExtraPorts = 4\n"));
         assert!(output.contains("FwMark = 0x1234\n"));
-        assert!(output.contains("BBR = monitor\n"));
         assert!(output.contains("FEC = 8:2\n"));
         assert!(output.contains("H1 = 10-20\n"));
         assert!(output.contains("I1 = <b 0x1><c>\n"));

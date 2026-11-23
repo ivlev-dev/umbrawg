@@ -4,41 +4,6 @@ use umbrawg_config::{
     AllowedIp, Cipher, Config, DeviceConfig, Key, ObfuscationConfig, PeerConfig, U16Range,
 };
 
-/// Device-wide BBR state.
-///
-/// Matches the kernel netlink aggregate. `peers_no_ack` counts peers that do
-/// not advertise ACK support in CAPS; BBR is not applied to them and they are
-/// excluded from the aggregates. The userspace daemon reports zero until it
-/// tracks the same gate.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BbrStats {
-    pub mode: u8,
-    pub cwnd: u64,
-    pub inflight: u64,
-    pub pacing_rate: u64,
-    pub btl_bw: u64,
-    pub min_rtt_ns: u64,
-    pub round_lost: u32,
-    pub peers: u32,
-    pub peers_no_ack: u32,
-}
-
-impl From<netlink_packet_umbrawg::BbrStats> for BbrStats {
-    fn from(stats: netlink_packet_umbrawg::BbrStats) -> Self {
-        Self {
-            mode: stats.mode,
-            cwnd: stats.cwnd,
-            inflight: stats.inflight,
-            pacing_rate: stats.pacing_rate,
-            btl_bw: stats.btl_bw,
-            min_rtt_ns: stats.min_rtt_ns,
-            round_lost: stats.round_lost,
-            peers: stats.peers,
-            peers_no_ack: stats.peers_no_ack,
-        }
-    }
-}
-
 /// Device-wide FEC counters.
 ///
 /// Matches the kernel netlink aggregate and adds the userspace-only
@@ -134,11 +99,9 @@ pub struct Device {
     pub listen_port: u16,
     pub extra_ports: Option<u8>,
     pub fwmark: u32,
-    pub bbr: Option<String>,
     pub fec: Option<String>,
     /// MTU of the path between the peers, as reported by the kernel.
     pub underlay_mtu: Option<u16>,
-    pub bbr_stats: Option<BbrStats>,
     pub fec_stats: Option<FecStats>,
     pub obfuscation: ObfuscationConfig,
     pub peers: Vec<Peer>,
@@ -154,10 +117,8 @@ impl Device {
             listen_port: 0,
             extra_ports: None,
             fwmark: 0,
-            bbr: None,
             fec: None,
             underlay_mtu: None,
-            bbr_stats: None,
             fec_stats: None,
             obfuscation: ObfuscationConfig::default(),
             peers: Vec::new(),
@@ -192,7 +153,6 @@ impl Device {
                 listen_port: (self.listen_port != 0).then_some(self.listen_port),
                 extra_ports: self.extra_ports,
                 fwmark: (self.fwmark != 0).then_some(self.fwmark),
-                bbr: self.bbr.clone(),
                 fec: self.fec.clone(),
                 underlay_mtu: self.underlay_mtu,
                 obfuscation: self.obfuscation.clone(),
@@ -400,24 +360,18 @@ mod tests {
     }
 
     #[test]
-    fn carries_bbr_and_fec_into_config() {
+    fn carries_fec_into_config() {
         let device = Device::new("uwg0");
-        assert_eq!(device.bbr, None);
         assert_eq!(device.fec, None);
         let config = device.to_config();
-        assert_eq!(config.device.bbr, None);
         assert_eq!(config.device.fec, None);
-        assert!(!config.to_ini(false).contains("BBR"));
         assert!(!config.to_ini(false).contains("FEC"));
 
         let mut device = Device::new("uwg0");
-        device.bbr = Some("on".to_owned());
         device.fec = Some("8:2".to_owned());
         let config = device.to_config();
-        assert_eq!(config.device.bbr.as_deref(), Some("on"));
         assert_eq!(config.device.fec.as_deref(), Some("8:2"));
         let emitted = config.to_ini(false);
-        assert!(emitted.contains("BBR = on\n"));
         assert!(emitted.contains("FEC = 8:2\n"));
     }
 

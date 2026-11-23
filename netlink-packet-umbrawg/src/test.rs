@@ -10,10 +10,9 @@ use netlink_packet_generic::{GenlBuffer, GenlHeader};
 use pretty_assertions::assert_eq;
 
 use crate::{
-    BbrMode, FecMode, UmbrawgAddressFamily, UmbrawgAllowedIp,
-    UmbrawgAllowedIpAttr, UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd,
-    UmbrawgDeviceConfig, UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute,
-    UmbrawgTimeSpec,
+    FecMode, UmbrawgAddressFamily, UmbrawgAllowedIp, UmbrawgAllowedIpAttr,
+    UmbrawgAttribute, UmbrawgCipher, UmbrawgCmd, UmbrawgDeviceConfig,
+    UmbrawgMessage, UmbrawgPeer, UmbrawgPeerAttribute, UmbrawgTimeSpec,
 };
 
 fn roundtrip_msg(msg: UmbrawgMessage) -> UmbrawgMessage {
@@ -964,12 +963,11 @@ fn test_unknown_peer_command_conversion() {
 }
 
 #[test]
-fn test_bbr_fec_roundtrip() {
+fn test_fec_roundtrip() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::SetDevice,
         attributes: vec![
             UmbrawgAttribute::IfName("uwg0".into()),
-            UmbrawgAttribute::Bbr(2),
             UmbrawgAttribute::Fec(crate::attribute::fec_pack(8, 2).unwrap()),
         ],
     };
@@ -978,27 +976,31 @@ fn test_bbr_fec_roundtrip() {
 }
 
 #[test]
-fn test_bbr_wire_format() {
+fn test_reserved_attributes_are_unknown_not_errors() {
     use netlink_packet_core::NlaBuffer;
 
-    for mode in 0..=crate::attribute::BBR_MAX {
-        let attr = UmbrawgAttribute::Bbr(mode);
-        assert_eq!(attr.kind(), 36);
-        assert_eq!(attr.value_len(), 1);
-        let mut buf = vec![0; attr.buffer_len()];
-        attr.emit(&mut buf);
-        // NLA header: len = 5 (4 header + 1 payload), kind = 36, then the u8
-        // payload zero-padded to 4-byte alignment.
-        assert_eq!(buf[..4], [0x05, 0x00, 0x24, 0x00]);
-        assert_eq!(buf[4], mode);
-        let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).unwrap();
-        assert_eq!(parsed, UmbrawgAttribute::Bbr(mode));
-    }
+    let removed = nla(36, &[2]);
+    let parsed = UmbrawgAttribute::parse(&NlaBuffer::new(&removed)).unwrap();
+    assert_eq!(parsed.kind(), 36);
+    assert!(matches!(parsed, UmbrawgAttribute::Other(_)));
 
-    let attr = UmbrawgAttribute::Bbr(3);
-    let mut buf = vec![0; attr.buffer_len()];
-    attr.emit(&mut buf);
-    assert!(UmbrawgAttribute::parse(&NlaBuffer::new(&buf)).is_err());
+    let removed_stats = nla(39 | 0x8000, &nla(1, &[2]));
+    let parsed =
+        UmbrawgAttribute::parse(&NlaBuffer::new(&removed_stats)).unwrap();
+    assert_eq!(parsed.kind(), 39 | 0x8000);
+    assert!(matches!(parsed, UmbrawgAttribute::Other(_)));
+
+    let mut raw = Vec::new();
+    raw.extend_from_slice(&nla(36, &[2]));
+    raw.extend_from_slice(&nla(39 | 0x8000, &nla(1, &[2])));
+    let message =
+        UmbrawgMessage::parse_with_param(&raw, get_device_header()).unwrap();
+    assert_eq!(message.attributes.len(), 2);
+    assert!(message
+        .attributes
+        .iter()
+        .all(|attribute| matches!(attribute, UmbrawgAttribute::Other(_))));
+    assert!(UmbrawgDeviceConfig::from_message(&message).is_ok());
 }
 
 #[test]
@@ -1066,20 +1068,6 @@ fn test_fec_pack_and_unpack() {
 }
 
 #[test]
-fn test_bbr_mode_conversions() {
-    assert_eq!(BbrMode::Off.as_u8(), 0);
-    assert_eq!(BbrMode::Monitor.as_u8(), 1);
-    assert_eq!(BbrMode::On.as_u8(), crate::attribute::BBR_MAX);
-    for mode in [BbrMode::Off, BbrMode::Monitor, BbrMode::On] {
-        assert_eq!(BbrMode::from_u8(mode.as_u8()), Some(mode));
-        assert_eq!(u8::from(mode), mode.as_u8());
-    }
-    for value in 3..=u8::MAX {
-        assert_eq!(BbrMode::from_u8(value), None);
-    }
-}
-
-#[test]
 fn test_fec_mode_conversions() {
     assert_eq!(FecMode::Off.to_u32(), Some(0));
     assert_eq!(FecMode::Adaptive.to_u32(), Some(1));
@@ -1135,7 +1123,7 @@ fn get_device_header() -> GenlHeader {
 }
 
 #[test]
-fn test_parse_fec_and_bbr_stats() {
+fn test_parse_fec_stats() {
     let fec = crate::FecStats {
         blocks_encoded: 1,
         shards_sent: 2,
@@ -1144,17 +1132,6 @@ fn test_parse_fec_and_bbr_stats() {
         decode_fail: 5,
         dropped_bounds: 6,
         dropped_disabled: 7,
-    };
-    let bbr = crate::BbrStats {
-        mode: 2,
-        cwnd: 131_072,
-        inflight: 4096,
-        pacing_rate: 1_000_000,
-        btl_bw: 2_000_000,
-        min_rtt_ns: 12_345,
-        round_lost: 8,
-        peers: 9,
-        peers_no_ack: 1,
     };
 
     let mut fec_buf = Vec::new();
@@ -1169,35 +1146,12 @@ fn test_parse_fec_and_bbr_stats() {
     ] {
         fec_buf.extend_from_slice(&nla(kind, &value.to_le_bytes()));
     }
-    let mut bbr_buf = Vec::new();
-    bbr_buf.extend_from_slice(&nla(1, &[bbr.mode]));
-    for (kind, value) in [
-        (2u16, bbr.cwnd),
-        (3, bbr.inflight),
-        (4, bbr.pacing_rate),
-        (5, bbr.btl_bw),
-        (6, bbr.min_rtt_ns),
-    ] {
-        bbr_buf.extend_from_slice(&nla(kind, &value.to_le_bytes()));
-    }
-    for (kind, value) in [
-        (7u16, bbr.round_lost),
-        (8, bbr.peers),
-        (9, bbr.peers_no_ack),
-    ] {
-        bbr_buf.extend_from_slice(&nla(kind, &value.to_le_bytes()));
-    }
 
-    let mut raw = Vec::new();
-    raw.extend_from_slice(&nla(38 | 0x8000, &fec_buf));
-    raw.extend_from_slice(&nla(39 | 0x8000, &bbr_buf));
+    let raw = nla(38 | 0x8000, &fec_buf);
 
     let expected = UmbrawgMessage {
         cmd: UmbrawgCmd::GetDevice,
-        attributes: vec![
-            UmbrawgAttribute::FecStats(fec),
-            UmbrawgAttribute::BbrStats(bbr),
-        ],
+        attributes: vec![UmbrawgAttribute::FecStats(fec)],
     };
     let parsed =
         UmbrawgMessage::parse_with_param(&raw, get_device_header()).unwrap();
@@ -1209,7 +1163,7 @@ fn test_parse_fec_and_bbr_stats() {
 }
 
 #[test]
-fn test_fec_and_bbr_stats_roundtrip() {
+fn test_fec_stats_roundtrip() {
     let msg = UmbrawgMessage {
         cmd: UmbrawgCmd::GetDevice,
         attributes: vec![
@@ -1223,17 +1177,6 @@ fn test_fec_and_bbr_stats_roundtrip() {
                 dropped_bounds: 4,
                 dropped_disabled: 5,
             }),
-            UmbrawgAttribute::BbrStats(crate::BbrStats {
-                mode: 1,
-                cwnd: 0,
-                inflight: 2,
-                pacing_rate: 3,
-                btl_bw: 4,
-                min_rtt_ns: 5,
-                round_lost: u32::MAX,
-                peers: 0,
-                peers_no_ack: 3,
-            }),
         ],
     };
 
@@ -1246,10 +1189,10 @@ fn test_stats_attributes_absent_from_set_device_and_ignored() {
         cmd: UmbrawgCmd::GetDevice,
         attributes: vec![UmbrawgAttribute::IfName("uwg0".into())],
     };
-    assert!(msg.attributes.iter().all(|attr| !matches!(
-        attr,
-        UmbrawgAttribute::FecStats(_) | UmbrawgAttribute::BbrStats(_)
-    )));
+    assert!(msg
+        .attributes
+        .iter()
+        .all(|attr| !matches!(attr, UmbrawgAttribute::FecStats(_))));
     assert!(UmbrawgDeviceConfig::from_message(&msg).is_ok());
 }
 
@@ -1272,43 +1215,10 @@ fn test_stats_nested_attribute_unknown_fields_are_ignored() {
 }
 
 #[test]
-fn test_bbr_stats_nested_unknown_fields_are_ignored() {
-    let mut bbr_buf = Vec::new();
-    bbr_buf.extend_from_slice(&nla(1, &[2]));
-    bbr_buf.extend_from_slice(&nla(8, &7u32.to_le_bytes()));
-    bbr_buf.extend_from_slice(&nla(9, &1u32.to_le_bytes()));
-    bbr_buf.extend_from_slice(&nla(99, &[1, 2, 3, 4]));
-    let raw = nla(39 | 0x8000, &bbr_buf);
-
-    let parsed =
-        UmbrawgMessage::parse_with_param(&raw, get_device_header()).unwrap();
-    assert_eq!(
-        parsed.attributes,
-        vec![UmbrawgAttribute::BbrStats(crate::BbrStats {
-            mode: 2,
-            peers: 7,
-            peers_no_ack: 1,
-            ..crate::BbrStats::default()
-        })]
-    );
-}
-
-#[test]
 fn test_truncated_stats_payload_is_rejected() {
     let mut fec_buf = Vec::new();
     fec_buf.extend_from_slice(&nla(1, &[1, 2, 3, 4]));
     let raw = nla(38 | 0x8000, &fec_buf);
-    assert!(
-        UmbrawgMessage::parse_with_param(&raw, get_device_header()).is_err()
-    );
-
-    let bbr_buf = nla(7, &[1, 2]);
-    let raw = nla(39 | 0x8000, &bbr_buf);
-    assert!(
-        UmbrawgMessage::parse_with_param(&raw, get_device_header()).is_err()
-    );
-
-    let raw = nla(39 | 0x8000, &nla(1, &[3]));
     assert!(
         UmbrawgMessage::parse_with_param(&raw, get_device_header()).is_err()
     );

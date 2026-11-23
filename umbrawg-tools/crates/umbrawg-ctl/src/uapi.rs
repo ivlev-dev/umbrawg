@@ -7,7 +7,7 @@ use tokio::net::UnixStream;
 use umbrawg_config::{format_endpoint, parse_endpoint, AllowedIp, Cipher, Key, U16Range, U32Range};
 
 use crate::error::Error;
-use crate::model::{BbrStats, Device, FecStats, Peer, SetDevice};
+use crate::model::{Device, FecStats, Peer, SetDevice};
 
 pub const DEFAULT_SOCKET_DIR: &str = "/var/run/umbrawg";
 pub const SOCKET_SUFFIX: &str = ".sock";
@@ -124,9 +124,6 @@ pub fn build_set_request(config: &SetDevice) -> Result<String, Error> {
     }
     if let Some(fwmark) = device.fwmark {
         write_line(&mut output, "fwmark", &fwmark.to_string())?;
-    }
-    if let Some(bbr) = &device.bbr {
-        write_line(&mut output, "bbr", bbr)?;
     }
     if let Some(fec) = &device.fec {
         write_line(&mut output, "fec", fec)?;
@@ -302,56 +299,8 @@ fn apply_device_line(device: &mut Device, key: &str, value: &str) -> Result<(), 
         "listen_port" => device.listen_port = parse_u16(key, value)?,
         "extra_ports" => device.extra_ports = Some(parse_extra_ports(key, value)?),
         "fwmark" => device.fwmark = parse_u32(key, value)?,
-        "bbr" => device.bbr = Some(parse_mode_text(key, value)?),
         "fec" => device.fec = Some(parse_mode_text(key, value)?),
         "underlay_mtu" => device.underlay_mtu = Some(parse_u16(key, value)?),
-        "bbr_stats" => device.bbr_stats = Some(BbrStats::default()),
-        "bbr_mode" => {
-            device.bbr_stats.get_or_insert_with(BbrStats::default).mode =
-                parse_bbr_mode(key, value)?;
-        }
-        "bbr_cwnd" => {
-            device.bbr_stats.get_or_insert_with(BbrStats::default).cwnd = parse_u64(key, value)?;
-        }
-        "bbr_inflight" => {
-            device
-                .bbr_stats
-                .get_or_insert_with(BbrStats::default)
-                .inflight = parse_u64(key, value)?;
-        }
-        "bbr_pacing_rate" => {
-            device
-                .bbr_stats
-                .get_or_insert_with(BbrStats::default)
-                .pacing_rate = parse_u64(key, value)?;
-        }
-        "bbr_btl_bw" => {
-            device
-                .bbr_stats
-                .get_or_insert_with(BbrStats::default)
-                .btl_bw = parse_u64(key, value)?;
-        }
-        "bbr_min_rtt_ns" => {
-            device
-                .bbr_stats
-                .get_or_insert_with(BbrStats::default)
-                .min_rtt_ns = parse_u64(key, value)?;
-        }
-        "bbr_round_lost" => {
-            device
-                .bbr_stats
-                .get_or_insert_with(BbrStats::default)
-                .round_lost = parse_u32(key, value)?;
-        }
-        "bbr_peers" => {
-            device.bbr_stats.get_or_insert_with(BbrStats::default).peers = parse_u32(key, value)?;
-        }
-        "bbr_peers_no_ack" => {
-            device
-                .bbr_stats
-                .get_or_insert_with(BbrStats::default)
-                .peers_no_ack = parse_u32(key, value)?;
-        }
         "fec_stats" => device.fec_stats = Some(FecStats::default()),
         "fec_blocks_encoded" => {
             device
@@ -567,23 +516,6 @@ fn parse_u16(key: &str, value: &str) -> Result<u16, Error> {
         .map_err(|_| Error::Protocol(format!("invalid {key}: `{value}`")))
 }
 
-fn parse_bbr_mode(key: &str, value: &str) -> Result<u8, Error> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "off" => Ok(0),
-        "monitor" => Ok(1),
-        "on" => Ok(2),
-        other => {
-            let mode = other
-                .parse::<u8>()
-                .map_err(|_| Error::Protocol(format!("invalid {key}: `{value}`")))?;
-            if mode > 2 {
-                return Err(Error::Protocol(format!("invalid {key}: `{value}`")));
-            }
-            Ok(mode)
-        }
-    }
-}
-
 fn parse_mode_text(key: &str, value: &str) -> Result<String, Error> {
     let value = value.trim();
     if value.is_empty() {
@@ -662,7 +594,6 @@ private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 extra_ports=4
 fwmark=4660
-bbr=monitor
 fec=adaptive
 underlay_mtu=1500
 jc=4
@@ -686,16 +617,6 @@ keepalive_timeout=10
 max_handshake_attempts=7
 random_trailers=1
 disable_cookies=0
-bbr_stats=1
-bbr_mode=monitor
-bbr_cwnd=131072
-bbr_inflight=4096
-bbr_pacing_rate=1000000
-bbr_btl_bw=2000000
-bbr_min_rtt_ns=12345
-bbr_round_lost=8
-bbr_peers=1
-bbr_peers_no_ack=2
 fec_stats=1
 fec_blocks_encoded=10
 fec_shards_sent=12
@@ -728,7 +649,6 @@ errno=0
         device.device.listen_port = Some(51820);
         device.device.extra_ports = Some(4);
         device.device.fwmark = Some(0);
-        device.device.bbr = Some("on".to_owned());
         device.device.fec = Some("8:2".to_owned());
         device.device.obfuscation.jc = Some(4);
         device.device.obfuscation.jmin = Some(40);
@@ -772,23 +692,8 @@ errno=0
         assert_eq!(device.listen_port, 51820);
         assert_eq!(device.extra_ports, Some(4));
         assert_eq!(device.fwmark, 4660);
-        assert_eq!(device.bbr.as_deref(), Some("monitor"));
         assert_eq!(device.fec.as_deref(), Some("adaptive"));
         assert_eq!(device.underlay_mtu, Some(1500));
-        assert_eq!(
-            device.bbr_stats,
-            Some(BbrStats {
-                mode: 1,
-                cwnd: 131_072,
-                inflight: 4096,
-                pacing_rate: 1_000_000,
-                btl_bw: 2_000_000,
-                min_rtt_ns: 12_345,
-                round_lost: 8,
-                peers: 1,
-                peers_no_ack: 2,
-            })
-        );
         assert_eq!(
             device.fec_stats,
             Some(FecStats {
@@ -831,16 +736,10 @@ errno=0
     fn parses_stats_only_when_reported() {
         let device =
             parse_get_response("listen_port=51820\nerrno=0\n\n", "test0").expect("valid response");
-        assert_eq!(device.bbr_stats, None);
         assert_eq!(device.fec_stats, None);
 
-        assert!(parse_get_response("bbr_mode=maybe\nerrno=0\n\n", "test0").is_err());
-        assert!(parse_get_response("bbr_cwnd=abc\nerrno=0\n\n", "test0").is_err());
         assert!(parse_get_response("fec_shards_sent=-1\nerrno=0\n\n", "test0").is_err());
 
-        let device =
-            parse_get_response("bbr_stats=1\nbbr_mode=on\nerrno=0\n\n", "test0").expect("valid");
-        assert_eq!(device.bbr_stats.expect("bbr stats").mode, 2);
         let device = parse_get_response(
             "fec_stats=1\nfec_dropped_disabled=9\nfec_dropped_control=7\nerrno=0\n\n",
             "test0",
@@ -899,31 +798,18 @@ errno=0
     }
 
     #[test]
-    fn sends_bbr_and_fec_to_the_daemon() {
+    fn sends_fec_to_the_daemon() {
         let mut config = set_device();
         let request = build_set_request(&config).expect("valid request");
-        assert!(request.contains("bbr=on\n"));
         assert!(request.contains("fec=8:2\n"));
 
-        config.device.bbr = None;
         config.device.fec = None;
         let request = build_set_request(&config).expect("valid request");
-        assert!(!request.contains("bbr="));
         assert!(!request.contains("fec="));
     }
 
     #[test]
-    fn parses_bbr_and_fec_from_get_response() {
-        for (value, expected) in [
-            ("off", "off"),
-            ("monitor", "monitor"),
-            ("on", "on"),
-            ("ON", "on"),
-        ] {
-            let device = parse_get_response(&format!("bbr={value}\nerrno=0\n\n"), "test0")
-                .expect("valid response");
-            assert_eq!(device.bbr.as_deref(), Some(expected), "{value}");
-        }
+    fn parses_fec_from_get_response() {
         for (value, expected) in [
             ("off", "off"),
             ("adaptive", "adaptive"),
@@ -936,17 +822,14 @@ errno=0
         }
         let device =
             parse_get_response("listen_port=51820\nerrno=0\n\n", "test0").expect("valid response");
-        assert_eq!(device.bbr, None);
         assert_eq!(device.fec, None);
-        assert!(parse_get_response("bbr=\nerrno=0\n\n", "test0").is_err());
         assert!(parse_get_response("fec=\nerrno=0\n\n", "test0").is_err());
     }
 
     #[test]
-    fn showconf_round_trips_bbr_and_fec() {
+    fn showconf_round_trips_fec() {
         let device = parse_get_response(GET_RESPONSE, "test0").expect("valid response");
         let output = device.to_config().to_ini(false);
-        assert!(output.contains("BBR = monitor\n"));
         assert!(output.contains("FEC = adaptive\n"));
 
         let device =
@@ -1097,7 +980,6 @@ errno=0
         assert!(request.contains("listen_port=51820\n"));
         assert!(request.contains("extra_ports=4\n"));
         assert!(request.contains("fwmark=0\n"));
-        assert!(request.contains("bbr=on\n"));
         assert!(request.contains("fec=8:2\n"));
         assert!(request.contains("replace_peers=true\n"));
         assert!(request.contains("h1=61220074-118999195\n"));

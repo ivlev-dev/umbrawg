@@ -137,10 +137,18 @@ pub const UWGALLOWEDIP_F_REMOVE_ME: u32 = 1 << 0;
 /// [`FecStats`](crate::FecStats).
 pub const UWGDEVICE_A_FEC_STATS: u16 = 38;
 
-/// `UWGDEVICE_A_BBR_STATS`: nested device-wide BBR state.
+/// Reserved attribute number of the removed `UWGDEVICE_A_BBR`.
 ///
-/// Read-only attribute of `UWG_CMD_GET_DEVICE` replies; see
-/// [`BbrStats`](crate::BbrStats).
+/// BBR was removed in 0.5.0. The number stays reserved and is not reused;
+/// replies from older kernels carrying this attribute are parsed as unknown
+/// attributes instead of failing.
+pub const UWGDEVICE_A_BBR: u16 = 36;
+
+/// Reserved attribute number of the removed `UWGDEVICE_A_BBR_STATS`.
+///
+/// BBR statistics were removed in 0.5.0. The number stays reserved and is not
+/// reused; replies from older kernels carrying this nested attribute are
+/// parsed as an unknown attribute instead of failing.
 pub const UWGDEVICE_A_BBR_STATS: u16 = 39;
 
 /// `UWGDEVICE_A_UNDERLAY_MTU`: `u16` MTU of the path between the peers,
@@ -175,39 +183,3 @@ pub const UWGDEVICE_FEC_STATS_A_DROPPED_BOUNDS: u16 = 6;
 /// `UWGDEVICE_FEC_STATS_A_DROPPED_DISABLED`: `u64` count of shards dropped
 /// because FEC was disabled.
 pub const UWGDEVICE_FEC_STATS_A_DROPPED_DISABLED: u16 = 7;
-
-/// `UWGDEVICE_BBR_STATS_A_MODE`: `u8` BBR mode (`0` off, `1` monitor,
-/// `2` on).
-pub const UWGDEVICE_BBR_STATS_A_MODE: u16 = 1;
-
-/// `UWGDEVICE_BBR_STATS_A_CWND`: `u64` congestion window in bytes.
-pub const UWGDEVICE_BBR_STATS_A_CWND: u16 = 2;
-
-/// `UWGDEVICE_BBR_STATS_A_INFLIGHT`: `u64` bytes in flight.
-pub const UWGDEVICE_BBR_STATS_A_INFLIGHT: u16 = 3;
-
-/// `UWGDEVICE_BBR_STATS_A_PACING_RATE`: `u64` pacing rate in bytes per
-/// second.
-pub const UWGDEVICE_BBR_STATS_A_PACING_RATE: u16 = 4;
-
-/// `UWGDEVICE_BBR_STATS_A_BTL_BW`: `u64` bottleneck bandwidth estimate in
-/// bytes per second.
-pub const UWGDEVICE_BBR_STATS_A_BTL_BW: u16 = 5;
-
-/// `UWGDEVICE_BBR_STATS_A_MIN_RTT_NS`: `u64` minimal round-trip time in
-/// nanoseconds.
-pub const UWGDEVICE_BBR_STATS_A_MIN_RTT_NS: u16 = 6;
-
-/// `UWGDEVICE_BBR_STATS_A_ROUND_LOST`: `u32` packets lost in the current
-/// round.
-pub const UWGDEVICE_BBR_STATS_A_ROUND_LOST: u16 = 7;
-
-/// `UWGDEVICE_BBR_STATS_A_PEERS`: `u32` number of peers tracked by BBR.
-pub const UWGDEVICE_BBR_STATS_A_PEERS: u16 = 8;
-
-/// `UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK`: `u32` number of peers that do not
-/// advertise ACK support in CAPS.
-///
-/// BBR is not applied to these peers and their state is excluded from the
-/// aggregates above.
-pub const UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK: u16 = 9;
