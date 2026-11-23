@@ -1,3 +1,11 @@
+umbrawg-linux-kmod (1:0.5.1-1) unstable; urgency=medium
+
+  * Fix TCP out-of-order/retransmits on a clean path.
+  * Add receiver loss reports and CAPS FEC_FEEDBACK for one-way adaptive FEC.
+  * Segment GSO before FEC so full-size TCP is protected.
+
+ -- Alex Ivlev <ai@itegroup.ru>  Mon, 23 Nov 2026 17:00:00 +0300
+
 umbrawg-linux-kmod (1:0.5.0-1) unstable; urgency=medium
 
   * Удаление BBR/ACK, FEC adaptive по умолчанию.

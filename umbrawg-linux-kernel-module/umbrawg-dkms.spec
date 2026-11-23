@@ -1,8 +1,8 @@
 %global debug_package %{nil}
-%global upstream_version 0.5.0
+%global upstream_version 0.5.1
 
 Name:           umbrawg-dkms
-Version:        0.5.0
+Version:        0.5.1
 Release:        1%{?dist}
 Epoch:          1
 URL:            https://github.com/ivlev-dev/umbrawg
@@ -86,6 +86,9 @@ exit 0
 %{_usrsrc}/umbrawg-%{version}
 
 %changelog
+* Mon Nov 23 2026 Yuri Egorov <ye@umbra.org> - 0.5.1-1
+- 0.5.1: loss-report, GSO ordering/FEC fixes
+
 * Mon Nov 23 2026 Yuri Egorov <ye@umbra.org> - 0.5.0-1
 - Remove BBR/ACK; FEC adaptive by default
 

@@ -1,5 +1,5 @@
 Name:           umbrawg-tools
-Version:        0.5.0
+Version:        0.5.1
 Release:        1%{?dist}
 Summary:        Rust command-line tools for the UmbraWG VPN
 License:        GPL-2.0-only
@@ -77,6 +77,9 @@ install -d -m0700 %{buildroot}%{_sysconfdir}/umbrawg
 %{_unitdir}/umbrawg@.service
 
 %changelog
+* Mon Nov 23 2026 Yuri Egorov <ye@umbra.org> - 0.5.1-1
+- 0.5.1: loss-report, GSO ordering/FEC fixes
+
 * Mon Nov 23 2026 Yuri Egorov <ye@umbra.org> - 0.5.0-1
 - Remove bbr/bbr-stats; FEC adaptive by default
 

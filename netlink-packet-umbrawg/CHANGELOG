@@ -1,4 +1,8 @@
 # Changelog
+## [0.5.1] — 2026-11-23
+### Changed
+ - Version aligned with the 0.5.1 release; wire attributes unchanged.
+
 ## [0.5.0] — 2026-11-23
 ### Removed
  - BBR support: `UmbrawgAttribute::Bbr`/`BbrStats`, the `BbrMode` type,

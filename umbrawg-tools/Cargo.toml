@@ -8,16 +8,16 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2021"
 rust-version = "1.85"
 license = "GPL-2.0-only"
 repository = "https://github.com/ivlev-dev/umbrawg/tree/master/umbrawg-tools"
 
 [workspace.dependencies]
-umbrawg-config = { version = "0.5.0", path = "crates/umbrawg-config" }
-umbrawg-ctl = { version = "0.5.0", path = "crates/umbrawg-ctl" }
-netlink-packet-umbrawg = { version = "0.5.0", path = "../netlink-packet-umbrawg" }
+umbrawg-config = { version = "0.5.1", path = "crates/umbrawg-config" }
+umbrawg-ctl = { version = "0.5.1", path = "crates/umbrawg-ctl" }
+netlink-packet-umbrawg = { version = "0.5.1", path = "../netlink-packet-umbrawg" }
 netlink-packet-generic = "0.4"
 netlink-packet-core = "0.8"
 netlink-proto = "0.12"
