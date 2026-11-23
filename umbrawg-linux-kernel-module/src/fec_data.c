@@ -42,6 +42,8 @@ struct uwg_fec_tx {
 	u64 adaptive_base;
 	u64 adaptive_received;
 	u64 adaptive_observed;
+	u64 adaptive_tx_now;
+	u64 adaptive_tx_mark;
 	u32 adaptive_loss_q16;
 	unsigned long adaptive_clean_since;
 	unsigned long adaptive_segment_start;
@@ -301,6 +303,7 @@ static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter,
 	tx->adaptive_base = counter;
 	tx->adaptive_received = 1;
 	tx->adaptive_observed = 0;
+	tx->adaptive_tx_mark = tx->adaptive_tx_now;
 	tx->adaptive_loss_q16 = 0;
 	tx->adaptive_have_sample = false;
 	tx->adaptive_clean_since = 0;
@@ -310,7 +313,7 @@ static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter,
 static bool uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 					    u64 keypair_id, unsigned long now)
 {
-	u64 expected, lost, loss_q16;
+	u64 expected, lost, loss_q16, tx_delta;
 	bool changed = false;
 
 	/* The transport counter restarts at zero with every new keypair. The
@@ -370,9 +373,19 @@ static bool uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 	tx->adaptive_base = tx->adaptive_largest + 1;
 	tx->adaptive_received = 0;
 	tx->adaptive_segment_start = now;
+	/* Arming FEC on a direction that only carries inner TCP ACKs makes
+	 * the clean reverse path pay 50 % parity for nothing and steals
+	 * bandwidth from the data direction. Require a data-sized average
+	 * packet in this direction; zero keeps the historical behaviour for
+	 * the in-kernel self-tests.
+	 */
+	tx_delta = tx->adaptive_tx_now - tx->adaptive_tx_mark;
+	tx->adaptive_tx_mark = tx->adaptive_tx_now;
 	if (!tx->adaptive_on) {
 		if (tx->adaptive_observed >= 1024 &&
-		    tx->adaptive_loss_q16 > 655) {
+		    tx->adaptive_loss_q16 > 655 &&
+		    (!tx->adaptive_tx_now ||
+		     tx_delta >= (u64)expected * 256)) {
 			tx->adaptive_on = true;
 			changed = true;
 			/* Stale clean time from before the switch would make
@@ -410,6 +423,7 @@ void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter,
 	if (!tx || !tx->adaptive)
 		goto out;
 	spin_lock_bh(&tx->lock);
+	tx->adaptive_tx_now = atomic64_read(&peer->tx_bytes);
 	changed = uwg_fec_adaptive_observe_locked(tx, counter, keypair_id,
 						  jiffies);
 	spin_unlock_bh(&tx->lock);
@@ -1563,6 +1577,38 @@ static bool uwg_fec_adaptive_selftest(void)
 	now += HZ;
 	uwg_fec_adaptive_observe_locked(&tx, 4097, 2, now);
 	A_CHECK(!tx.adaptive_on);
+
+	/* The reverse direction of a download carries only small TCP ACKs.
+	 * Arming FEC there would spend 50 % parity on a clean path and steal
+	 * bandwidth from the data direction, so ACK-sized TX must stay off
+	 * even with 2 % loss on the incoming stream.
+	 */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	uwg_fec_adaptive_observe_locked(&tx, 0, 1, now);
+	for (i = 1; i <= 4096; i++) {
+		tx.adaptive_tx_now += 60;
+		if (i % 50)
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+	}
+	now += HZ;
+	tx.adaptive_tx_now += 60;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now);
+	A_CHECK(!tx.adaptive_on);
+
+	/* The same loss with data-sized TX must arm. */
+	memset(&tx, 0, sizeof(tx));
+	tx.adaptive = true;
+	uwg_fec_adaptive_observe_locked(&tx, 0, 1, now);
+	for (i = 1; i <= 4096; i++) {
+		tx.adaptive_tx_now += 1000;
+		if (i % 50)
+			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+	}
+	now += HZ;
+	tx.adaptive_tx_now += 1000;
+	uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now);
+	A_CHECK(tx.adaptive_on);
 
 #undef A_CHECK
 	return ok;
