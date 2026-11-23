@@ -470,6 +470,10 @@ bring_up_addrs() {
     ip -n "$NS1" addr add 10.9.0.2/24 dev "$IF1"
     ip -n "$NS0" link set "$IF0" mtu "$TUN_MTU" up
     ip -n "$NS1" link set "$IF1" mtu "$TUN_MTU" up
+    if [ -n "${TCP_REORDERING:-}" ]; then
+        ip netns exec "$NS0" sysctl -qw "net.ipv4.tcp_reordering=$TCP_REORDERING" || true
+        ip netns exec "$NS1" sysctl -qw "net.ipv4.tcp_reordering=$TCP_REORDERING" || true
+    fi
     if [ "${TUN_GSO:-1}" = "0" ]; then
         ip netns exec "$NS0" ethtool -K "$IF0" gso off tso off gro off tx off 2>/dev/null || true
         ip netns exec "$NS1" ethtool -K "$IF1" gso off tso off gro off tx off 2>/dev/null || true
@@ -496,6 +500,7 @@ start_impl() {
             fi
             modprobe udp_tunnel || return 1
             modprobe ip6_udp_tunnel || return 1
+            modprobe libcurve25519 2>/dev/null || true
             # shellcheck disable=SC2086
             insmod "$MODDIR/umbrawg.ko" ${MODULE_PARAMS:-} || return 1
             WE_INSMOD_UMBRAWG=1
