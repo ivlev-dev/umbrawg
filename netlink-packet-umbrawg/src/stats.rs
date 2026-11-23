@@ -134,8 +134,7 @@ impl<T: AsRef<[u8]> + ?Sized> Parseable<NlaBuffer<&T>> for FecStats {
                 }
                 UWGDEVICE_FEC_STATS_A_PACKETS_RECOVERED => {
                     stats.packets_recovered = parse_u64(payload).context(
-                        "invalid UWGDEVICE_FEC_STATS_A_PACKETS_RECOVERED \
-                         value",
+                        "invalid UWGDEVICE_FEC_STATS_A_PACKETS_RECOVERED value",
                     )?;
                 }
                 UWGDEVICE_FEC_STATS_A_DECODE_FAIL => {

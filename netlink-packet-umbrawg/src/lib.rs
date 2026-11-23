@@ -45,9 +45,8 @@
 //! - `HeaderProtectionKey` is exactly 32 bytes.
 //! - With a header protection key configured, the kernel requires `S1`..`S4` to
 //!   be at least [`HEADER_PROTECTION_NONCE_LEN`] bytes.
-//! - `Fec` is a `u32` payload (`0` off, `1` adaptive, otherwise
-//!   `(K << 8) | M`). The builders accept [`FecMode`] and convert it to this
-//!   payload.
+//! - `Fec` is a `u32` payload (`0` off, `1` adaptive, otherwise `(K << 8) |
+//!   M`). The builders accept [`FecMode`] and convert it to this payload.
 //!
 //! # Building a configuration
 //!

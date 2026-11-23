@@ -392,6 +392,7 @@ MaxHandshakeAttempts = 18
 RandomTrailers = on
 DisableCookies = off
 FEC = off
+UnderlayMTU = 1500
 
 [Peer]
 PublicKey = $PEER1_PUB
