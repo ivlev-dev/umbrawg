@@ -379,6 +379,15 @@ static inline int uwg_queue_produce_crypt(struct crypt_queue *device_queue,
 	return -EPIPE;
 }
 
+static inline unsigned int uwg_crypt_cpu_for_peer(struct uwg_peer *peer)
+{
+	unsigned int cpu = hash_ptr(peer, 8) % num_possible_cpus();
+
+	if (unlikely(!cpu_online(cpu)))
+		cpu = cpumask_first(cpu_online_mask);
+	return cpu;
+}
+
 static inline int uwg_queue_enqueue_per_device_and_peer(
 	struct crypt_queue *device_queue, struct prev_queue *peer_queue,
 	struct sk_buff *skb, struct workqueue_struct *wq)
@@ -409,16 +418,20 @@ static inline int uwg_queue_enqueue_per_device_and_peer(
 	 * local ring is full the skb spills to another CPU instead of being
 	 * dropped, which is rare enough not to affect the batching above.
 	 */
-	cpu = get_cpu();
+	/* Pin the whole peer to one queue. Selecting by the producing CPU
+	 * lets the same peer land on different queues (softirq migration,
+	 * GSO segmentation, qdisc), and chains encrypted on different CPUs
+	 * overtake each other. Inner TCP then sees out-of-order packets and
+	 * retransmits on a clean path. A stable per-peer queue keeps the
+	 * order while still spreading different peers across CPUs.
+	 */
+	cpu = uwg_crypt_cpu_for_peer(PACKET_PEER(skb));
 	worker = per_cpu_ptr(device_queue->worker, cpu);
 	if (unlikely(uwg_queue_produce_crypt(device_queue, worker, skb, cpu,
-					     wq))) {
-		put_cpu();
+					     wq)))
 		return -EPIPE;
-	}
-	/* The single flow that backs up its ring gets idle CPUs to help. */
+	/* A peer that backs up its ring gets idle CPUs to help. */
 	uwg_crypt_maybe_steal(device_queue, peer_queue, cpu, wq);
-	put_cpu();
 	return 0;
 }
 
