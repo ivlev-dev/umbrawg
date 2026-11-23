@@ -218,6 +218,115 @@ kfec rfec loss` и проверки `chk_cmp`/`chk_ping`/`chk_frag`), строк
 перезагрузкой модуля — дольше. Перед длинным прогоном всегда смотрите
 `PLAN_ONLY=1`.
 
+## Память (mem-matrix.sh)
+
+`bench/mem-matrix.sh` сравнивает потребление памяти четырёх реализаций на
+отдельной топологии: два netns `mem0`/`mem1`, veth `mveth0`/`mveth1`,
+интерфейсы `uwgm0`/`uwgm1`, underlay-порты `54820`/`54821` и iperf3-порт
+`5401`. Стенд эксклюзивный: скрипт берёт тот же flock, что и `bench.sh`, и
+отказывается стартовать при чужих модулях, netns
+(`bn0`/`bn1`/`mem0`/`mem1`/`xwg0`/`xwg1`), `iperf3` или load average выше
+`IDLE_LOAD_MAX` (обход — `FORCE=1`).
+
+```bash
+PLAN_ONLY=1 bash bench/mem-matrix.sh
+sudo IMPL_LIST="kernel-umbrawg rust" FEC_LIST="off 2:1" PEERS_LIST="1 16" \
+     LOAD_LIST=idle OBF_LIST=0 REPEATS=1 bash bench/mem-matrix.sh
+sudo IMPL_LIST=go PEERS_LIST=4 LOAD_LIST="idle tcp" bash bench/mem-matrix.sh
+```
+
+По умолчанию матрица — 240 прогонов (60 ячеек × 2 повтора × idle/tcp); при
+`RUN=5 SETTLE=2` это около 20 минут. Перед длинным прогоном смотрите
+`PLAN_ONLY=1`.
+
+| Переменная | По умолчанию | Смысл |
+|---|---|---|
+| `IMPL_LIST` | `kernel-umbrawg kernel-amneziawg rust go` | реализации |
+| `FEC_LIST` | `off adaptive 2:1 8:2` | FEC для `kernel-umbrawg`/`rust`; у AWG/go всегда `none` |
+| `PEERS_LIST` | `1 4 16` | пиров на устройство (включая endpoint-пира) |
+| `LOAD_LIST` | `idle tcp` | простой или TCP-нагрузка через iperf3 |
+| `OBF_LIST` | `0 1` | профиль обфускации из `OBF` |
+| `REPEATS` | 2 | повторов каждой ячейки |
+| `SETTLE` | 2 | пауза после поднятия туннеля перед снятием, с |
+| `RUN` | 5 | длительность TCP-нагрузки, с |
+| `UNDERLAY_MTU` / `TUN_MTU` | 9000 / 1420 | MTU veth и туннеля |
+| `FORCE` / `IDLE_LOAD_MAX` | 0 / 1.0 | обход проверки занятости |
+| `UWG`, `DAEMON`, `GO_BASELINE`, `AWG`, `MODDIR`, `OBF` | пути репозитория | бинарники и профиль |
+| `OUT`, `DIAG`, `LOG_DIR`, `RUN_ID` | `bench/tmp/mem-*` | артефакты |
+
+FEC применяется как в `wire-ext.sh`: для `rust` — env `UMBRAWG_FEC` и
+`FEC =` в конфиге, для `kernel-umbrawg` — `FEC =` и
+`uwg set <if> fec ...` после `setconf`. У AWG/go FEC нет, поэтому `FEC_LIST`
+не размножает их строки: в CSV у них `fec=none`.
+
+### Метрики
+
+Для userspace (`rust`, `go`) после `SETTLE` и во время iperf3 снимаются
+`/proc/<pid>/status` (`VmRSS`, `VmHWM`) и `/proc/<pid>/smaps_rollup`
+(`Pss`, `Private_Dirty`) для обоих демонов. В CSV — сумма и per-process;
+HWM, Private_Dirty и разбивка по pid идут в diag.
+
+Для kernel (`kernel-umbrawg`, `kernel-amneziawg`) снимаются `/proc/meminfo`
+(`Slab`, `SUnreclaim`, `MemAvailable`) и `/proc/slabinfo` в точках:
+
+1. `pre_module` — до загрузки модуля;
+2. `base_pre_ifaces` — после загрузки, до создания интерфейсов (база);
+3. `ifaces_only` — после создания интерфейсов, до пиров;
+4. `row_idle` / `row_tcp` — после `SETTLE` или во время iperf3.
+
+`slab_delta_kb` = Δ`Slab` от `base_pre_ifaces` до точки замера, то есть
+стоимость двух интерфейсов и N пиров; загрузка модуля в дельту не входит, её
+размер и `refcnt` берутся из `lsmod`. `per_peer_kb` = `slab_delta_kb / peers`.
+Для `load=tcp` точка замера — во время iperf3, поэтому в дельту попадают
+транзитные skb/socket-буферы; сравнивать per-peer между реализациями надо по
+`load=idle`. Изменённые кэши `/proc/slabinfo` (включая `kmalloc-*`) пишутся в
+diag; приватные структуры ядра не читаются.
+
+### CSV
+
+`bench/tmp/mem-<RUN_ID>.csv`:
+
+```
+impl,fec,peers,load,obf,repeats,rss_kb_sum,rss_kb_per_proc,pss_kb,slab_delta_kb,per_peer_kb
+```
+
+`repeats` — номер повтора (`1..REPEATS`). Для userspace заполнены
+`rss_kb_sum`, `rss_kb_per_proc` (`rss0/rss1`) и `pss_kb`; для kernel —
+`slab_delta_kb` и `per_peer_kb`; неприменимые поля пустые. Текстового
+`FAIL` в CSV нет: при `SETUP_FAILED`/`LOAD_FAILED` строка остаётся пустой, а
+причина пишется в diag и stdout. В конце печатается сводка (медианы по
+`impl/fec/peers/load/obf`) и число пустых строк. Логи ячеек, slabinfo-снимки
+и `<RUN_ID>.diag` лежат в `bench/tmp/mem-<RUN_ID>/` и рядом с CSV.
+
+### Ограничения
+
+- **Slab-дельта шумная.** Аллокатор округляет до страниц, освобождение
+  отложенное, соседние процессы дают вклад; отрицательные `slab_delta_kb` и
+  `per_peer_kb` — норма, а не ошибка. Порядок величин надёжнее единиц kB.
+- **RSS/PSS точнее для userspace, но не идеальны.** `VmRSS` включает общие
+  страницы (libc, page cache), `Pss` делит их между процессами; оба
+  показывают память, удерживаемую аллокатором/GC, а не только живые данные.
+  У Go заметен GC-резерв, у Rust — арены и пулы.
+- **Для kernel `load=tcp` — другая метрика.** Транзитные аллокации под
+  нагрузкой не масштабируются на число пиров, поэтому `per_peer_kb` сравним
+  только на `idle`.
+- **Один активный peer.** Трафик идёт только через endpoint-пира, остальные
+  N−1 пиров — пассивная конфигурация: их стоимость — структуры peer и
+  AllowedIPs, а не буферы.
+- **`lsmod size` — не память процесса.** Это размер модуля (text/data/bss),
+  он не входит в `slab_delta_kb`.
+- **obf=1 у go/AWG** ограничен тем, что принимает их `setconf`; заглушка
+  обфускации данных у go описана в общем разделе стенда.
+- **Нет CPU-пиннинга и thermal-контроля**, как в `bench.sh`: замеры памяти
+  чувствительны к параллельной нагрузке, поэтому проверка занятости
+  обязательна.
+- Модуль `umbrawg` не переиспользуется: если он уже загружен, ячейки
+  `kernel-umbrawg` пропускаются (`MODULE_ALREADY_LOADED`). `amneziawg`
+  переиспользуется (`MODULE_REUSED`) и не выгружается, если был загружен до
+  старта.
+- По завершении trap удаляет netns, демоны, сокеты и загруженные скриптом
+  модули; `POSTFLIGHT: dirty` и код 4 означают, что что-то осталось.
+
 ## Ключи и секреты
 
 В репозитории нет рабочих ключей: `obf-params.conf` — шаблон, в котором
@@ -656,7 +765,9 @@ interop на раннере покрывает только `rust2-*` (Rust↔Ru
 ```bash
 bash -n bench.sh bench-lib.sh tests/test-bench-lib.sh
 bash -n bench/wire-ext.sh bench/ext-matrix.sh bench/ext-tests.sh
+bash -n bench/mem-matrix.sh
 PLAN_ONLY=1 bash bench/ext-tests.sh
+PLAN_ONLY=1 bash bench/mem-matrix.sh
 bash tests/test-bench-lib.sh
 python3 -m unittest discover -s tests -p 'test_*.py'
 python3 bench/tests/test-detect.py

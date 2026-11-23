@@ -413,8 +413,12 @@ setup_topology() {
 set_loss() {
     local loss=$1
     ip netns exec "$NS0" tc qdisc del dev "$V0" root 2>/dev/null || true
+    ip netns exec "$NS1" tc qdisc del dev "$V1" root 2>/dev/null || true
     if [ "$loss" != "0" ]; then
         ip netns exec "$NS0" tc qdisc add dev "$V0" root netem loss "${loss}%"
+        if [ "${NETEM_BOTH:-0}" = "1" ]; then
+            ip netns exec "$NS1" tc qdisc add dev "$V1" root netem loss "${loss}%"
+        fi
     fi
 }
 
@@ -560,6 +564,14 @@ apply_config() {
             if [ "$rc0" != "0" ]; then echo "SETCONF_FAILED ns=$NS0 rc=$rc0 out=$out" >&2; return 1; fi
             out=$(uwg_ns "$NS1" setconf "$IF1" "$conf1" 2>&1) || rc1=$?
             if [ "$rc1" != "0" ]; then echo "SETCONF_FAILED ns=$NS1 rc=$rc1 out=$out" >&2; return 1; fi
+            if [ "$impl" = "kernel-umbrawg" ]; then
+                rc0=0
+                out=$(uwg_ns "$NS0" set "$IF0" underlay-mtu "$UNDERLAY_MTU" 2>&1) || rc0=$?
+                if [ "$rc0" != "0" ]; then echo "SET_UNDERLAY_FAILED ns=$NS0 out=$out" >&2; return 1; fi
+                rc1=0
+                out=$(uwg_ns "$NS1" set "$IF1" underlay-mtu "$UNDERLAY_MTU" 2>&1) || rc1=$?
+                if [ "$rc1" != "0" ]; then echo "SET_UNDERLAY_FAILED ns=$NS1 out=$out" >&2; return 1; fi
+            fi
             if [ "$fec" != "none" ] && [ -n "$fec" ]; then
                 rc0=0
                 out=$(uwg_ns "$NS0" set "$IF0" fec "$fec" 2>&1) || rc0=$?
