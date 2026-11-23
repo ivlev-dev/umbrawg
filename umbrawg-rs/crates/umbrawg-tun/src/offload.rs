@@ -9,6 +9,7 @@ const IPPROTO_TCP: u8 = 6;
 const IPPROTO_UDP: u8 = 17;
 
 const IPV4_SRC_ADDR_OFFSET: usize = 12;
+const IPV6_HEADER_LEN: usize = 40;
 const IPV6_SRC_ADDR_OFFSET: usize = 8;
 
 const TCP_FLAGS_OFFSET: usize = 13;
@@ -274,7 +275,10 @@ pub fn split_gso(
 
         dst[..ip_header_len].copy_from_slice(&input[..ip_header_len]);
         if is_v6 {
-            dst[4..6].copy_from_slice(&((total_len - ip_header_len) as u16).to_be_bytes());
+            // The IPv6 payload length covers everything after the fixed
+            // 40-byte header, extension headers included. `csum_start` is the
+            // transport start, which is larger when extension headers exist.
+            dst[4..6].copy_from_slice(&((total_len - IPV6_HEADER_LEN) as u16).to_be_bytes());
         } else {
             if index > 0 {
                 let id = u16::from_be_bytes([dst[4], dst[5]]).wrapping_add(index as u16);
@@ -452,6 +456,16 @@ mod tests {
         packet
     }
 
+    /// IPv6 packet with an 8-byte destination-options header before TCP.
+    fn tcp6_ext_packet(payload_len: usize, seq: u32, flags: u8) -> Vec<u8> {
+        const EXT_LEN: usize = 8;
+        let mut packet = ipv6_header(60, EXT_LEN + 20 + payload_len);
+        packet[40] = IPPROTO_TCP;
+        packet[41] = 0;
+        packet[48..].copy_from_slice(&tcp_header(payload_len, seq, flags));
+        packet
+    }
+
     fn udp4_packet(payload_len: usize) -> Vec<u8> {
         let mut packet = ipv4_header(IPPROTO_UDP, 8 + payload_len);
         packet[20..].copy_from_slice(&udp_header(payload_len));
@@ -615,6 +629,38 @@ mod tests {
     }
 
     #[test]
+    fn splits_ipv6_extension_header_segments_with_the_right_payload_length() {
+        let packet = tcp6_ext_packet(200, 1000, TCP_FLAG_PSH | 0x10);
+        let mut header = VirtioNetHdr {
+            flags: VIRTIO_NET_HDR_F_NEEDS_CSUM,
+            gso_type: VIRTIO_NET_HDR_GSO_TCPV6,
+            hdr_len: 0,
+            gso_size: 100,
+            csum_start: 48,
+            csum_offset: 16,
+            num_buffers: 0,
+        };
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
+        let mut bufs = [&mut first[..], &mut second[..]];
+
+        let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
+
+        assert_eq!(count, 2);
+        assert_eq!(header.hdr_len, 68, "extension plus TCP headers");
+        for segment in [&first[..168], &second[..168]] {
+            // 168 bytes total minus the fixed IPv6 header covers the
+            // 8-byte destination-options header and the TCP header/payload.
+            assert_eq!(u16::from_be_bytes([segment[4], segment[5]]), 128);
+            assert_eq!(segment[6], 60, "next header is destination options");
+            assert_eq!(segment[40], IPPROTO_TCP);
+            assert_valid_transport_checksum(segment, 48, IPPROTO_TCP);
+        }
+        assert_eq!(u32::from_be_bytes(first[52..56].try_into().unwrap()), 1000);
+        assert_eq!(u32::from_be_bytes(second[52..56].try_into().unwrap()), 1100);
+    }
+
+    #[test]
     fn splits_udp4_into_segments_with_valid_headers() {
         let packet = udp4_packet(200);
         let mut header = udp4_header(100);
@@ -647,6 +693,50 @@ mod tests {
             assert_eq!(u16::from_be_bytes([segment[44], segment[45]]), 108);
             assert_valid_transport_checksum(segment, 40, IPPROTO_UDP);
         }
+    }
+
+    #[test]
+    fn splits_three_tcp_segments_in_order_with_contiguous_payload() {
+        // gso_size is the TCP payload per segment, not the wire length: every
+        // segment keeps the 40-byte header, so the superpacket is split on
+        // payload boundaries and the segments stay in stream order.
+        let payload: Vec<u8> = (0..250u16).map(|value| value as u8).collect();
+        let mut packet = tcp4_packet(payload.len(), 1000, TCP_FLAG_PSH | 0x10);
+        packet[20 + 20..].copy_from_slice(&payload);
+        let mut header = tcp4_header(100);
+        let mut first = [0u8; 200];
+        let mut second = [0u8; 200];
+        let mut third = [0u8; 200];
+        let mut bufs = [&mut first[..], &mut second[..], &mut third[..]];
+
+        let count = split_gso(&packet, &mut header, &mut bufs).unwrap();
+
+        assert_eq!(count, 3);
+        let sizes = [140usize, 140, 90];
+        let mut reassembled = Vec::new();
+        for (index, size) in sizes.iter().enumerate() {
+            let segment = &bufs[index][..*size];
+            assert_eq!(
+                usize::from(u16::from_be_bytes([segment[2], segment[3]])),
+                *size
+            );
+            assert_eq!(
+                u32::from_be_bytes(segment[24..28].try_into().unwrap()),
+                1000 + 100 * index as u32
+            );
+            assert_eq!(
+                u16::from_be_bytes([segment[4], segment[5]]),
+                7 + index as u16
+            );
+            assert_valid_transport_checksum(segment, 20, IPPROTO_TCP);
+            assert_eq!(
+                segment[33] & TCP_FLAG_PSH != 0,
+                index == sizes.len() - 1,
+                "only the last segment carries PSH"
+            );
+            reassembled.extend_from_slice(&segment[40..]);
+        }
+        assert_eq!(reassembled, payload, "segments must keep the stream order");
     }
 
     #[test]

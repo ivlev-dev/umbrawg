@@ -9,7 +9,7 @@ use rand_core::RngCore;
 use umbrawg_fec::{
     DecodedBlock, EncodedBlock, FecConfig, FecDecoder, FecEncoder, FecError, FecShard,
 };
-use umbrawg_proto::control::{Caps, CapsFlags, ControlKind, FecShardHeader};
+use umbrawg_proto::control::{Caps, CapsFlags, ControlKind, FecShardHeader, LossReport};
 
 /// Maximum number of CAPS frames sent to one peer per handshake.
 const CAPS_MAX_ATTEMPTS: u8 = 3;
@@ -52,6 +52,24 @@ const ADAPTIVE_ON_LOSS_Q16: u32 = 655;
 const ADAPTIVE_OFF_LOSS_Q16: u32 = 131;
 /// How long the loss estimate must stay below [`ADAPTIVE_OFF_LOSS_Q16`].
 const ADAPTIVE_CLEAN_TIME: Duration = Duration::from_secs(5);
+/// Minimum spacing between two LOSS frames, i.e. at most ten per second.
+const LOSS_REPORT_MIN_INTERVAL: Duration = Duration::from_millis(100);
+/// Spacing of the zero reports on a clean channel.
+const LOSS_REPORT_CLEAN_INTERVAL: Duration = Duration::from_millis(500);
+/// Refresh of an unchanged nonzero loss estimate.
+///
+/// The report cadence is bounded by [`LOSS_REPORT_MIN_INTERVAL`]; a change
+/// above [`LOSS_REPORT_CHANGE_Q16`] is reported on the first allowed tick,
+/// while an unchanged estimate is refreshed at this slower rate so a stable
+/// lossy channel does not keep the control queue busy at 10 Hz.
+const LOSS_REPORT_REFRESH: Duration = Duration::from_millis(500);
+/// Loss change, in 1/65536 units, worth an immediate report (0.25 %).
+const LOSS_REPORT_CHANGE_Q16: u16 = 164;
+/// Number of zero reports after which a clean channel falls silent.
+///
+/// Without this a peer with no loss would send a LOSS frame forever. The
+/// counter restarts as soon as the local estimate becomes nonzero again.
+const LOSS_REPORT_MAX_ZEROS: u8 = 5;
 /// Lower bound of the randomized partial FEC block deadline.
 ///
 /// This is only the batching window for packets of one burst, not a latency
@@ -224,6 +242,10 @@ pub struct FecStats {
     /// (queue overflow or an encryption failure). Kept next to the FEC
     /// counters so a lost CAPS frame or shard never becomes a silent black hole.
     pub dropped_control: u64,
+    /// LOSS frames accepted from the peer after validation.
+    pub loss_report_rx: u64,
+    /// Last loss ratio reported by the peer, in 1/65536 units.
+    pub feedback_loss_q16: u16,
 }
 
 /// Smallest allowed FEC shard limit, including the 2-byte length prefix.
@@ -261,7 +283,10 @@ impl ExtConfig {
         }
         let mut flags = CapsFlags::FEC | CapsFlags::FEC_PARTIAL;
         if self.fec == FecMode::Adaptive {
-            flags = flags | CapsFlags::FEC_ADAPTIVE;
+            // Only the adaptive mode measures loss, so only it promises LOSS
+            // reports. Advertising the bit in a fixed profile would invite
+            // frames this peer would then have to suppress.
+            flags = flags | CapsFlags::FEC_ADAPTIVE | CapsFlags::FEC_FEEDBACK;
         }
         flags
     }
@@ -368,6 +393,24 @@ impl LossWindow {
     }
 }
 
+/// Last loss ratio reported by the peer, with its arrival time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct LossFeedback {
+    loss_q16: u16,
+    at: Instant,
+}
+
+/// `true` when two CAPS frames describe the same FEC block profile.
+///
+/// Reserved bits and [`CapsFlags::FEC_FEEDBACK`] are ignored: a peer that
+/// starts (or stops) reporting loss did not change its FEC shape, and a
+/// profile reset or a CAPS reply storm would only cost bandwidth.
+fn same_fec_profile(left: Caps, right: Caps) -> bool {
+    left.fec_k == right.fec_k
+        && left.fec_m == right.fec_m
+        && left.flags.fec_profile_bits() == right.flags.fec_profile_bits()
+}
+
 /// Largest CAPS frame kept inline in a [`ControlFrame`].
 ///
 /// A CAPS frame is 20 bytes, so it never touches the allocator on the send
@@ -461,6 +504,13 @@ pub(crate) struct PeerExtension {
     fec_stats: FecStats,
     loss: LossWindow,
     adaptive_clean_since: Option<Instant>,
+    /// Last LOSS frame received from the peer.
+    feedback: Option<LossFeedback>,
+    /// Last accepted LOSS report we sent and the value it carried.
+    loss_report_last: Option<Instant>,
+    loss_report_q16: u16,
+    /// Consecutive zero reports; a clean channel stops after a few of them.
+    loss_report_zeros: u8,
     fec_deadline: Option<Instant>,
     /// Arrival time of the last packet handed to the FEC encoder.
     ///
@@ -517,6 +567,10 @@ impl PeerExtension {
             fec_stats: FecStats::default(),
             loss: LossWindow::default(),
             adaptive_clean_since: None,
+            feedback: None,
+            loss_report_last: None,
+            loss_report_q16: 0,
+            loss_report_zeros: 0,
             fec_deadline: None,
             last_fec_push: None,
             jitter: Jitter::seeded(),
@@ -562,7 +616,8 @@ impl PeerExtension {
         // generation. Replacing it is mandatory when the profile shrinks to
         // all-off, otherwise a stale non-zero frame could re-arm the peer's
         // FEC just before our revocation.
-        let caps_changed = self.local_caps != previous.local_caps()
+        let caps_changed = self.local_caps.fec_profile_bits()
+            != previous.local_caps().fec_profile_bits()
             || config.fec_profile() != previous.fec_profile();
         if caps_changed || self.local_caps.bits() == 0 {
             self.pending
@@ -580,6 +635,8 @@ impl PeerExtension {
             self.fec_active = !matches!(config.fec, FecMode::Off | FecMode::Adaptive);
             self.loss = LossWindow::default();
             self.adaptive_clean_since = None;
+            self.feedback = None;
+            self.reset_loss_reports();
             self.fec_deadline = None;
             self.last_fec_push = None;
         }
@@ -650,6 +707,23 @@ impl PeerExtension {
         self.caps_next = None;
         self.caps_last_sent = None;
         self.caps_seen = None;
+        self.reset_loss_reports();
+    }
+
+    /// Forgets what we sent so a new negotiation starts from a fresh report.
+    fn reset_loss_reports(&mut self) {
+        self.loss_report_last = None;
+        self.loss_report_q16 = 0;
+        self.loss_report_zeros = 0;
+    }
+
+    /// `true` when this peer may receive LOSS frames.
+    ///
+    /// The local side must measure loss (adaptive mode) and the peer must have
+    /// advertised [`CapsFlags::FEC_FEEDBACK`]. An old peer without the flag
+    /// would consume the frames silently, so nothing is sent to it.
+    fn loss_feedback_enabled(&self) -> bool {
+        self.config.fec == FecMode::Adaptive && self.peer_caps.contains(CapsFlags::FEC_FEEDBACK)
     }
 
     /// `true` when the peer advertised exactly the FEC block shape we encode.
@@ -698,18 +772,34 @@ impl PeerExtension {
     /// at least 256 counters. The loss ratio is an EWMA; parity is switched on
     /// above 1 % once 1024 counters were observed and off below 0.2 % after
     /// five clean seconds.
+    ///
+    /// When the peer sends LOSS reports, its measurement of *our* outgoing
+    /// direction governs parity and the local estimate is only reported back
+    /// to the peer. That is what turns one-way loss into protection on the
+    /// direction that actually loses packets.
     fn observe_adaptive(&mut self, counter: u64, now: Instant) {
         if self.config.fec != FecMode::Adaptive {
             return;
         }
         let epoch = self.loss.epoch;
-        if !self.loss.observe(counter, now) {
-            if self.loss.epoch != epoch {
-                // The kernel clears `adaptive_clean_since` on a window reset;
-                // otherwise a stale clean time could switch parity off right
-                // after a peer restart.
-                self.adaptive_clean_since = None;
-            }
+        let closed = self.loss.observe(counter, now);
+        if self.loss.epoch != epoch {
+            // The kernel clears the clean state on a window reset; otherwise
+            // a stale clean time could switch parity off right after a peer
+            // restart.
+            self.adaptive_clean_since = None;
+        }
+        if self.feedback_capable() {
+            // The peer advertises loss reports, so its measurement of our
+            // outgoing direction is authoritative for the whole association.
+            // Falling back to the local estimate after a timeout re-introduces
+            // the one-way-loss bug: the reverse direction is clean while the
+            // protected one keeps losing packets.
+            self.apply_loss_feedback(now);
+            self.expire_clean_timer(now);
+            return;
+        }
+        if !closed {
             return;
         }
         if !self.fec_active {
@@ -720,21 +810,186 @@ impl PeerExtension {
                 self.adaptive_clean_since = None;
             }
         } else if self.loss.loss_q16 < ADAPTIVE_OFF_LOSS_Q16 {
-            let since = *self.adaptive_clean_since.get_or_insert(now);
-            if now.saturating_duration_since(since) >= ADAPTIVE_CLEAN_TIME {
-                self.fec_active = false;
-                self.adaptive_clean_since = None;
-                // The kernel drops the stale estimate here, so switching on
-                // again later needs a fresh 1024-counter observation.
-                self.loss.observed = 0;
-                self.loss.loss_q16 = 0;
-                // Do not strand a partially filled block: emit it before
-                // parity generation stops.
-                self.flush_encoder_frames();
+            self.adaptive_clean_since.get_or_insert(now);
+            self.expire_clean_timer(now);
+        } else {
+            self.adaptive_clean_since = None;
+        }
+    }
+
+    /// `true` when the peer advertised that it sends loss reports.
+    ///
+    /// For such a peer the LOSS frames are the only input of adaptive parity,
+    /// regardless of how old the last report is; there is no timeout that
+    /// hands control back to the local estimate. The clean timer of the last
+    /// report still disarms parity after five seconds.
+    fn feedback_capable(&self) -> bool {
+        self.config.fec == FecMode::Adaptive && self.peer_caps.contains(CapsFlags::FEC_FEEDBACK)
+    }
+
+    /// Arms or disarms adaptive parity from the last peer report.
+    ///
+    /// Thresholds match the local estimator, but no 1024-counter warmup is
+    /// needed because the peer already measured a full window. A clean report
+    /// starts the same five-second timer as a clean local estimate, and that
+    /// timer stays authoritative after the reports stop arriving.
+    fn apply_loss_feedback(&mut self, now: Instant) {
+        if self.config.fec != FecMode::Adaptive {
+            return;
+        }
+        let Some(feedback) = self.feedback else {
+            return;
+        };
+        if u32::from(feedback.loss_q16) > ADAPTIVE_ON_LOSS_Q16 {
+            self.adaptive_clean_since = None;
+            self.fec_active = true;
+        } else if u32::from(feedback.loss_q16) < ADAPTIVE_OFF_LOSS_Q16 {
+            if self.fec_active {
+                // The timer starts when the clean report arrived, so a peer
+                // that stops reporting after its five zeros cannot stretch
+                // it; an already running timer is judged on this report.
+                if self.adaptive_clean_since.is_none() {
+                    self.adaptive_clean_since = Some(feedback.at);
+                } else {
+                    self.expire_clean_timer(now);
+                }
             }
         } else {
             self.adaptive_clean_since = None;
         }
+    }
+
+    /// Switches parity off once the clean timer expired.
+    ///
+    /// Called from the control flush as well, so an idle flow still leaves
+    /// adaptive mode after five clean seconds instead of waiting for the next
+    /// incoming packet.
+    fn expire_clean_timer(&mut self, now: Instant) {
+        if self.config.fec != FecMode::Adaptive {
+            return;
+        }
+        let Some(since) = self.adaptive_clean_since else {
+            return;
+        };
+        if now.saturating_duration_since(since) < ADAPTIVE_CLEAN_TIME {
+            return;
+        }
+        self.disarm_adaptive();
+    }
+
+    /// Drops adaptive parity and the warmup that produced it.
+    ///
+    /// The kernel clears the estimate here, so switching on again later needs
+    /// a fresh 1024-counter observation instead of inheriting the old window.
+    fn disarm_adaptive(&mut self) {
+        self.fec_active = false;
+        self.adaptive_clean_since = None;
+        self.loss.observed = 0;
+        self.loss.loss_q16 = 0;
+        // Do not strand a partially filled block: emit it before parity
+        // generation stops.
+        self.flush_encoder_frames();
+    }
+
+    /// Records one validated LOSS frame from the peer.
+    pub(crate) fn handle_loss_report(&mut self, report: LossReport, now: Instant) {
+        self.fec_stats.loss_report_rx = self.fec_stats.loss_report_rx.saturating_add(1);
+        self.fec_stats.feedback_loss_q16 = report.loss_q16;
+        self.feedback = Some(LossFeedback {
+            loss_q16: report.loss_q16,
+            at: now,
+        });
+        if self.local_caps.bits() == 0 {
+            // The peer still believes in our old advertisement; it needs the
+            // zero CAPS just like after an incoming shard.
+            self.revoke_pending = true;
+        }
+        // A report from a peer that never advertised FEC_FEEDBACK is out of
+        // contract and must not steer parity: without the flag the local
+        // estimate stays in charge.
+        if self.feedback_capable() {
+            self.apply_loss_feedback(now);
+            self.expire_clean_timer(now);
+        }
+    }
+
+    /// Returns the current receive-side loss ratio in 1/65536 units.
+    fn current_loss_q16(&self) -> u16 {
+        u16::try_from(self.loss.loss_q16).unwrap_or(u16::MAX)
+    }
+
+    /// Decides whether the current estimate is worth a LOSS frame.
+    fn loss_report_due(&self, now: Instant, q16: u16) -> bool {
+        let Some(last) = self.loss_report_last else {
+            return true;
+        };
+        let elapsed = now.saturating_duration_since(last);
+        if q16 == 0 {
+            return self.loss_report_zeros < LOSS_REPORT_MAX_ZEROS
+                && elapsed >= LOSS_REPORT_CLEAN_INTERVAL;
+        }
+        if elapsed < LOSS_REPORT_MIN_INTERVAL {
+            return false;
+        }
+        q16.abs_diff(self.loss_report_q16) > LOSS_REPORT_CHANGE_Q16
+            || elapsed >= LOSS_REPORT_REFRESH
+    }
+
+    /// Queues a LOSS frame when the estimate is due and the peer supports it.
+    fn request_loss_report(&mut self, now: Instant) {
+        if !self.loss_feedback_enabled() {
+            return;
+        }
+        if self
+            .pending
+            .iter()
+            .any(|frame| frame.kind() == ControlKind::Loss)
+        {
+            return;
+        }
+        let q16 = self.current_loss_q16();
+        if !self.loss_report_due(now, q16) {
+            return;
+        }
+        // The timestamp advances even if the frame is dropped by a full
+        // queue, otherwise the same report would be retried on every flush.
+        self.loss_report_last = Some(now);
+        self.loss_report_q16 = q16;
+        if q16 == 0 {
+            self.loss_report_zeros = self.loss_report_zeros.saturating_add(1);
+        } else {
+            self.loss_report_zeros = 0;
+        }
+        let report = LossReport { loss_q16: q16 };
+        if let Some(frame) =
+            ControlFrame::inline(ControlKind::Loss, |output| report.encode(output).ok())
+        {
+            self.enqueue_control_back(frame);
+        }
+    }
+
+    /// Earliest time the next LOSS frame may be produced.
+    ///
+    /// A past time is deliberately not returned: the control flush (bounded
+    /// by the daemon's 250 ms wake-up) remains the retry path, so a peer that
+    /// has no keypair cannot turn this deadline into a busy poll.
+    fn loss_report_deadline(&self) -> Option<Instant> {
+        if !self.loss_feedback_enabled() {
+            return None;
+        }
+        let last = self.loss_report_last?;
+        let q16 = self.current_loss_q16();
+        let at = if q16 == 0 {
+            if self.loss_report_zeros >= LOSS_REPORT_MAX_ZEROS {
+                return None;
+            }
+            last + LOSS_REPORT_CLEAN_INTERVAL
+        } else if q16.abs_diff(self.loss_report_q16) > LOSS_REPORT_CHANGE_Q16 {
+            last + LOSS_REPORT_MIN_INTERVAL
+        } else {
+            last + LOSS_REPORT_REFRESH
+        };
+        (at >= Instant::now()).then_some(at)
     }
 
     pub(crate) fn fec_push(
@@ -834,12 +1089,25 @@ impl PeerExtension {
     }
 
     /// Earliest deadline owned by the extension: a partially filled FEC block
-    /// that must be flushed.
+    /// that must be flushed, the next LOSS report, or the end of the
+    /// adaptive clean window.
     ///
     /// The daemon uses it to size its poll timeout instead of waiting for the
     /// next data packet or the idle tick.
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.fec_deadline
+        let mut next = self.fec_deadline;
+        for candidate in [
+            self.loss_report_deadline(),
+            self.adaptive_clean_since
+                .map(|since| since + ADAPTIVE_CLEAN_TIME)
+                .filter(|at| *at > Instant::now()),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            next = Some(next.map_or(candidate, |current| current.min(candidate)));
+        }
+        next
     }
 
     pub(crate) fn observe_received(&mut self, counter: u64, now: Instant) {
@@ -865,6 +1133,8 @@ impl PeerExtension {
         }
         self.loss = LossWindow::default();
         self.adaptive_clean_since = None;
+        self.feedback = None;
+        self.reset_loss_reports();
         self.caps_attempts = 0;
         self.caps_next = None;
         self.caps_last_sent = None;
@@ -903,7 +1173,8 @@ impl PeerExtension {
             caps.flags.bits()
                 & !(CapsFlags::FEC.bits()
                     | CapsFlags::FEC_ADAPTIVE.bits()
-                    | CapsFlags::FEC_PARTIAL.bits()),
+                    | CapsFlags::FEC_PARTIAL.bits()
+                    | CapsFlags::FEC_FEEDBACK.bits()),
         );
         caps.fec_k = 0;
         caps.fec_m = 0;
@@ -915,11 +1186,19 @@ impl PeerExtension {
         // advertisement that a zero CAPS must retract.
         let peer_has_extensions = caps.flags.bits() != 0 || caps.fec_k != 0 || caps.fec_m != 0;
         self.sanitize_peer_caps(&mut caps, now);
-        let changed = self.caps_seen != Some(caps);
+        let changed = self
+            .caps_seen
+            .is_none_or(|seen| !same_fec_profile(seen, caps));
         self.caps_seen = Some(caps);
+        let had_feedback = self.peer_caps.contains(CapsFlags::FEC_FEEDBACK);
         self.peer_caps = caps.flags;
         self.peer_fec_k = caps.fec_k;
         self.peer_fec_m = caps.fec_m;
+        if had_feedback != caps.flags.contains(CapsFlags::FEC_FEEDBACK) {
+            // A peer that re-enables feedback gets a fresh report instead of
+            // the tail of an old schedule.
+            self.reset_loss_reports();
+        }
         if self.local_caps.bits() == 0 {
             // Nothing to advertise, but an extension frame from the peer is
             // evidence that it still holds a stale advertisement and needs a
@@ -1058,12 +1337,17 @@ impl PeerExtension {
     }
 
     pub(crate) fn pending_control(&mut self, now: Instant) -> Vec<ControlFrame> {
+        // The clean window of adaptive parity may expire while no packet is
+        // arriving, and the daemon deliberately keeps the transition out of
+        // the MTU hot path by noticing it here.
+        self.expire_clean_timer(now);
         // Producing new CAPS frames needs our advertised capabilities.
         // Frames that already sit in the queue, however, must always leave:
         // an encoder flushed right before FEC was turned off would otherwise
         // stay pending forever (and its block would never reach the peer).
         if self.local_caps.bits() != 0 {
             self.request_caps(now);
+            self.request_loss_report(now);
         } else {
             self.request_revocation(now);
         }
@@ -2460,6 +2744,34 @@ mod tests {
         })
     }
 
+    fn feedback_caps() -> Caps {
+        caps(
+            CapsFlags::FEC | CapsFlags::FEC_ADAPTIVE | CapsFlags::FEC_FEEDBACK,
+            2,
+            1,
+        )
+    }
+
+    fn adaptive_feedback_ext() -> PeerExtension {
+        let mut ext = adaptive_ext();
+        ext.handle_caps(feedback_caps(), Instant::now());
+        ext
+    }
+
+    fn loss_reports(frames: &[ControlFrame]) -> Vec<LossReport> {
+        frames
+            .iter()
+            .filter(|frame| frame.kind() == ControlKind::Loss)
+            .map(|frame| LossReport::decode(frame.bytes()).expect("valid loss frame"))
+            .collect()
+    }
+
+    fn confirm_frames(ext: &mut PeerExtension, frames: &[ControlFrame], now: Instant) {
+        for frame in frames {
+            ext.note_frame_sent(frame.kind(), now);
+        }
+    }
+
     /// Feeds `windows` segments of 256 counters, closing each segment with
     /// the first counter of the next one after `step` (longer than the settle
     /// interval). `missing` counters never arrive.
@@ -2592,6 +2904,325 @@ mod tests {
         feed_adaptive_windows(&mut ext, next, 16, clean_at, step, |_| false);
         assert!(!ext.fec_active);
         assert!(!ext.fec_adaptive_active());
+    }
+
+    #[test]
+    fn loss_report_is_sent_with_the_current_estimate() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        ext.loss.loss_q16 = 1000;
+
+        let frames = ext.pending_control(base);
+        let reports = loss_reports(&frames);
+        assert_eq!(reports, vec![LossReport { loss_q16: 1000 }]);
+        let frame = frames
+            .iter()
+            .find(|frame| frame.kind() == ControlKind::Loss)
+            .expect("loss frame");
+        assert_eq!(frame.bytes().len(), 12, "8-byte header plus 4-byte body");
+        assert_eq!(
+            umbrawg_proto::control::extension_kind(frame.bytes()),
+            Some(ControlKind::Loss)
+        );
+        let stats = ext.fec_stats().expect("adaptive FEC is configured");
+        assert_eq!(stats.loss_report_rx, 0, "sending is not receiving");
+        assert_eq!(stats.feedback_loss_q16, 0);
+    }
+
+    #[test]
+    fn loss_report_is_not_sent_without_the_peer_flag() {
+        let base = Instant::now();
+        let mut ext = adaptive_ext();
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::FEC_ADAPTIVE, 2, 1), base);
+        ext.loss.loss_q16 = 1000;
+        assert!(
+            loss_reports(&ext.pending_control(base)).is_empty(),
+            "an old peer without FEC_FEEDBACK must never receive a LOSS frame"
+        );
+
+        // A fixed local profile does not measure loss either, even when the
+        // peer can consume reports.
+        let mut fixed = PeerExtension::new(FEC_CONFIG);
+        fixed.handle_caps(feedback_caps(), base);
+        fixed.loss.loss_q16 = 1000;
+        assert!(loss_reports(&fixed.pending_control(base)).is_empty());
+    }
+
+    #[test]
+    fn loss_reports_are_rate_limited_and_refreshed() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        ext.loss.loss_q16 = 1000;
+
+        let first = ext.pending_control(base);
+        assert_eq!(loss_reports(&first), vec![LossReport { loss_q16: 1000 }]);
+        confirm_frames(&mut ext, &first, base);
+
+        // A big change cannot beat the 10 Hz limit.
+        ext.loss.loss_q16 = 2000;
+        assert!(loss_reports(&ext.pending_control(base + Duration::from_millis(99))).is_empty());
+        let due = ext.pending_control(base + Duration::from_millis(100));
+        assert_eq!(loss_reports(&due), vec![LossReport { loss_q16: 2000 }]);
+        confirm_frames(&mut ext, &due, base + Duration::from_millis(100));
+
+        // An unchanged value waits for the slower refresh.
+        assert!(loss_reports(&ext.pending_control(base + Duration::from_millis(300))).is_empty());
+        let refreshed = ext.pending_control(base + Duration::from_millis(600));
+        assert_eq!(
+            loss_reports(&refreshed),
+            vec![LossReport { loss_q16: 2000 }]
+        );
+    }
+
+    #[test]
+    fn clean_channel_reports_zero_five_times_then_stops() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        let mut now = base;
+
+        for zero in 0..LOSS_REPORT_MAX_ZEROS {
+            let frames = ext.pending_control(now);
+            assert_eq!(
+                loss_reports(&frames),
+                vec![LossReport { loss_q16: 0 }],
+                "zero report {zero}"
+            );
+            confirm_frames(&mut ext, &frames, now);
+            now += LOSS_REPORT_CLEAN_INTERVAL;
+        }
+        assert_eq!(ext.loss_report_zeros, LOSS_REPORT_MAX_ZEROS);
+        assert!(loss_reports(&ext.pending_control(now)).is_empty());
+        assert!(
+            ext.loss_report_deadline().is_none(),
+            "a clean channel must stop waking the daemon for LOSS frames"
+        );
+
+        // Real loss restarts the reports immediately.
+        ext.loss.loss_q16 = 1000;
+        assert_eq!(
+            loss_reports(&ext.pending_control(now)),
+            vec![LossReport { loss_q16: 1000 }]
+        );
+        assert_eq!(ext.loss_report_zeros, 0);
+    }
+
+    #[test]
+    fn adaptive_arms_from_peer_feedback_on_a_clean_local_rx() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        assert_eq!(ext.loss.loss_q16, 0, "the local RX estimate is clean");
+        assert!(!ext.fec_active);
+
+        ext.handle_loss_report(LossReport { loss_q16: 1000 }, base);
+        assert!(
+            ext.fec_active,
+            "the peer reported >1 %, so our TX must protect itself"
+        );
+        assert!(ext.fec_adaptive_active());
+        let profile = ext.config.fec.config().expect("adaptive profile");
+        assert_eq!((profile.k(), profile.m()), (2, 1));
+    }
+
+    /// Builds a window that arms on the next counter without feedback.
+    fn armed_by_local_loss(ext: &mut PeerExtension, base: Instant) {
+        let mut window = LossWindow::default();
+        window.reset(0, base);
+        window.largest = 600;
+        window.received = 600;
+        window.observed = ADAPTIVE_OBSERVE_MIN;
+        window.loss_q16 = 2000;
+        window.segment_start = Some(base - Duration::from_secs(2));
+        ext.loss = window;
+    }
+
+    #[test]
+    fn feedback_capable_ignores_the_local_estimate() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        ext.handle_loss_report(LossReport { loss_q16: 500 }, base);
+        armed_by_local_loss(&mut ext, base);
+
+        ext.observe_received(601, base + Duration::from_millis(10));
+        assert!(
+            !ext.fec_active,
+            "local loss must not arm parity while the peer sends LOSS reports"
+        );
+    }
+
+    #[test]
+    fn feedback_capable_has_no_ttl_fallback_to_the_local_estimate() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        ext.handle_loss_report(LossReport { loss_q16: 500 }, base);
+        armed_by_local_loss(&mut ext, base);
+
+        // A one-way lossy reverse direction must not take over after the
+        // report aged out: the LOSS contract holds for the whole association.
+        ext.observe_received(601, base + Duration::from_secs(10));
+        assert!(
+            !ext.fec_active,
+            "there is no TTL that returns parity control to the local estimate"
+        );
+    }
+
+    #[test]
+    fn feedback_capable_never_arms_from_local_loss_without_reports() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        armed_by_local_loss(&mut ext, base);
+
+        // No LOSS frame was ever received, so the peer's direction is not
+        // measured yet; the local (reverse) estimate must not arm it.
+        ext.observe_received(601, base + Duration::from_millis(10));
+        assert!(!ext.fec_active);
+        assert!(!ext.fec_adaptive_active());
+    }
+
+    #[test]
+    fn feedback_capable_does_not_disarm_from_a_clean_local_rx() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        ext.handle_loss_report(LossReport { loss_q16: 1000 }, base);
+        assert!(ext.fec_active);
+
+        // A clean local stream must not switch the protected direction off
+        // while the peer keeps reporting loss.
+        let step = Duration::from_millis(1500);
+        feed_adaptive_windows(
+            &mut ext,
+            0,
+            16,
+            base + Duration::from_millis(10),
+            step,
+            |_| false,
+        );
+        assert!(
+            ext.fec_active,
+            "parity is armed by LOSS and only a clean LOSS may disarm it"
+        );
+        assert_eq!(ext.loss.loss_q16, 0, "the local estimate is still clean");
+    }
+
+    #[test]
+    fn loss_report_without_the_advertised_flag_does_not_steer_parity() {
+        let base = Instant::now();
+        let mut ext = adaptive_ext();
+        ext.handle_caps(caps(CapsFlags::FEC | CapsFlags::FEC_ADAPTIVE, 2, 1), base);
+
+        ext.handle_loss_report(LossReport { loss_q16: 1000 }, base);
+        assert_eq!(ext.fec_stats().unwrap().loss_report_rx, 1);
+        assert!(
+            !ext.fec_active,
+            "a peer that never advertised FEC_FEEDBACK must not arm parity"
+        );
+
+        // Without the flag the local estimator remains in charge.
+        armed_by_local_loss(&mut ext, base);
+        ext.observe_received(601, base + Duration::from_millis(10));
+        assert!(ext.fec_active);
+    }
+
+    #[test]
+    fn feedback_clean_timer_outlives_the_report() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        ext.handle_loss_report(LossReport { loss_q16: 1000 }, base);
+        let clean_at = base + Duration::from_secs(1);
+        ext.handle_loss_report(LossReport { loss_q16: 0 }, clean_at);
+        assert_eq!(ext.adaptive_clean_since, Some(clean_at));
+
+        // The reports stop, but the clean timer still owns the state: a
+        // lossy reverse direction must not stretch or reset it.
+        armed_by_local_loss(&mut ext, base);
+        ext.observe_received(601, base + Duration::from_secs(3));
+        assert!(ext.fec_active);
+        assert_eq!(ext.adaptive_clean_since, Some(clean_at));
+
+        // Five seconds after the report the timer disarms and drops the
+        // warmup, so the local estimate cannot re-arm at once.
+        let _ = ext.pending_control(clean_at + ADAPTIVE_CLEAN_TIME);
+        assert!(!ext.fec_active);
+        assert_eq!(ext.loss.observed, 0);
+        assert_eq!(ext.loss.loss_q16, 0);
+    }
+
+    #[test]
+    fn feedback_clean_window_switches_adaptive_off() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        ext.handle_loss_report(LossReport { loss_q16: 1000 }, base);
+        assert!(ext.fec_active);
+
+        let clean_at = base + Duration::from_secs(1);
+        ext.handle_loss_report(LossReport { loss_q16: 0 }, clean_at);
+        assert_eq!(ext.adaptive_clean_since, Some(clean_at));
+        assert!(ext.fec_active, "five clean seconds are still pending");
+
+        let _ = ext.pending_control(clean_at + ADAPTIVE_CLEAN_TIME);
+        assert!(
+            !ext.fec_active,
+            "the clean window of the report must switch parity off"
+        );
+        assert!(!ext.fec_adaptive_active());
+        assert!(ext.adaptive_clean_since.is_none());
+    }
+
+    #[test]
+    fn loss_report_counters_track_the_feedback() {
+        let base = Instant::now();
+        let mut ext = adaptive_feedback_ext();
+        ext.handle_loss_report(LossReport { loss_q16: 100 }, base);
+        assert!(
+            ext.adaptive_clean_since.is_none(),
+            "a clean report cannot start a timer while parity is already off"
+        );
+        let later = base + Duration::from_millis(1);
+        ext.handle_loss_report(LossReport { loss_q16: 700 }, later);
+
+        let stats = ext.fec_stats().expect("adaptive FEC is configured");
+        assert_eq!(stats.loss_report_rx, 2);
+        assert_eq!(stats.feedback_loss_q16, 700);
+        assert_eq!(
+            ext.feedback,
+            Some(LossFeedback {
+                loss_q16: 700,
+                at: later
+            })
+        );
+        assert!(ext.fec_active);
+    }
+
+    #[test]
+    fn feedback_flag_does_not_reset_the_fec_profile() {
+        let base = Instant::now();
+        let mut ext = PeerExtension::new(FEC_CONFIG);
+        ext.handle_caps(caps(CapsFlags::FEC, 2, 1), base);
+        let first = ext.pending_control(base);
+        confirm_frames(&mut ext, &first, base);
+        assert_eq!(ext.caps_attempts, 1);
+        let next = ext.caps_next;
+        assert!(ext.fec_tx_active());
+
+        ext.handle_caps(
+            caps(CapsFlags::FEC | CapsFlags::FEC_FEEDBACK, 2, 1),
+            base + Duration::from_millis(10),
+        );
+        assert!(ext.peer_caps.contains(CapsFlags::FEC_FEEDBACK));
+        assert_eq!(
+            ext.caps_attempts, 1,
+            "the feedback flag is not a FEC profile change"
+        );
+        assert_eq!(ext.caps_next, next, "no extra CAPS reply is scheduled");
+        assert!(ext.fec_tx_active());
+
+        ext.handle_caps(
+            caps(CapsFlags::FEC | CapsFlags::FEC_FEEDBACK, 3, 1),
+            base + Duration::from_millis(20),
+        );
+        assert!(
+            !ext.fec_tx_active(),
+            "a real profile change still disables FEC TX"
+        );
     }
 
     #[test]

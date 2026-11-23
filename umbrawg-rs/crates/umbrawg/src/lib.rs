@@ -1482,6 +1482,23 @@ mod tests {
     }
 
     #[test]
+    fn tun_tx_path_reads_through_the_gso_splitter() {
+        // A TUN super-packet must never reach FEC/encryption as one piece:
+        // `Tun::read_batch_sizes` splits it on `gso_size` boundaries and
+        // completes the checksums, while `Tun::read` rejects multi-segment
+        // GSO. Both worker loops share `pump_tun_tx`.
+        let source = include_str!("lib.rs");
+        assert!(
+            source.contains(concat!("read_batch_", "sizes(")),
+            "the TX path must read TUN through the GSO splitter"
+        );
+        assert!(
+            !source.contains(concat!("tun.", "read(")),
+            "Tun::read cannot carry a multi-segment GSO packet"
+        );
+    }
+
+    #[test]
     fn parses_foreground() {
         let args = parse_args(vec!["uwg0".to_owned(), "--foreground".to_owned()]).unwrap();
         assert_eq!(args.ifname.as_deref(), Some("uwg0"));

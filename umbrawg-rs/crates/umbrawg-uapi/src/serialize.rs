@@ -133,6 +133,8 @@ fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
         write_field(output, "fec_dropped_bounds", stats.dropped_bounds);
         write_field(output, "fec_dropped_disabled", stats.dropped_disabled);
         write_field(output, "fec_dropped_control", stats.dropped_control);
+        write_field(output, "fec_loss_report_rx", stats.loss_report_rx);
+        write_field(output, "fec_feedback_loss_q16", stats.feedback_loss_q16);
     }
 }
 
@@ -247,6 +249,8 @@ fec_decode_fail=2
 fec_dropped_bounds=3
 fec_dropped_disabled=4
 fec_dropped_control=5
+fec_loss_report_rx=6
+fec_feedback_loss_q16=300
 public_key=404142434445464748494a4b4c4d4e4f505152535455565758595a5b5c5d5e5f
 preshared_key=606162636465666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f
 protocol_version=1
@@ -390,6 +394,8 @@ errno=0
                 dropped_bounds: 3,
                 dropped_disabled: 4,
                 dropped_control: 5,
+                loss_report_rx: 6,
+                feedback_loss_q16: 300,
             }),
             obfuscation: ObfuscationSnapshot {
                 jc: 4,

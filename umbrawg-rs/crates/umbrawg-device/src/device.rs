@@ -13,7 +13,7 @@ use umbrawg_crypto::tai64n::Tai64N;
 use umbrawg_crypto::{aead, random, Key, PrivateKey, PublicKey};
 use umbrawg_fec::{EncodedBlock, FecShard};
 use umbrawg_noise::{CookieChecker, StaticIdentity};
-use umbrawg_proto::control::{Caps, ControlKind, FecShardHeader};
+use umbrawg_proto::control::{Caps, ControlKind, FecShardHeader, LossReport};
 use umbrawg_proto::messages::limits::{
     DEFAULT_UDP_WINDOW, INITIATIONS_PER_SECOND, MAX_PEERS_PER_DEVICE,
 };
@@ -2024,6 +2024,19 @@ impl Device {
                 // it is dropped silently instead of being decoded.
                 Ok(IncomingOutcome::Keepalive)
             }
+            ControlKind::Loss => {
+                // The counter of the LOSS frame is a genuine received
+                // counter and must feed the local estimate, otherwise every
+                // report would itself look like a lost packet.
+                if current_keypair {
+                    peer.extension().observe_received(counter, ctx.now);
+                }
+                let Ok(report) = LossReport::decode(plaintext) else {
+                    return Ok(IncomingOutcome::Dropped);
+                };
+                peer.extension().handle_loss_report(report, ctx.now);
+                Ok(IncomingOutcome::Keepalive)
+            }
             ControlKind::FecShard => {
                 if current_keypair {
                     peer.extension().observe_received(counter, ctx.now);
@@ -3020,6 +3033,43 @@ mod tests {
         assert!(
             !peer.extension().fec_tx_active(),
             "a changed FEC profile invalidates the negotiated capabilities"
+        );
+    }
+
+    #[test]
+    fn loss_feedback_arms_the_adaptive_mtu_signal() {
+        use umbrawg_proto::control::{Caps, CapsFlags};
+
+        let device = Device::new(DeviceConfig {
+            ext: crate::ExtConfig {
+                fec: crate::FecMode::Adaptive,
+                ..crate::ExtConfig::default()
+            },
+            ..DeviceConfig::default()
+        })
+        .expect("device");
+        let peer = device
+            .add_peer(PeerConfig::new(PublicKey::from_bytes([0x5a; 32])))
+            .expect("peer");
+        let now = Instant::now();
+        peer.extension().handle_caps(
+            Caps {
+                flags: CapsFlags::FEC | CapsFlags::FEC_ADAPTIVE | CapsFlags::FEC_FEEDBACK,
+                fec_k: 2,
+                fec_m: 1,
+            },
+            now,
+        );
+        assert!(
+            !device.fec_adaptive_active(),
+            "a clean local RX must not arm parity by itself"
+        );
+
+        peer.extension()
+            .handle_loss_report(LossReport { loss_q16: 1000 }, now);
+        assert!(
+            device.fec_adaptive_active(),
+            "the daemon polls this signal and applies the MTU policy outside the hot path"
         );
     }
 }

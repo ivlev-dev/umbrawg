@@ -16,6 +16,8 @@ pub const EXTENSION_MAGIC: [u8; 3] = *b"UWG";
 pub const EXTENSION_VERSION: u8 = 1;
 
 const CAPS_LEN: usize = 12;
+/// Length of the fixed loss report body that follows the extension prefix.
+const LOSS_LEN: usize = 4;
 /// Length of the fixed FEC shard body header that follows the extension prefix.
 pub const FEC_HEADER_LEN: usize = 12;
 
@@ -31,6 +33,8 @@ pub enum ControlKind {
     Ack,
     /// One Reed-Solomon shard.
     FecShard,
+    /// Receive-side loss report used by adaptive FEC.
+    Loss,
 }
 
 impl ControlKind {
@@ -39,6 +43,7 @@ impl ControlKind {
             Self::Caps => 1,
             Self::Ack => 2,
             Self::FecShard => 3,
+            Self::Loss => 4,
         }
     }
 
@@ -47,6 +52,7 @@ impl ControlKind {
             1 => Some(Self::Caps),
             2 => Some(Self::Ack),
             3 => Some(Self::FecShard),
+            4 => Some(Self::Loss),
             _ => None,
         }
     }
@@ -68,6 +74,25 @@ impl CapsFlags {
     /// `k'` data shards plus up to `m` parity shards, and the receiver decodes
     /// the block with its advertised `(k', m')` shape.
     pub const FEC_PARTIAL: Self = Self(1 << 4);
+    /// Peer reports its own receive-side loss with LOSS frames.
+    ///
+    /// The flag is only advertised by a peer that measures loss, so a sender
+    /// must not emit LOSS frames to a peer without it: an old implementation
+    /// would silently consume them and the feedback would be wasted.
+    pub const FEC_FEEDBACK: Self = Self(1 << 5);
+
+    /// Flags that describe the FEC block profile.
+    ///
+    /// Reserved bits and [`Self::FEC_FEEDBACK`] are deliberately excluded: a
+    /// peer that starts reporting loss does not change the negotiated FEC
+    /// profile, so it must not trigger a profile reset or a CAPS reply storm.
+    pub const FEC_PROFILE_BITS: Self = Self((1 << 2) | (1 << 3) | (1 << 4));
+
+    /// Returns the flags with only the FEC profile bits kept.
+    #[must_use]
+    pub const fn fec_profile_bits(self) -> Self {
+        Self(self.0 & Self::FEC_PROFILE_BITS.0)
+    }
 
     /// Creates flags from the wire value.
     #[must_use]
@@ -142,6 +167,60 @@ impl Caps {
             flags,
             fec_k: body[6],
             fec_m: body[7],
+        })
+    }
+}
+
+/// Receive-side loss report for adaptive FEC.
+///
+/// The receiver sends the loss ratio it measured on its incoming direction;
+/// the sender uses it to arm its own outgoing parity, so a one-way lossy path
+/// still gets protection. The ratio uses the same 1/65536 units as the local
+/// estimator (`65536 == 100 %`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LossReport {
+    /// Measured loss ratio in 1/65536 units.
+    pub loss_q16: u16,
+}
+
+impl LossReport {
+    /// Encodes the frame into `output`, returning the number of bytes written.
+    pub fn encode(&self, output: &mut [u8]) -> Result<usize> {
+        let total = EXTENSION_HEADER_LEN + LOSS_LEN;
+        if output.len() < total {
+            return Err(ProtoError::BufferTooSmall {
+                required: total,
+                available: output.len(),
+            });
+        }
+        write_prefix(output, ControlKind::Loss, LOSS_LEN)?;
+        output[8..10].copy_from_slice(&self.loss_q16.to_le_bytes());
+        output[10..12].copy_from_slice(&0u16.to_le_bytes());
+        Ok(total)
+    }
+
+    /// Decodes a complete loss report.
+    ///
+    /// The payload must be exactly four bytes with a zero reserved field, so a
+    /// frame with a different shape is an unknown or future message and is
+    /// rejected instead of being interpreted with guessed semantics.
+    pub fn decode(frame: &[u8]) -> Result<Self> {
+        let body = extension_body(frame, ControlKind::Loss)?;
+        if body.len() != LOSS_LEN {
+            return Err(ProtoError::InvalidLength {
+                expected: LOSS_LEN,
+                actual: body.len(),
+            });
+        }
+        let reserved = u16::from_le_bytes(body[2..4].try_into().expect("checked length"));
+        if reserved != 0 {
+            return Err(ProtoError::InvalidValue {
+                name: "loss_reserved".to_owned(),
+                value: reserved.to_string(),
+            });
+        }
+        Ok(Self {
+            loss_q16: u16::from_le_bytes(body[0..2].try_into().expect("checked length")),
         })
     }
 }
@@ -335,6 +414,53 @@ mod tests {
         );
         assert!(!CapsFlags::FEC.contains(CapsFlags::FEC_PARTIAL));
         assert!((CapsFlags::FEC | CapsFlags::FEC_PARTIAL).contains(CapsFlags::FEC_PARTIAL));
+    }
+
+    #[test]
+    fn fec_feedback_flag_has_its_own_bit() {
+        // Wire contract: bit 5 marks a receiver that sends LOSS frames.
+        assert_eq!(CapsFlags::FEC_FEEDBACK.bits(), 1 << 5);
+        assert!(CapsFlags::FEC_FEEDBACK.contains(CapsFlags::FEC_FEEDBACK));
+        assert!(!CapsFlags::FEC.contains(CapsFlags::FEC_FEEDBACK));
+        // The profile mask must ignore reserved bits and the feedback flag.
+        let full = CapsFlags::from_bits(0xffff);
+        assert_eq!(
+            full.fec_profile_bits().bits(),
+            (1 << 2) | (1 << 3) | (1 << 4)
+        );
+    }
+
+    #[test]
+    fn loss_report_round_trip() {
+        let report = LossReport { loss_q16: 655 };
+        let mut buffer = [0u8; 12];
+        let written = report.encode(&mut buffer).unwrap();
+        assert_eq!(written, 12);
+        assert_eq!(&buffer[..8], &[0x00, b'U', b'W', b'G', 1, 4, 4, 0]);
+        assert_eq!(LossReport::decode(&buffer).unwrap(), report);
+        assert_eq!(extension_kind(&buffer), Some(ControlKind::Loss));
+    }
+
+    #[test]
+    fn loss_report_rejects_a_nonzero_reserved_field() {
+        let mut buffer = [0u8; 12];
+        LossReport { loss_q16: 1 }.encode(&mut buffer).unwrap();
+        buffer[10] = 1;
+        assert!(LossReport::decode(&buffer).is_err());
+    }
+
+    #[test]
+    fn loss_report_rejects_a_wrong_payload_length() {
+        let mut buffer = [0u8; 12];
+        LossReport { loss_q16: 1 }.encode(&mut buffer).unwrap();
+        buffer[6..8].copy_from_slice(&3u16.to_le_bytes());
+        assert!(LossReport::decode(&buffer).is_err());
+        buffer[6..8].copy_from_slice(&5u16.to_le_bytes());
+        assert!(LossReport::decode(&buffer[..11]).is_err());
+        // A different kind is not accepted as a loss report.
+        buffer[6..8].copy_from_slice(&4u16.to_le_bytes());
+        buffer[5] = 1;
+        assert!(LossReport::decode(&buffer).is_err());
     }
 
     #[test]

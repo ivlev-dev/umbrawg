@@ -135,6 +135,10 @@ fn fec_stats(device: &Device) -> UapiFecStats {
         stats.dropped_control = stats
             .dropped_control
             .saturating_add(peer_stats.dropped_control);
+        stats.loss_report_rx = stats
+            .loss_report_rx
+            .saturating_add(peer_stats.loss_report_rx);
+        stats.feedback_loss_q16 = stats.feedback_loss_q16.max(peer_stats.feedback_loss_q16);
     }
     stats
 }

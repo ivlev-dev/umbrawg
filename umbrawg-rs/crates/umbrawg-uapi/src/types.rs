@@ -552,6 +552,12 @@ pub struct FecStats {
     /// control queue overflowed or encryption failed (userspace only; the
     /// kernel does not report this counter).
     pub dropped_control: u64,
+    /// LOSS frames accepted from the peers (userspace only; the kernel does
+    /// not send loss reports yet).
+    pub loss_report_rx: u64,
+    /// Largest last loss ratio reported by a peer, in 1/65536 units
+    /// (userspace only).
+    pub feedback_loss_q16: u16,
 }
 
 /// Complete device state returned by [`DeviceControl::snapshot`].
