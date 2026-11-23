@@ -3,10 +3,9 @@ use std::fmt::Write as _;
 use umbrawg_proto::special::{SpecialPacket, Tag};
 use umbrawg_proto::ObfParams;
 use umbrawg_uapi::{
-    AllowedIp as UapiAllowedIp, AllowedIpChange, BbrStats as UapiBbrStats, DeviceControl,
-    DeviceSnapshot, FecStats as UapiFecStats, ObfuscationRequest, ObfuscationSnapshot, PeerRequest,
-    PeerSnapshot, SetRequest, SpecialPacketUpdate, TimingRequest, TimingSnapshot, U16Range,
-    U32Range, UapiError,
+    AllowedIp as UapiAllowedIp, AllowedIpChange, DeviceControl, DeviceSnapshot,
+    FecStats as UapiFecStats, ObfuscationRequest, ObfuscationSnapshot, PeerRequest, PeerSnapshot,
+    SetRequest, SpecialPacketUpdate, TimingRequest, TimingSnapshot, U16Range, U32Range, UapiError,
 };
 
 use crate::allowedips::AllowedIp;
@@ -29,10 +28,8 @@ impl DeviceControl for Device {
             listen_port: self.listen_port(),
             fwmark: self.fwmark(),
             extra_ports: self.extra_ports(),
-            bbr: self.ext_config().bbr.as_str().to_owned(),
             fec: self.ext_config().fec.as_string(),
             underlay_mtu: self.underlay_mtu(),
-            bbr_stats: Some(bbr_stats(self)),
             fec_stats: Some(fec_stats(self)),
             obfuscation: obfuscation_snapshot(&params),
             timings: timings_snapshot(&self.timings()),
@@ -48,12 +45,6 @@ impl DeviceControl for Device {
         let obfuscation = build_obfuscation(self, request.obfuscation)?;
         let timings = build_timings(self, request.timings)?;
         let mut ext = self.ext_config();
-        if let Some(value) = request.bbr.as_deref() {
-            ext.bbr = crate::BbrMode::parse(value).ok_or_else(|| UapiError::InvalidValue {
-                key: "bbr".to_owned(),
-                value: value.to_owned(),
-            })?;
-        }
         if let Some(value) = request.fec.as_deref() {
             let fec = crate::FecMode::parse(value).ok_or_else(|| UapiError::InvalidValue {
                 key: "fec".to_owned(),
@@ -113,44 +104,6 @@ impl DeviceControl for Device {
 
 fn internal(error: DeviceError) -> UapiError {
     UapiError::Internal(error.to_string())
-}
-
-/// Aggregates the per-peer BBR snapshots the same way the kernel does.
-///
-/// The aggregate is always present (zeroed when BBR is off) so clients do not
-/// have to guess whether the feature is supported or merely idle.
-fn bbr_stats(device: &Device) -> UapiBbrStats {
-    let mode = match device.ext_config().bbr {
-        crate::BbrMode::Off => 0,
-        crate::BbrMode::Monitor => 1,
-        crate::BbrMode::On => 2,
-    };
-    let mut stats = UapiBbrStats {
-        mode,
-        ..UapiBbrStats::default()
-    };
-    for peer in device.peers() {
-        let Some(peer_stats) = device.bbr_stats(&peer) else {
-            continue;
-        };
-        stats.peers = stats.peers.saturating_add(1);
-        stats.cwnd = stats.cwnd.saturating_add(peer_stats.cwnd);
-        stats.inflight = stats.inflight.saturating_add(peer_stats.inflight);
-        stats.pacing_rate = stats.pacing_rate.saturating_add(peer_stats.pacing_rate);
-        stats.btl_bw = stats.btl_bw.saturating_add(peer_stats.btl_bw);
-        stats.round_lost = stats
-            .round_lost
-            .saturating_add(u32::try_from(peer_stats.lost_packets).unwrap_or(u32::MAX));
-        // The controller reports its initial RTT before the first sample;
-        // only a completed round proves that the value was measured.
-        if peer_stats.rounds > 0 {
-            let min_rtt = u64::try_from(peer_stats.min_rtt.as_nanos()).unwrap_or(u64::MAX);
-            if min_rtt != 0 && (stats.min_rtt_ns == 0 || min_rtt < stats.min_rtt_ns) {
-                stats.min_rtt_ns = min_rtt;
-            }
-        }
-    }
-    stats
 }
 
 /// Aggregates the per-peer FEC counters the same way the kernel does.
@@ -490,7 +443,6 @@ mod tests {
         let device = Device::new(DeviceConfig::default()).expect("device");
         let request = SetRequest {
             underlay_mtu: Some(9000),
-            bbr: Some("monitor".to_owned()),
             fec: Some("8:2".to_owned()),
             ..SetRequest::default()
         };
@@ -503,12 +455,8 @@ mod tests {
 
         let snapshot = device.snapshot();
         assert_eq!(snapshot.underlay_mtu, 9000);
-        assert_eq!(snapshot.bbr, "monitor");
         assert_eq!(snapshot.fec, "8:2");
 
-        let bbr = snapshot.bbr_stats.expect("bbr stats are always reported");
-        assert_eq!(bbr.mode, 1);
-        assert_eq!(bbr.peers, 1);
         let fec = snapshot.fec_stats.expect("fec stats are always reported");
         assert_eq!(fec, UapiFecStats::default());
     }

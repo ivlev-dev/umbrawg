@@ -674,7 +674,7 @@ UDP-портов устройства (0…8, по умолчанию 0 — вы
 обычном режиме каждый воркер открывает свой набор, поэтому сокетов
 `воркеры × (N + 1)`; в `UMBRAWG_PARALLEL_RX=1` набор один на устройство.
 
-## UAPI: `underlay_mtu`, `bbr`, `fec` и статистика
+## UAPI: `underlay_mtu`, `fec` и статистика
 
 Демон принимает в `set=1` и возвращает в `get=1`:
 
@@ -682,14 +682,15 @@ UDP-портов устройства (0…8, по умолчанию 0 — вы
   пересчитываются TUN MTU, лимит FEC-шарда и GSO-лимиты сокетов; при
   выключении FEC MTU возвращается к базовой величине. Изменение через UAPI
   переживает перезапуск воркера и не требует перезапуска демона.
-- `bbr=off|monitor|on` и `fec=off|adaptive|K:M` с теми же пределами, что у
-  ядра: `K=1..8`, `M=1..2`; вне диапазона — ошибка UAPI, а не молчаливый
-  clamp.
-- `bbr_stats=1` — секция `bbr_mode`, `bbr_cwnd`, `bbr_inflight`,
-  `bbr_pacing_rate`, `bbr_btl_bw`, `bbr_min_rtt_ns`, `bbr_round_lost`,
-  `bbr_peers`. Поля `peers_no_ack` в UAPI демона пока нет: оно есть в
-  kernel-netlink (`bbr_stats`, вложенный атрибут 9) и относится к пирам,
-  которые не подтвердили `ACK` в CAPS.
+- `fec=off|adaptive|K:M` с теми же пределами, что у ядра: `K=1..8`,
+  `M=1..2`; вне диапазона — ошибка UAPI, а не молчаливый clamp. По
+  умолчанию включён `adaptive`: parity `2:1` появляется только после
+  измеренных потерь выше 1 % и выключается ниже 0.2 % через пять секунд,
+  поэтому чистый канал идёт без FEC-оверхеда. Ключ `bbr` удалён и
+  отклоняется как неизвестный. TUN MTU при adaptive остаётся базовым
+  (1420 при underlay 1500), пока parity не включился; после активации он
+  опускается до FEC-значения и возвращается при выключении. Fixed-профиль
+  резервирует MTU сразу.
 - `fec_stats=1` — секция `fec_blocks_encoded`, `fec_shards_sent`,
   `fec_blocks_decoded`, `fec_packets_recovered`, `fec_decode_fail`,
   `fec_dropped_bounds`, `fec_dropped_disabled`, `fec_dropped_control`.
@@ -700,14 +701,13 @@ Partial FEC parity: при включённом FEC демон анонсиру�
 (бит 4 вместе с `FEC`) и для неполного блока шлёт `k' = n`, `m' = m`.
 Пир без флага получает legacy `m' = 0`; полные блоки не меняются.
 Sparse ping с `FEC_PARTIAL` защищается, но платит `2×`/`3×` шардов для
-`k' = 1` при `2:1`/`8:2`. BBR-пейсинг и `cwnd` в демоне включаются только
-при `ACK` в CAPS пира — так же, как в ядре.
+`k' = 1` при `2:1`/`8:2`.
 
-`uwg show <if> bbr-stats|fec-stats`, `uwg show <if> underlay-mtu` и
+`uwg show <if> fec-stats`, `uwg show <if> underlay-mtu` и
 `uwg set <if> underlay-mtu N` работают и с демоном, и с модулем ядра;
 `uwg showconf` сохраняет FEC-MTU (1368 для ядра, 1352 для Rust при
-underlay 1500 без `S4`), чтобы `uwg-quick` не сбрасывал его при
-перезапуске.
+underlay 1500 без `S4` и активном FEC), чтобы `uwg-quick` не сбрасывал его
+при перезапуске.
 
 ## UAPI: `advanced_security`
 

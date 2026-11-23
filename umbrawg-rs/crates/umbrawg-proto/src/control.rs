@@ -16,7 +16,6 @@ pub const EXTENSION_MAGIC: [u8; 3] = *b"UWG";
 pub const EXTENSION_VERSION: u8 = 1;
 
 const CAPS_LEN: usize = 12;
-const ACK_HEADER_LEN: usize = 16;
 /// Length of the fixed FEC shard body header that follows the extension prefix.
 pub const FEC_HEADER_LEN: usize = 12;
 
@@ -25,7 +24,10 @@ pub const FEC_HEADER_LEN: usize = 12;
 pub enum ControlKind {
     /// Capability exchange.
     Caps,
-    /// Acknowledgement and delivery feedback.
+    /// Reserved for the removed acknowledgement frames.
+    ///
+    /// The kind stays on the wire so an old peer cannot mistake it for a
+    /// shard; a receiver silently ignores it.
     Ack,
     /// One Reed-Solomon shard.
     FecShard,
@@ -55,10 +57,6 @@ impl ControlKind {
 pub struct CapsFlags(u32);
 
 impl CapsFlags {
-    /// Peer supports BBR-style feedback.
-    pub const BBR: Self = Self(1 << 0);
-    /// Peer can send acknowledgements.
-    pub const ACK: Self = Self(1 << 1);
     /// Peer can decode Reed-Solomon shards.
     pub const FEC: Self = Self(1 << 2);
     /// Peer wants adaptive FEC.
@@ -103,8 +101,6 @@ impl core::ops::BitOr for CapsFlags {
 pub struct Caps {
     /// Advertised capabilities.
     pub flags: CapsFlags,
-    /// Requested ACK interval in packets; `0` means the default of 2.
-    pub ack_interval_packets: u16,
     /// Preferred number of data shards for FEC.
     pub fec_k: u8,
     /// Preferred number of parity shards for FEC.
@@ -123,7 +119,7 @@ impl Caps {
         }
         write_prefix(output, ControlKind::Caps, CAPS_LEN)?;
         output[8..12].copy_from_slice(&self.flags.bits().to_le_bytes());
-        output[12..14].copy_from_slice(&self.ack_interval_packets.to_le_bytes());
+        output[12..14].copy_from_slice(&0u16.to_le_bytes());
         output[14] = self.fec_k;
         output[15] = self.fec_m;
         output[16..20].copy_from_slice(&0u32.to_le_bytes());
@@ -142,85 +138,10 @@ impl Caps {
         let flags = CapsFlags::from_bits(u32::from_le_bytes(
             body[0..4].try_into().expect("checked length"),
         ));
-        let ack_interval_packets =
-            u16::from_le_bytes(body[4..6].try_into().expect("checked length"));
         Ok(Self {
             flags,
-            ack_interval_packets,
             fec_k: body[6],
             fec_m: body[7],
-        })
-    }
-}
-
-/// Acknowledgement and delivery feedback.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Ack {
-    /// Highest received transport counter.
-    pub largest_counter: u64,
-    /// Delay between receiving `largest_counter` and sending this ACK.
-    pub ack_delay_us: u32,
-    /// ECN CE counter increased.
-    pub ecn_ce: bool,
-    /// Bitmap of received counters; bit 0 is `largest_counter`.
-    ///
-    /// Bits above the length carried by a short ACK are set ("covered"), like
-    /// the kernel's `uwg_ext_ack_bitmap`, so they never look like holes.
-    pub received: u64,
-}
-
-impl Ack {
-    /// Encodes the frame into `output`, returning the number of bytes written.
-    pub fn encode(&self, output: &mut [u8]) -> Result<usize> {
-        let total = EXTENSION_HEADER_LEN + ACK_HEADER_LEN + 8;
-        if output.len() < total {
-            return Err(ProtoError::BufferTooSmall {
-                required: total,
-                available: output.len(),
-            });
-        }
-        write_prefix(output, ControlKind::Ack, ACK_HEADER_LEN + 8)?;
-        output[8..16].copy_from_slice(&self.largest_counter.to_le_bytes());
-        output[16..20].copy_from_slice(&self.ack_delay_us.to_le_bytes());
-        output[20] = u8::from(self.ecn_ce);
-        output[21] = 8;
-        output[22..24].copy_from_slice(&0u16.to_le_bytes());
-        output[24..32].copy_from_slice(&self.received.to_le_bytes());
-        Ok(total)
-    }
-
-    /// Decodes a complete acknowledgement frame.
-    pub fn decode(frame: &[u8]) -> Result<Self> {
-        let body = extension_body(frame, ControlKind::Ack)?;
-        if body.len() < ACK_HEADER_LEN + 1 {
-            return Err(ProtoError::InvalidLength {
-                expected: ACK_HEADER_LEN + 1,
-                actual: body.len(),
-            });
-        }
-        let bitmap_len = usize::from(body[13]);
-        if !(1..=8).contains(&bitmap_len) || body.len() != ACK_HEADER_LEN + bitmap_len {
-            return Err(ProtoError::InvalidLength {
-                expected: ACK_HEADER_LEN + bitmap_len,
-                actual: body.len(),
-            });
-        }
-        let mut bitmap = [0u8; 8];
-        bitmap[..bitmap_len].copy_from_slice(&body[ACK_HEADER_LEN..ACK_HEADER_LEN + bitmap_len]);
-        // Wire parity with the kernel: bits the sender did not include are
-        // marked as covered (set), not as holes. A short bitmap is a
-        // compatibility path; treating its absent high bits as losses would
-        // inflate the BBR loss estimate by up to 63 counters.
-        let mut received = u64::from_le_bytes(bitmap);
-        let covered = bitmap_len * 8;
-        if covered < 64 {
-            received |= !0u64 << covered;
-        }
-        Ok(Self {
-            largest_counter: u64::from_le_bytes(body[0..8].try_into().expect("checked length")),
-            ack_delay_us: u32::from_le_bytes(body[8..12].try_into().expect("checked length")),
-            ecn_ce: body[12] & 1 != 0,
-            received,
         })
     }
 }
@@ -393,8 +314,7 @@ mod tests {
     #[test]
     fn caps_round_trip() {
         let caps = Caps {
-            flags: CapsFlags::ACK | CapsFlags::BBR | CapsFlags::FEC | CapsFlags::FEC_PARTIAL,
-            ack_interval_packets: 2,
+            flags: CapsFlags::FEC | CapsFlags::FEC_ADAPTIVE | CapsFlags::FEC_PARTIAL,
             fec_k: 10,
             fec_m: 2,
         };
@@ -415,52 +335,6 @@ mod tests {
         );
         assert!(!CapsFlags::FEC.contains(CapsFlags::FEC_PARTIAL));
         assert!((CapsFlags::FEC | CapsFlags::FEC_PARTIAL).contains(CapsFlags::FEC_PARTIAL));
-    }
-
-    #[test]
-    fn ack_round_trip_with_gaps() {
-        let ack = Ack {
-            largest_counter: 0x0102_0304_0506_0708,
-            ack_delay_us: 1234,
-            ecn_ce: true,
-            received: 0b1010_0000_0000_0000_0000_0000_0000_0101,
-        };
-        let mut buffer = [0u8; 32];
-        let written = ack.encode(&mut buffer).unwrap();
-        assert_eq!(written, 32);
-        assert_eq!(Ack::decode(&buffer).unwrap(), ack);
-    }
-
-    #[test]
-    fn short_ack_bitmap_is_decoded() {
-        let ack = Ack {
-            largest_counter: 7,
-            ack_delay_us: 0,
-            ecn_ce: false,
-            received: 0b101,
-        };
-        let mut buffer = [0u8; 32];
-        ack.encode(&mut buffer).unwrap();
-        let body_len = (ACK_HEADER_LEN + 1) as u16;
-        buffer[6..8].copy_from_slice(&body_len.to_le_bytes());
-        buffer[21] = 1;
-        buffer[24] = 0b101;
-        // Parity with the kernel: the seven bytes the sender omitted are
-        // covered (set), so their counters are not reported as holes.
-        assert_eq!(Ack::decode(&buffer).unwrap().received, 0b101 | (!0u64 << 8));
-    }
-
-    #[test]
-    fn full_ack_bitmap_keeps_the_wire_bits() {
-        let ack = Ack {
-            largest_counter: 7,
-            ack_delay_us: 0,
-            ecn_ce: false,
-            received: 0b101,
-        };
-        let mut buffer = [0u8; 32];
-        ack.encode(&mut buffer).unwrap();
-        assert_eq!(Ack::decode(&buffer).unwrap().received, 0b101);
     }
 
     #[test]
@@ -507,8 +381,7 @@ mod tests {
     #[test]
     fn truncated_frames_are_rejected() {
         let caps = Caps {
-            flags: CapsFlags::ACK,
-            ack_interval_packets: 2,
+            flags: CapsFlags::FEC,
             fec_k: 4,
             fec_m: 1,
         };

@@ -108,8 +108,7 @@ impl TxBatch {
         self.push_with_peer(None, endpoint, base, layout, &[0; MAX_GSO_GROUPS])
     }
 
-    /// Добавляет группы пира `peer`, чтобы ошибки отправки можно было вернуть
-    /// в окно BBR этого пира.
+    /// Добавляет группы пира `peer`.
     ///
     /// `fec_caps[i]` — предел сегментов в GSO-группе `i`: `0` для обычного
     /// трафика, `m` для FEC-шардов. Ограничение действует только на группу,
@@ -212,20 +211,13 @@ impl TxBatch {
     /// внешний поток одного пира раскладывался по нескольким 4-tuple.
     #[cfg(test)]
     pub fn flush_tracked(&mut self, sockets: &dyn SocketSource, buffer: &[u8]) -> (usize, usize) {
-        self.flush_with(sockets, buffer, |_, _| {})
+        self.flush_with(sockets, buffer)
     }
 
-    /// Отправляет накопленное и сообщает о локально отброшенных байтах.
+    /// Отправляет накопленное и сообщает о локально отброшенных датаграммах.
     ///
-    /// `on_drop` вызывается для каждого пира, чьи датаграммы не удалось
-    /// отправить; демон возвращает эти байты в окно BBR. Возвращает
-    /// `(отправлено, отброшено датаграмм)`.
-    pub fn flush_with(
-        &mut self,
-        sockets: &dyn SocketSource,
-        buffer: &[u8],
-        mut on_drop: impl FnMut(&Arc<Peer>, usize),
-    ) -> (usize, usize) {
+    /// Возвращает `(отправлено, отброшено датаграмм)`.
+    pub fn flush_with(&mut self, sockets: &dyn SocketSource, buffer: &[u8]) -> (usize, usize) {
         if self.groups.is_empty() {
             self.clear();
             return (0, 0);
@@ -251,7 +243,7 @@ impl TxBatch {
                     cap,
                 ) {
                     if pending == 0 {
-                        self.note_dropped(&peer, group.len(), 1, &mut on_drop);
+                        self.note_dropped(group.len(), 1);
                         log::debug!(
                             "dropping GSO group of {} segments: it does not fit {} datagrams",
                             group.segments,
@@ -259,12 +251,12 @@ impl TxBatch {
                         );
                         break;
                     }
-                    sent += self.send(socket, &peer, &outgoings[..pending], &mut on_drop);
+                    sent += self.send(socket, &peer, &outgoings[..pending]);
                     pending = 0;
                 }
             }
             if pending > 0 {
-                sent += self.send(socket, &peer, &outgoings[..pending], &mut on_drop);
+                sent += self.send(socket, &peer, &outgoings[..pending]);
             }
         }
         let dropped = self.dropped;
@@ -272,13 +264,7 @@ impl TxBatch {
         (sent, dropped)
     }
 
-    fn send(
-        &mut self,
-        socket: &Socket,
-        batch: &PeerBatch,
-        outgoings: &[Outgoing<'_>],
-        on_drop: &mut impl FnMut(&Arc<Peer>, usize),
-    ) -> usize {
+    fn send(&mut self, socket: &Socket, batch: &PeerBatch, outgoings: &[Outgoing<'_>]) -> usize {
         let endpoint = batch.endpoint;
         let mut sent = 0;
         let mut remaining = outgoings;
@@ -289,7 +275,7 @@ impl TxBatch {
                     attempts += 1;
                     if attempts > MAX_SEND_ATTEMPTS {
                         log::debug!("send batch made no progress to {endpoint}");
-                        self.note_dropped_outgoing(batch, remaining, on_drop);
+                        self.note_dropped_outgoing(remaining);
                         break;
                     }
                 }
@@ -302,14 +288,14 @@ impl TxBatch {
                     attempts += 1;
                     if attempts > MAX_SEND_ATTEMPTS {
                         log::debug!("send batch is blocked on {endpoint}");
-                        self.note_dropped_outgoing(batch, remaining, on_drop);
+                        self.note_dropped_outgoing(remaining);
                         break;
                     }
                     wait_writable(socket);
                 }
                 Err(error) => {
                     log::debug!("send batch to {endpoint} failed: {error}");
-                    self.note_dropped_outgoing(batch, remaining, on_drop);
+                    self.note_dropped_outgoing(remaining);
                     break;
                 }
             }
@@ -317,27 +303,13 @@ impl TxBatch {
         sent
     }
 
-    fn note_dropped_outgoing(
-        &mut self,
-        batch: &PeerBatch,
-        remaining: &[Outgoing<'_>],
-        on_drop: &mut impl FnMut(&Arc<Peer>, usize),
-    ) {
+    fn note_dropped_outgoing(&mut self, remaining: &[Outgoing<'_>]) {
         let bytes: usize = remaining.iter().map(Outgoing::len).sum();
-        self.note_dropped(batch, bytes, remaining.len(), on_drop);
+        self.note_dropped(bytes, remaining.len());
     }
 
-    fn note_dropped(
-        &mut self,
-        batch: &PeerBatch,
-        bytes: usize,
-        datagrams: usize,
-        on_drop: &mut impl FnMut(&Arc<Peer>, usize),
-    ) {
+    fn note_dropped(&mut self, _bytes: usize, datagrams: usize) {
         self.dropped = self.dropped.saturating_add(datagrams);
-        if let Some(peer) = batch.peer.as_ref().filter(|_| bytes > 0) {
-            on_drop(peer, bytes);
-        }
     }
 }
 
@@ -847,12 +819,8 @@ mod tests {
             group_count: 1,
         });
         let buffer = vec![0u8; segments * 100];
-        let mut drops = Vec::new();
-        let (sent, dropped) = batch.flush_with(&socket, &buffer, |peer, bytes| {
-            drops.push((peer.public_key(), bytes));
-        });
+        let (sent, dropped) = batch.flush_with(&socket, &buffer);
         assert_eq!(sent, 0);
         assert_eq!(dropped, 1);
-        assert_eq!(drops, vec![(peer.public_key(), segments * 100)]);
     }
 }

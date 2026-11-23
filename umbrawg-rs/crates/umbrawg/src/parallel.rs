@@ -25,8 +25,8 @@ use rand_core::{OsRng, RngCore};
 
 use umbrawg_crypto::random::BufferedRng;
 use umbrawg_device::{
-    device::BbrBatch, DatagramSink, Device, IncomingOutcome, IoContext, PacketIo, Peer,
-    PreparedIncoming, PreparedTransport,
+    DatagramSink, Device, IncomingOutcome, IoContext, PacketIo, Peer, PreparedIncoming,
+    PreparedTransport,
 };
 use umbrawg_proto::obf::{DetectedPacket, MessageKind};
 use umbrawg_transport::{RecvQueue, SocketSet, SocketSource, MAX_BATCH_SIZE};
@@ -827,6 +827,7 @@ impl PacketIo for ControlIo<'_> {
 /// Поток приёма: `recvmmsg`, классификация, раскладка по воркерам.
 pub(crate) fn rx_loop(
     device: Arc<Device>,
+    control: Arc<crate::control::ConfigControl>,
     shared: Arc<SharedRx>,
     socket_buffer: usize,
     underlay: crate::mtu::Underlay,
@@ -997,6 +998,7 @@ pub(crate) fn rx_loop(
         if now >= housekeeping_at || deadline.is_some_and(|deadline| deadline <= now) {
             housekeeping_at = now + HOUSEKEEPING_INTERVAL;
             housekeeping(&device, active, now, &mut rng, &mut scratch);
+            control.sync_adaptive_mtu();
             shared.stats.housekeeping.fetch_add(1, Ordering::Relaxed);
         }
 
@@ -1437,7 +1439,6 @@ fn execute_job<R: RngCore>(
                 tun,
                 rx,
                 stats: Some(stats),
-                device: Some(device),
             };
             let mut context = IoContext::new(rng, now, scratch, &mut io);
             match device.handle_prepared(
@@ -1497,34 +1498,11 @@ pub(crate) fn worker_loop(
                     tun: &tun,
                     rx: &mut rx,
                     stats: Some(&shared.stats),
-                    device: Some(device.as_ref()),
                 };
                 let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
                 let _ = device.flush_control(peer, &mut context);
             });
             rekey.clear();
-            let mut drained = BbrBatch::new();
-            device.for_each_peer(|peer| {
-                if device.bbr_drain_into(peer, now, crate::MAX_BATCH_SIZE, &mut drained) == 0 {
-                    return;
-                }
-                let slices: Vec<&[u8]> = drained.iter().collect();
-                crate::send_run_inner(
-                    &device,
-                    active,
-                    &tun,
-                    &mut rng,
-                    now,
-                    &mut scratch,
-                    &mut tx_buffer,
-                    &mut batch_buffer,
-                    &mut batch,
-                    peer,
-                    &slices,
-                    &mut rekey,
-                    &mut rx,
-                );
-            });
             busy |= pump_tun_tx(
                 &device,
                 active,
@@ -1543,9 +1521,7 @@ pub(crate) fn worker_loop(
             );
 
             if !batch.is_empty() {
-                let (_, dropped) = batch.flush_with(active, &batch_buffer, |peer, bytes| {
-                    device.on_send_drop(peer, bytes);
-                });
+                let (_, dropped) = batch.flush_with(active, &batch_buffer);
                 if dropped > 0 {
                     shared
                         .stats
@@ -1559,7 +1535,6 @@ pub(crate) fn worker_loop(
                     tun: &tun,
                     rx: &mut rx,
                     stats: Some(&shared.stats),
-                    device: Some(device.as_ref()),
                 };
                 let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
                 if let Err(error) = device.after_batch_sent(peer, &mut context) {
@@ -2538,7 +2513,7 @@ mod tests {
         let tests_start = worker_tail.find("#[cfg(test)]").expect("tests module");
         let worker_body = &worker_tail[..tests_start];
         // The worker may only use the deadline to size its wait; timers and
-        // FEC/ACK housekeeping stay in the rx thread.
+        // FEC housekeeping stays in the rx thread.
         assert!(worker_body.contains("poll_timeout_ms"));
         assert!(!worker_body.contains("housekeeping("));
         assert!(!worker_body.contains("device.tick("));
@@ -2546,6 +2521,33 @@ mod tests {
             .find("pub(crate) fn rx_loop(")
             .expect("rx_loop is defined");
         assert!(source[rx_start..worker_start].contains("housekeeping("));
+    }
+
+    #[test]
+    fn adaptive_mtu_is_synced_from_the_rx_housekeeping() {
+        let source = include_str!("parallel.rs");
+        let start = source.find("pub(crate) fn rx_loop(").expect("rx_loop");
+        let end = source[start..]
+            .find("pub(crate) fn control_loop(")
+            .map(|offset| start + offset)
+            .expect("control_loop");
+        let body = &source[start..end];
+        assert!(
+            body.contains("control.sync_adaptive_mtu()"),
+            "the RX thread must apply adaptive MTU transitions"
+        );
+
+        let worker_start = source
+            .find("pub(crate) fn worker_loop(")
+            .expect("worker_loop");
+        let worker_end = source[worker_start..]
+            .find("#[cfg(test)]")
+            .map(|offset| worker_start + offset)
+            .expect("tests module");
+        assert!(
+            !source[worker_start..worker_end].contains("sync_adaptive_mtu"),
+            "crypto workers must leave the ioctl to the RX thread"
+        );
     }
 
     #[test]

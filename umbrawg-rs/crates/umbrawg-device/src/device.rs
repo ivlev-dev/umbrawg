@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
-use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -13,7 +13,7 @@ use umbrawg_crypto::tai64n::Tai64N;
 use umbrawg_crypto::{aead, random, Key, PrivateKey, PublicKey};
 use umbrawg_fec::{EncodedBlock, FecShard};
 use umbrawg_noise::{CookieChecker, StaticIdentity};
-use umbrawg_proto::control::{Ack, Caps, ControlKind, FecShardHeader};
+use umbrawg_proto::control::{Caps, ControlKind, FecShardHeader};
 use umbrawg_proto::messages::limits::{
     DEFAULT_UDP_WINDOW, INITIATIONS_PER_SECOND, MAX_PEERS_PER_DEVICE,
 };
@@ -28,7 +28,6 @@ use umbrawg_proto::{CookieReply, HandshakeInitiation, HandshakeResponse, ObfPara
 use crate::allowedips::PeerId;
 use crate::buffer::{BufferPool, DEFAULT_BUFFER_SIZE};
 use crate::error::{DeviceError, Result};
-pub use crate::ext::BbrBatch;
 use crate::ext::FecStats;
 use crate::gso::{BatchLayout, MAX_GSO_GROUPS};
 use crate::index::IndexTable;
@@ -47,7 +46,7 @@ const TRANSPORT_FLOOD_INTERVAL: Duration = Duration::from_millis(1000 / INITIATI
 
 /// Maximum time the device goes without servicing pending control frames.
 ///
-/// CAPS revocations and ACKs normally leave from the worker loop every few
+/// CAPS revocations normally leave from the worker loop every few
 /// milliseconds. This bound is the safety net for a loop that only waits on
 /// a deadline: a zero CAPS must not wait for data or a keepalive.
 const CONTROL_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
@@ -209,7 +208,6 @@ pub struct Device {
     incoming_drops: IncomingDropCounters,
     ext_config: RwLock<crate::ExtConfig>,
     cookies_disabled_logged: AtomicBool,
-    bbr_queue_drops: AtomicU64,
     /// Last time pending control frames were serviced.
     control_flush_at: Mutex<Instant>,
 }
@@ -266,7 +264,6 @@ impl Device {
             incoming_drops: IncomingDropCounters::default(),
             ext_config: RwLock::new(config.ext),
             cookies_disabled_logged: AtomicBool::new(false),
-            bbr_queue_drops: AtomicU64::new(0),
             control_flush_at: Mutex::new(Instant::now()),
         };
         device.note_cookie_policy();
@@ -419,6 +416,18 @@ impl Device {
 
     pub fn ext_config(&self) -> crate::ExtConfig {
         *self.ext_config.read()
+    }
+
+    /// Returns `true` when adaptive FEC is active on at least one running peer.
+    ///
+    /// The daemon lowers the TUN MTU only while this is `true`; a fixed FEC
+    /// profile is handled from the mode alone and does not need this signal.
+    #[must_use]
+    pub fn fec_adaptive_active(&self) -> bool {
+        self.peers
+            .load()
+            .values()
+            .any(|peer| peer.running() && peer.extension().fec_adaptive_active())
     }
 
     pub fn set_ext_config(&self, config: crate::ExtConfig) {
@@ -1102,12 +1111,12 @@ impl Device {
         )
     }
 
-    /// Encrypts a control frame (ACK, CAPS or FEC shard).
+    /// Encrypts a control frame (CAPS or FEC shard).
     ///
     /// Control frames use a bounded `0..=15` random trailer instead of the
-    /// configured `random_trailers` budget: inflating a 32-byte ACK up to the
-    /// whole UDP window both wastes bandwidth and makes the frame trivially
-    /// identifiable by size.
+    /// configured `random_trailers` budget: inflating a 20-byte CAPS frame up
+    /// to the whole UDP window both wastes bandwidth and makes the frame
+    /// trivially identifiable by size.
     pub fn encrypt_control_packet<R: RngCore>(
         &self,
         peer: &Peer,
@@ -1208,7 +1217,7 @@ impl Device {
                                 // A real trailer drawn for a batch with room
                                 // must not inflate the packets of that batch
                                 // that have no room left (a full-MTU packet
-                                // sharing the batch with small ACKs).
+                                // sharing the batch with small control frames).
                                 extra.min(udp_window.saturating_sub(base_len))
                             }
                         }
@@ -1269,8 +1278,6 @@ impl Device {
         // (`uwg_peer_udp_window_max`): observing our own padding would let the
         // window and therefore the trailer grow on every packet.
         peer.observe_udp_window(base_len as u32);
-        let kind = crate::ext::FrameKind::classify(plaintext);
-        peer.extension().on_packet_sent(nonce, total, kind, now);
         Ok(total)
     }
 
@@ -1373,8 +1380,8 @@ impl Device {
             }
             ctx.io.deliver(peer, &packet[..length]);
         }
-        // The guard must be released before sending: encrypting a shard takes
-        // the same per-peer lock inside on_packet_sent.
+        // The guard must be released before sending: shard encryption needs
+        // the per-peer extension lock again.
         let due_block = peer.extension().fec_flush_due(ctx.now);
         if let Some(block) = due_block {
             let _ = self.send_fec_block_direct(peer, &block, ctx);
@@ -1383,7 +1390,7 @@ impl Device {
         Ok(sent)
     }
 
-    /// Sends pending CAPS/ACK frames without touching staged data.
+    /// Sends pending CAPS frames without touching staged data.
     pub fn flush_control<R: RngCore, S: DatagramSink>(
         &self,
         peer: &Arc<Peer>,
@@ -1459,8 +1466,8 @@ impl Device {
     ///
     /// The draw uses the packet with the most room inside the peer's UDP
     /// window; the caller caps every packet by its own room, so equal
-    /// plaintexts still get equal padding and small ACKs keep their random
-    /// tail even when they share a batch with a full-MTU packet.
+    /// plaintexts still get equal padding and small control frames keep their
+    /// random tail even when they share a batch with a full-MTU packet.
     fn batch_min_base_len(params: &ObfParams, plaintexts: &[&[u8]]) -> usize {
         plaintexts
             .iter()
@@ -1626,7 +1633,7 @@ impl Device {
             let mut fallback_padding: Option<usize> = None;
             for plaintext in plaintexts {
                 // Drop the extension guard before the match body: FEC shard
-                // encryption takes the same per-peer lock via on_packet_sent.
+                // encryption takes the same per-peer lock again.
                 let pushed = peer.extension().fec_push(plaintext, ctx.now);
                 match pushed {
                     Ok(Some(block)) => {
@@ -1738,69 +1745,6 @@ impl Device {
             endpoint,
             fec_caps: [0; MAX_GSO_GROUPS],
         })
-    }
-
-    #[must_use]
-    pub fn bbr_queue_active(&self, peer: &Peer) -> bool {
-        peer.extension().bbr_queue_active()
-    }
-
-    /// Queues a plaintext packet for the BBR pacer.
-    ///
-    /// Returns `false` when the queue is full. The rejection is counted by
-    /// [`Device::bbr_queue_drop_count`] so a full queue is never silent.
-    pub fn bbr_enqueue(&self, peer: &Peer, packet: &[u8]) -> bool {
-        let accepted = peer.extension().bbr_enqueue(packet);
-        if !accepted {
-            self.bbr_queue_drops.fetch_add(1, Ordering::Relaxed);
-        }
-        accepted
-    }
-
-    /// Datagrams rejected by the BBR queue because it was full.
-    #[must_use]
-    pub fn bbr_queue_drop_count(&self) -> u64 {
-        self.bbr_queue_drops.load(Ordering::Relaxed)
-    }
-
-    /// Releases a datagram the local send path dropped from the BBR window.
-    ///
-    /// A local send error is not a path loss: the bytes leave the in-flight
-    /// accounting without a congestion response.
-    pub fn on_send_drop(&self, peer: &Peer, bytes: usize) {
-        peer.extension().on_drop_bytes(bytes);
-    }
-
-    #[must_use]
-    pub fn bbr_drain(&self, peer: &Peer, now: Instant, max_packets: usize) -> Vec<Vec<u8>> {
-        peer.extension().bbr_drain(now, max_packets)
-    }
-
-    /// Перекладывает готовые к отправке пакеты BBR-очереди в переиспользуемый батч.
-    ///
-    /// Возвращает число пакетов. Буфер батча переходит очереди, а очередь
-    /// отдаёт ей свой: в установившемся режиме вызов не аллоцирует и не копирует
-    /// байты. Батч нужно держать между вызовами, иначе буферы перестают
-    /// переиспользоваться.
-    pub fn bbr_drain_into(
-        &self,
-        peer: &Peer,
-        now: Instant,
-        max_packets: usize,
-        batch: &mut BbrBatch,
-    ) -> usize {
-        peer.extension().bbr_drain_into(now, max_packets, batch)
-    }
-
-    /// Returns a BBR snapshot for the peer, or `None` when BBR is disabled.
-    #[must_use]
-    pub fn bbr_stats(&self, peer: &Peer) -> Option<umbrawg_cc::BbrStats> {
-        peer.extension().bbr_stats()
-    }
-
-    #[must_use]
-    pub fn pacing_delay(&self, peer: &Peer, bytes: usize, now: Instant) -> Duration {
-        peer.extension().pacing_delay(bytes, now)
     }
 
     #[must_use]
@@ -2009,8 +1953,8 @@ impl Device {
         // Mirrors the kernel order in `receive.c`: accounting, keypair
         // promotion, timers and keep-key-fresh run for every authenticated
         // packet, extension frames included, before the extension dispatcher.
-        // Treating a CAPS/ACK/FEC frame as ordinary traffic prevents spurious
-        // rekeys and feedback resets while FEC or BBR is active.
+        // Treating a CAPS or FEC frame as ordinary traffic prevents spurious
+        // rekeys and feedback resets while FEC is active.
         peer.observe_udp_window((header_end + plaintext_len + aead::TAG_LEN) as u32);
         peer.add_rx((plaintext_len + MESSAGE_MINIMUM_LENGTH) as u64);
         if let Some(removed) = peer.promote_keypair(&keypair) {
@@ -2022,10 +1966,10 @@ impl Device {
         } else {
             peer.set_endpoint_from_packet(source);
         }
-        // Counters belong to one keypair. Feedback from the previous keypair
-        // (still accepted for data during a rekey) must not enter the ACK
-        // tracker or the BBR epoch of the current one, exactly like the
-        // kernel, which checks `keypair->internal_id` before observing.
+        // Counters belong to one keypair. A counter from the previous keypair
+        // (still accepted for data during a rekey) must not enter the adaptive
+        // loss estimate of the current one, exactly like the kernel, which
+        // checks `keypair->internal_id` before observing.
         let current_keypair = peer
             .current_keypair()
             .is_some_and(|current| Arc::ptr_eq(&current, &keypair));
@@ -2066,7 +2010,7 @@ impl Device {
         match kind {
             ControlKind::Caps => {
                 if current_keypair {
-                    peer.extension().observe_control(counter, ctx.now);
+                    peer.extension().observe_received(counter, ctx.now);
                 }
                 let Ok(caps) = Caps::decode(plaintext) else {
                     return Ok(IncomingOutcome::Dropped);
@@ -2075,18 +2019,9 @@ impl Device {
                 Ok(IncomingOutcome::Keepalive)
             }
             ControlKind::Ack => {
-                if !current_keypair {
-                    // An ACK decrypted with a previous keypair names a counter
-                    // space that no longer exists. Processing it would
-                    // acknowledge records of the current epoch by accident, so
-                    // it is ignored (the kernel compares `keypair_id` too).
-                    return Ok(IncomingOutcome::Keepalive);
-                }
-                peer.extension().observe_control(counter, ctx.now);
-                let Ok(ack) = Ack::decode(plaintext) else {
-                    return Ok(IncomingOutcome::Dropped);
-                };
-                peer.extension().on_ack(&ack, ctx.now);
+                // Reserved kind: acknowledgement frames are no longer
+                // produced or consumed. An old peer may still send one, and
+                // it is dropped silently instead of being decoded.
                 Ok(IncomingOutcome::Keepalive)
             }
             ControlKind::FecShard => {
@@ -2300,7 +2235,7 @@ impl Device {
         ));
         self.install_keypair(&peer, &keypair, true);
         // The initiator switched its send stream to the new keypair here, so
-        // the old ACK/BBR/FEC state belongs to a dead nonce space. The
+        // the old loss/FEC state belongs to a dead nonce space. The
         // responder does the same when it promotes this keypair on the first
         // authentic packet; capabilities survive on both sides.
         peer.extension().reset_feedback();
@@ -2368,9 +2303,6 @@ impl Device {
             if !peer.running() {
                 continue;
             }
-            // BBR needs time-driven work (PROBE_BW watchdog, PROBE_RTT,
-            // stale-record sweep) even when no ACK arrives.
-            peer.extension().on_timer(ctx.now);
             let count = peer.with_timers(|timers| timers.expire(ctx.now, &mut kinds));
             for kind in kinds[..count].iter().copied() {
                 self.handle_timer(peer, kind, ctx)?;
@@ -2385,8 +2317,8 @@ impl Device {
                 handled += 1;
             }
             // A deadline wake-up is also a control-flush opportunity: a zero
-            // CAPS revocation or an ACK must leave even when no data and no
-            // keepalive are scheduled on the TX path.
+            // CAPS revocation must leave even when no data and no keepalive
+            // are scheduled on the TX path.
             handled += self.flush_control(peer, ctx);
         }
         self.rate_limiter.gc(ctx.now);
@@ -2500,10 +2432,10 @@ impl Device {
                     _ => deadline,
                 });
             }
-            // ACK and FEC deadlines live in the peer extension and are much
-            // shorter than the WireGuard timers; the poll timeout must see
-            // them or feedback waits for the idle ceiling.
-            if let Some(deadline) = peer.extension().next_deadline(now) {
+            // FEC deadlines live in the peer extension and are much shorter
+            // than the WireGuard timers; the poll timeout must see them or a
+            // partial block waits for the idle ceiling.
+            if let Some(deadline) = peer.extension().next_deadline() {
                 next = Some(match next {
                     Some(current) if current <= deadline => current,
                     _ => deadline,
@@ -2688,8 +2620,8 @@ fn read_u32(buffer: &[u8], offset: usize) -> u32 {
 enum PaddingMode {
     /// Regular data packets keep the configured obfuscation padding.
     Data,
-    /// ACK, CAPS and FEC shard frames use a bounded random trailer so that a
-    /// 32-byte ACK is not inflated to the whole UDP window.
+    /// CAPS and FEC shard frames use a bounded random trailer so that a
+    /// 20-byte CAPS frame is not inflated to the whole UDP window.
     Control,
 }
 
@@ -3060,17 +2992,14 @@ mod tests {
             .add_peer(PeerConfig::new(PublicKey::from_bytes([9u8; 32])))
             .unwrap();
         let config = crate::ExtConfig {
-            bbr: crate::BbrMode::Off,
             fec: crate::FecMode::Fixed { k: 2, m: 1 },
-            ack_interval: 2,
             max_shard_len: 1900,
         };
         device.set_ext_config(config);
         let now = Instant::now();
         peer.extension().handle_caps(
             Caps {
-                flags: CapsFlags::FEC | CapsFlags::ACK,
-                ack_interval_packets: 2,
+                flags: CapsFlags::FEC,
                 fec_k: 2,
                 fec_m: 1,
             },

@@ -528,32 +528,6 @@ impl Default for PeerSnapshot {
     }
 }
 
-/// Device-wide BBR state, mirroring `UWGDEVICE_A_BBR_STATS`.
-///
-/// The kernel always reports the aggregate, zeroed when BBR is disabled. The
-/// counters are summed over the peers of the device; `mode` is the configured
-/// BBR mode (`0` off, `1` monitor, `2` on) and `min_rtt_ns` is the smallest
-/// measured RTT, or zero when no peer has a sample.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct BbrStats {
-    /// Configured BBR mode: `0` off, `1` monitor, `2` on.
-    pub mode: u8,
-    /// Summed congestion window in bytes.
-    pub cwnd: u64,
-    /// Summed bytes in flight.
-    pub inflight: u64,
-    /// Summed pacing rate in bytes per second.
-    pub pacing_rate: u64,
-    /// Summed bottleneck bandwidth estimate in bytes per second.
-    pub btl_bw: u64,
-    /// Smallest measured round-trip time in nanoseconds, zero if unknown.
-    pub min_rtt_ns: u64,
-    /// Datagrams reported lost by BBR.
-    pub round_lost: u32,
-    /// Number of peers tracked by BBR.
-    pub peers: u32,
-}
-
 /// Device-wide FEC counters, mirroring `UWGDEVICE_A_FEC_STATS`.
 ///
 /// The kernel always reports the aggregate, zeroed when FEC is disabled.
@@ -591,15 +565,10 @@ pub struct DeviceSnapshot {
     pub fwmark: u32,
     /// Number of additional external UDP ports.
     pub extra_ports: u8,
-    /// BBRv3 mode: `off`, `monitor` or `on`.
-    pub bbr: String,
     /// FEC mode: `off`, `adaptive` or `K:M`.
     pub fec: String,
     /// MTU of the path between peers (`576..=65535`), `1500` by default.
     pub underlay_mtu: u16,
-    /// Device-wide BBR aggregate; `None` when the implementation cannot
-    /// report it (the userspace device always reports it).
-    pub bbr_stats: Option<BbrStats>,
     /// Device-wide FEC counters; `None` when the implementation cannot
     /// report them (the userspace device always reports them).
     pub fec_stats: Option<FecStats>,
@@ -618,10 +587,8 @@ impl Default for DeviceSnapshot {
             listen_port: 0,
             fwmark: 0,
             extra_ports: 0,
-            bbr: "off".to_owned(),
-            fec: "off".to_owned(),
+            fec: "adaptive".to_owned(),
             underlay_mtu: DEFAULT_UNDERLAY_MTU,
-            bbr_stats: None,
             fec_stats: None,
             obfuscation: ObfuscationSnapshot::default(),
             timings: TimingSnapshot::default(),
@@ -836,8 +803,6 @@ pub struct SetRequest {
     pub fwmark: Option<u32>,
     /// New number of additional external UDP ports, `0..=8`.
     pub extra_ports: Option<u8>,
-    /// New BBRv3 mode: `off`, `monitor` or `on`.
-    pub bbr: Option<String>,
     /// New FEC mode: `off`, `adaptive` or `K:M`.
     pub fec: Option<String>,
     /// New MTU of the path between peers, `576..=65535`.

@@ -1072,10 +1072,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "umbrawg-cc"
-version = "0.4.1"
-
-[[package]]
 name = "umbrawg-crypto"
 version = "0.4.1"
 dependencies = [
@@ -1100,7 +1096,6 @@ dependencies = [
  "parking_lot",
  "rand_core",
  "thiserror",
- "umbrawg-cc",
  "umbrawg-crypto",
  "umbrawg-fec",
  "umbrawg-noise",

@@ -12,7 +12,7 @@ pub mod obf;
 pub mod params;
 pub mod special;
 
-pub use control::{Ack, Caps, CapsFlags, ControlKind, FecShardHeader};
+pub use control::{Caps, CapsFlags, ControlKind, FecShardHeader};
 pub use error::{ProtoError, Result};
 pub use messages::{
     CookieReply, HandshakeInitiation, HandshakeResponse, MessageType, TransportPacket,

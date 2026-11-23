@@ -6,8 +6,8 @@ use rand_core::RngCore;
 
 use umbrawg_crypto::{Key, PrivateKey, PublicKey};
 use umbrawg_device::{
-    AllowedIp, BbrMode, DatagramSink, Device, DeviceConfig, DeviceControl, DeviceError, ExtConfig,
-    FecMode, IncomingMeta, IncomingOutcome, IoContext, PacketIo, Peer, PeerConfig, PeerState,
+    AllowedIp, DatagramSink, Device, DeviceConfig, DeviceControl, DeviceError, ExtConfig, FecMode,
+    IncomingMeta, IncomingOutcome, IoContext, PacketIo, Peer, PeerConfig, PeerState,
     PreparedIncoming, SendOutcome, TimerEvent, TimerKind, Timings, DEFAULT_EXTRA_PORTS,
 };
 use umbrawg_proto::control::{Caps, CapsFlags};
@@ -242,7 +242,6 @@ fn send_caps_frame(
 ) {
     let caps = Caps {
         flags,
-        ack_interval_packets: 2,
         fec_k,
         fec_m,
     };
@@ -1445,6 +1444,12 @@ fn full_mtu_random_trailers_keep_a_small_reserve() {
         ..ObfParams::default()
     };
     let mut pair = pair(params);
+    let off = ExtConfig {
+        fec: FecMode::Off,
+        ..ExtConfig::default()
+    };
+    pair.a.set_ext_config(off);
+    pair.b.set_ext_config(off);
     let now = Instant::now();
     complete_handshake(&mut pair, now);
 
@@ -1714,6 +1719,7 @@ fn udp_window_ignores_our_padding_and_counts_the_aead_tag() {
     );
 
     // A small inner ACK may grow up to the full-size datagram, never past it.
+    pair.io_b.take_sent();
     let ack = ipv4_packet([10, 0, 0, 2], [10, 0, 0, 1], &[4u8; 52]);
     let mut ack_len = 0;
     for _ in 0..64 {
@@ -1743,15 +1749,13 @@ fn fec_shards_fit_an_ethernet_underlay() {
     let mut pair = pair(ObfParams::default());
     let ext = ExtConfig {
         fec: FecMode::Fixed { k: 2, m: 1 },
-        ack_interval: 2,
         max_shard_len: MAX_SHARD_LEN,
-        ..ExtConfig::default()
     };
     pair.a.set_ext_config(ext);
     pair.b.set_ext_config(ext);
     let now = Instant::now();
     complete_handshake(&mut pair, now);
-    let flags = CapsFlags::ACK | CapsFlags::FEC;
+    let flags = CapsFlags::FEC;
     send_caps_frame(&mut pair, true, flags, 2, 1, now);
     deliver_all(&mut pair, true, now);
     send_caps_frame(&mut pair, false, flags, 2, 1, now);
@@ -1800,7 +1804,7 @@ fn fec_shards_fit_an_ethernet_underlay() {
 fn extension_frames_disarm_the_new_handshake_timer() {
     let mut pair = pair(ObfParams::default());
     let ext = ExtConfig {
-        bbr: BbrMode::Monitor,
+        fec: FecMode::Fixed { k: 2, m: 1 },
         ..ExtConfig::default()
     };
     pair.a.set_ext_config(ext);
@@ -1826,7 +1830,7 @@ fn extension_frames_disarm_the_new_handshake_timer() {
 
     send_data(&mut pair, false, &data, now);
     deliver_all(&mut pair, false, now);
-    send_caps_frame(&mut pair, true, CapsFlags::BBR | CapsFlags::ACK, 0, 0, now);
+    send_caps_frame(&mut pair, true, CapsFlags::FEC, 2, 1, now);
     deliver_all(&mut pair, true, now);
     assert!(
         !has_new_handshake(&pair.b, &pair.peer_a, at),
@@ -1834,94 +1838,18 @@ fn extension_frames_disarm_the_new_handshake_timer() {
     );
 }
 
-#[test]
-fn fec_shards_are_visible_to_bbr() {
-    let mut pair = pair(ObfParams::default());
-    let ext = ExtConfig {
-        bbr: BbrMode::On,
-        fec: FecMode::Fixed { k: 2, m: 1 },
-        ack_interval: 2,
-        max_shard_len: 1900,
-    };
-    pair.a.set_ext_config(ext);
-    pair.b.set_ext_config(ext);
-    let now = Instant::now();
-    complete_handshake(&mut pair, now);
-
-    let flags = CapsFlags::BBR | CapsFlags::ACK | CapsFlags::FEC;
-    send_caps_frame(&mut pair, true, flags, 2, 1, now);
-    deliver_all(&mut pair, true, now);
-    send_caps_frame(&mut pair, false, flags, 2, 1, now);
-    deliver_all(&mut pair, false, now);
-    pair.io_a.take_sent();
-    pair.io_b.take_sent();
-
-    let first = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"first");
-    let second = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"second");
-    let mut output = vec![0u8; 65_535];
-    let layout = {
-        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
-        let sent = pair
-            .a
-            .send_batch(&pair.peer_b, &[&first, &second], &mut output, &mut ctx)
-            .unwrap();
-        assert_eq!(sent.sent, 2);
-        sent.layout
-    };
-    let ranges: Vec<std::ops::Range<usize>> = layout
-        .groups()
-        .iter()
-        .flat_map(|group| group.ranges())
-        .collect();
-    assert_eq!(ranges.len(), 3, "k=2, m=1 must produce three shards");
-    for range in ranges {
-        pair.io_a
-            .send_datagram(pair.addr_a, Some(&pair.peer_b), &output[range], None);
-    }
-
-    let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
-    assert!(stats.inflight > 0, "FEC shards must enter the BBR ring");
-    assert_eq!(stats.delivered, 0);
-
-    let tx = pair.a.fec_stats(&pair.peer_b).expect("FEC is configured");
-    assert_eq!(tx.blocks_encoded, 1);
-    assert_eq!(tx.shards_sent, 3);
-
-    deliver_all(&mut pair, true, now);
-    assert_eq!(pair.io_b.delivered.len(), 2);
-    let rx = pair.b.fec_stats(&pair.peer_a).expect("FEC is configured");
-    assert_eq!(rx.blocks_decoded, 1);
-    assert!(rx.packets_recovered <= 1);
-    assert_eq!(rx.decode_fail, 0);
-
-    {
-        let later = now + Duration::from_millis(5);
-        let mut ctx = IoContext::new(&mut pair.rng, later, &mut pair.scratch, &mut pair.io_b);
-        pair.b.flush_staged(&pair.peer_a, &mut ctx).unwrap();
-    }
-    assert!(!pair.io_b.sent.is_empty(), "the receiver must ACK shards");
-    let later = now + Duration::from_millis(5);
-    deliver_all(&mut pair, false, later);
-
-    let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
-    assert!(stats.delivered > 0, "ACKed shards must count as delivered");
-    assert_eq!(stats.inflight, 0);
-}
-
 const FEC_UNDERLAY_SHARD_LEN: u16 = 1385;
 const FEC_TUN_MTU: usize = 1352;
 
 fn fec_ext_config() -> ExtConfig {
     ExtConfig {
-        bbr: BbrMode::On,
         fec: FecMode::Fixed { k: 2, m: 1 },
-        ack_interval: 2,
         max_shard_len: FEC_UNDERLAY_SHARD_LEN,
     }
 }
 
 fn exchange_caps(pair: &mut Pair, now: Instant) {
-    let flags = CapsFlags::BBR | CapsFlags::ACK | CapsFlags::FEC;
+    let flags = CapsFlags::FEC;
     send_caps_frame(pair, true, flags, 2, 1, now);
     deliver_all(pair, true, now);
     send_caps_frame(pair, false, flags, 2, 1, now);
@@ -1996,8 +1924,6 @@ fn rekey_keeps_fec_caps_and_flushes_full_size_shards() {
     complete_handshake(&mut pair, now);
     exchange_caps(&mut pair, now);
 
-    // A complete block before the rekey, so the initiator has non-zero BBR
-    // state that must be discarded by the keypair switch.
     let first = full_size_packet(0x11);
     let second = full_size_packet(0x22);
     assert_eq!(
@@ -2007,21 +1933,6 @@ fn rekey_keeps_fec_caps_and_flushes_full_size_shards() {
     );
     deliver_all(&mut pair, true, now);
     assert_eq!(pair.io_b.delivered.len(), 2);
-
-    {
-        let later = now + Duration::from_millis(5);
-        let mut ctx = IoContext::new(&mut pair.rng, later, &mut pair.scratch, &mut pair.io_b);
-        pair.b.flush_staged(&pair.peer_a, &mut ctx).unwrap();
-    }
-    deliver_all(&mut pair, false, now + Duration::from_millis(5));
-    assert!(
-        pair.a
-            .bbr_stats(&pair.peer_b)
-            .expect("bbr is enabled")
-            .delivered
-            > 0,
-        "the ACK round must move the initiator BBR state"
-    );
 
     // A partial block in the encoder at the moment of the rekey. Its shard is
     // bigger than the old 1 KiB control buffer. A lone packet starts a block
@@ -2069,15 +1980,6 @@ fn rekey_keeps_fec_caps_and_flushes_full_size_shards() {
         "the test must install a new keypair"
     );
 
-    let initiator = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
-    assert_eq!(
-        initiator.delivered, 0,
-        "the initiator must start a fresh BBR epoch after a rekey"
-    );
-    assert!(
-        initiator.inflight > 0,
-        "the shard flushed at the rekey must enter the new BBR ring"
-    );
     let encoded = pair
         .a
         .fec_stats(&pair.peer_b)
@@ -2177,7 +2079,10 @@ fn turning_fec_off_revokes_the_stale_advertisement_with_zero_caps() {
     pair.io_b.take_sent();
 
     // B switches every extension off while A still believes B runs FEC.
-    pair.b.set_ext_config(ExtConfig::default());
+    pair.b.set_ext_config(ExtConfig {
+        fec: FecMode::Off,
+        ..ext
+    });
     let revocation_at = now + Duration::from_millis(1);
     {
         let mut ctx = IoContext::new(
@@ -2261,86 +2166,52 @@ fn fec_block_ids_survive_a_one_sided_mtu_change() {
 }
 
 #[test]
-fn stale_ack_from_the_previous_keypair_is_ignored() {
+fn default_extension_is_adaptive_and_keeps_a_clean_channel_plain() {
     let mut pair = pair(ObfParams::default());
-    let ext = ExtConfig {
-        bbr: BbrMode::On,
-        ..ExtConfig::default()
-    };
-    pair.a.set_ext_config(ext);
-    pair.b.set_ext_config(ext);
+    assert_eq!(pair.a.ext_config().fec, FecMode::Adaptive);
+    assert_eq!(pair.b.ext_config().fec, FecMode::Adaptive);
+
     let now = Instant::now();
     complete_handshake(&mut pair, now);
-    let flags = CapsFlags::BBR | CapsFlags::ACK;
-    // Only the responder advertises: A receives ACK feedback and can track
-    // inflight, while its own first data packet still uses counter 0. That is
-    // what makes the stale ACK below name a counter of the new epoch too.
-    send_caps_frame(&mut pair, false, flags, 0, 0, now);
-    deliver_all(&mut pair, false, now);
-
-    let one = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"one");
-    send_data(&mut pair, true, &one, now);
+    let flags = CapsFlags::FEC | CapsFlags::FEC_ADAPTIVE;
+    send_caps_frame(&mut pair, true, flags, 2, 1, now);
     deliver_all(&mut pair, true, now);
-    {
-        let later = now + Duration::from_millis(5);
-        let mut ctx = IoContext::new(&mut pair.rng, later, &mut pair.scratch, &mut pair.io_b);
-        pair.b.flush_staged(&pair.peer_a, &mut ctx).unwrap();
-    }
-    let stale_ack = pair.io_b.take_sent();
-    assert!(
-        !stale_ack.is_empty(),
-        "the receiver must ACK the first keypair"
-    );
+    send_caps_frame(&mut pair, false, flags, 2, 1, now);
+    deliver_all(&mut pair, false, now);
+    pair.io_a.take_sent();
+    pair.io_b.take_sent();
 
-    let rekey_at = now + Duration::from_secs(6);
-    let before = pair.peer_b.current_keypair().expect("keypair");
-    wait_for_fresh_timestamp();
-    complete_handshake(&mut pair, rekey_at);
-    assert!(
-        !Arc::ptr_eq(&before, &pair.peer_b.current_keypair().expect("keypair")),
-        "the test must install a new keypair"
-    );
-    assert_eq!(
+    let first = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"first");
+    let second = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"second");
+    let mut output = vec![0u8; 65_535];
+    let layout = {
+        let mut ctx = IoContext::new(&mut pair.rng, now, &mut pair.scratch, &mut pair.io_a);
         pair.a
-            .bbr_stats(&pair.peer_b)
-            .expect("bbr is enabled")
-            .delivered,
-        0
-    );
-
-    // The first data packet of the new epoch reuses counter 0, exactly the
-    // `largest_counter` of the ACK captured above.
-    let three = ipv4_packet([10, 0, 0, 1], [10, 0, 0, 2], b"three");
-    send_data(&mut pair, true, &three, rekey_at + Duration::from_millis(1));
-    {
-        let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
-        assert!(
-            stats.inflight > 0,
-            "the new epoch must carry data for a stale ACK to bite"
-        );
-        assert_eq!(stats.delivered, 0);
-    }
-
-    let deliver_at = rekey_at + Duration::from_millis(2);
-    for packet in stale_ack {
-        deliver_one(
-            packet,
-            pair.addr_b,
-            &pair.a,
-            &mut pair.io_a,
-            &mut pair.rng,
-            deliver_at,
-            &mut pair.scratch,
-        );
-    }
-
-    let stats = pair.a.bbr_stats(&pair.peer_b).expect("bbr is enabled");
+            .send_batch(&pair.peer_b, &[&first, &second], &mut output, &mut ctx)
+            .unwrap()
+            .layout
+    };
+    let ranges: Vec<std::ops::Range<usize>> = layout
+        .groups()
+        .iter()
+        .flat_map(|group| group.ranges())
+        .collect();
     assert_eq!(
-        stats.delivered, 0,
-        "an ACK decrypted with the previous keypair must not acknowledge the new epoch"
+        ranges.len(),
+        2,
+        "adaptive FEC must not generate parity on a clean channel"
     );
-    assert!(
-        stats.inflight > 0,
-        "the stale ACK must not release the new epoch's in-flight data"
-    );
+    let stats = pair
+        .a
+        .fec_stats(&pair.peer_b)
+        .expect("adaptive FEC is configured");
+    assert_eq!(stats.blocks_encoded, 0);
+    assert_eq!(stats.shards_sent, 0);
+
+    for range in ranges {
+        pair.io_a
+            .send_datagram(pair.addr_a, Some(&pair.peer_b), &output[range], None);
+    }
+    deliver_all(&mut pair, true, now);
+    assert_eq!(pair.io_b.delivered.len(), 2);
 }

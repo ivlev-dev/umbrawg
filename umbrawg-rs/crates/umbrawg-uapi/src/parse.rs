@@ -114,7 +114,6 @@ fn apply_device_line(request: &mut SetRequest, key: &str, value: &str) -> Result
         "listen_port" => request.listen_port = Some(parse_u16(key, value)?),
         "fwmark" => request.fwmark = Some(parse_u32(key, value)?),
         "extra_ports" => request.extra_ports = Some(parse_extra_ports(key, value)?),
-        "bbr" => request.bbr = Some(value.trim().to_owned()),
         "fec" => request.fec = Some(parse_fec_mode(key, value)?),
         "underlay_mtu" => request.underlay_mtu = Some(parse_underlay_mtu(key, value)?),
         "replace_peers" => {
@@ -517,6 +516,14 @@ allowed_ip=fd00::/64
     fn accepts_request_without_trailing_blank_line() {
         let request = parse("listen_port=1").expect("valid");
         assert_eq!(request.listen_port, Some(1));
+    }
+
+    #[test]
+    fn rejects_removed_bbr_key() {
+        assert!(matches!(
+            parse("bbr=off\n\n"),
+            Err(UapiError::UnknownKey(key)) if key == "bbr"
+        ));
     }
 
     #[test]

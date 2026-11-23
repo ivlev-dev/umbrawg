@@ -54,7 +54,6 @@ fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
         write_field(output, "fwmark", snapshot.fwmark);
     }
     write_field(output, "extra_ports", snapshot.extra_ports);
-    write_field(output, "bbr", &snapshot.bbr);
     write_field(output, "fec", &snapshot.fec);
     write_field(output, "underlay_mtu", snapshot.underlay_mtu);
 
@@ -124,17 +123,6 @@ fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
     write_bool(output, "random_trailers", obfuscation.random_trailers);
     write_bool(output, "disable_cookies", obfuscation.disable_cookies);
 
-    if let Some(stats) = &snapshot.bbr_stats {
-        write_field(output, "bbr_stats", 1);
-        write_field(output, "bbr_mode", bbr_mode_text(stats.mode));
-        write_field(output, "bbr_cwnd", stats.cwnd);
-        write_field(output, "bbr_inflight", stats.inflight);
-        write_field(output, "bbr_pacing_rate", stats.pacing_rate);
-        write_field(output, "bbr_btl_bw", stats.btl_bw);
-        write_field(output, "bbr_min_rtt_ns", stats.min_rtt_ns);
-        write_field(output, "bbr_round_lost", stats.round_lost);
-        write_field(output, "bbr_peers", stats.peers);
-    }
     if let Some(stats) = &snapshot.fec_stats {
         write_field(output, "fec_stats", 1);
         write_field(output, "fec_blocks_encoded", stats.blocks_encoded);
@@ -145,16 +133,6 @@ fn write_device(output: &mut String, snapshot: &DeviceSnapshot) {
         write_field(output, "fec_dropped_bounds", stats.dropped_bounds);
         write_field(output, "fec_dropped_disabled", stats.dropped_disabled);
         write_field(output, "fec_dropped_control", stats.dropped_control);
-    }
-}
-
-/// Formats the numeric BBR mode as the same words the UAPI uses.
-fn bbr_mode_text(mode: u8) -> &'static str {
-    match mode {
-        0 => "off",
-        1 => "monitor",
-        2 => "on",
-        _ => "unknown",
     }
 }
 
@@ -237,7 +215,6 @@ private_key=000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 listen_port=51820
 fwmark=4660
 extra_ports=0
-bbr=off
 fec=off
 underlay_mtu=1500
 jc=4
@@ -261,15 +238,6 @@ keepalive_timeout=10
 max_handshake_attempts=7
 random_trailers=1
 disable_cookies=0
-bbr_stats=1
-bbr_mode=monitor
-bbr_cwnd=131072
-bbr_inflight=4096
-bbr_pacing_rate=1000000
-bbr_btl_bw=2000000
-bbr_min_rtt_ns=12345
-bbr_round_lost=8
-bbr_peers=1
 fec_stats=1
 fec_blocks_encoded=10
 fec_shards_sent=12
@@ -306,18 +274,12 @@ errno=0
         let mut snapshot = DeviceSnapshot::default();
         let response = format_get_response(&snapshot);
         assert!(response.contains("underlay_mtu=1500\n"), "{response}");
-        assert!(!response.contains("bbr_stats="), "{response}");
         assert!(!response.contains("fec_stats="), "{response}");
 
         snapshot.underlay_mtu = 9000;
-        snapshot.bbr_stats = Some(crate::types::BbrStats::default());
         snapshot.fec_stats = Some(crate::types::FecStats::default());
         let response = format_get_response(&snapshot);
         assert!(response.contains("underlay_mtu=9000\n"), "{response}");
-        assert!(
-            response.contains("bbr_stats=1\nbbr_mode=off\n"),
-            "{response}"
-        );
         assert!(
             response.contains("fec_stats=1\nfec_blocks_encoded=0\n"),
             "{response}"
@@ -342,7 +304,7 @@ errno=0
         let response = format_get_response(&DeviceSnapshot::default());
         assert_eq!(
             response,
-            "extra_ports=0\nbbr=off\nfec=off\nunderlay_mtu=1500\nh1=1\nh2=2\nh3=3\nh4=4\nrandom_trailers=0\ndisable_cookies=0\nerrno=0\n\n"
+            "extra_ports=0\nfec=adaptive\nunderlay_mtu=1500\nh1=1\nh2=2\nh3=3\nh4=4\nrandom_trailers=0\ndisable_cookies=0\nerrno=0\n\n"
         );
     }
 
@@ -417,19 +379,8 @@ errno=0
             listen_port: 51820,
             fwmark: 4660,
             extra_ports: 0,
-            bbr: "off".to_owned(),
             fec: "off".to_owned(),
             underlay_mtu: 1500,
-            bbr_stats: Some(crate::types::BbrStats {
-                mode: 1,
-                cwnd: 131_072,
-                inflight: 4096,
-                pacing_rate: 1_000_000,
-                btl_bw: 2_000_000,
-                min_rtt_ns: 12_345,
-                round_lost: 8,
-                peers: 1,
-            }),
             fec_stats: Some(crate::types::FecStats {
                 blocks_encoded: 10,
                 shards_sent: 12,

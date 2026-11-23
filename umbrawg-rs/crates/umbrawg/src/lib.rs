@@ -12,9 +12,8 @@ use std::time::{Duration, Instant};
 
 use umbrawg_crypto::random::BufferedRng;
 use umbrawg_device::{
-    device::BbrBatch, BbrMode, DatagramSink, Device, DeviceConfig, DeviceError, ExtConfig, FecMode,
-    IncomingMeta, IoContext, PacketIo, Peer, DEFAULT_MAX_SHARD_LEN, DEFAULT_UNDER_LOAD_PPS,
-    MIN_MAX_SHARD_LEN,
+    DatagramSink, Device, DeviceConfig, DeviceError, ExtConfig, FecMode, IncomingMeta, IoContext,
+    PacketIo, Peer, DEFAULT_MAX_SHARD_LEN, DEFAULT_UNDER_LOAD_PPS, MIN_MAX_SHARD_LEN,
 };
 use umbrawg_transport::{
     AddressFamily, Endpoint, GsoLimits, GsoSize, OpenOptions, RecvQueue, Socket, SocketSet,
@@ -31,7 +30,7 @@ mod rx;
 mod tx;
 
 use control::ConfigControl;
-use mtu::{fec_max_shard_len, fec_tun_mtu, MtuGuard, Underlay};
+use mtu::{fec_max_shard_len, fec_mtu_required, fec_tun_mtu, MtuGuard, Underlay};
 use rx::RxBatch;
 use tx::TxBatch;
 
@@ -202,16 +201,13 @@ struct WorkerIo<'a> {
     tun: &'a Tun,
     rx: &'a mut RxBatch,
     stats: Option<&'a parallel::RxStats>,
-    /// Устройство доступно только на путях демона: внутренние вызовы
-    /// устройства передают `None`, чтобы не заходить в него повторно.
-    device: Option<&'a Device>,
 }
 
 impl DatagramSink for WorkerIo<'_> {
     fn send_datagram(
         &mut self,
         endpoint: SocketAddr,
-        peer: Option<&Peer>,
+        _peer: Option<&Peer>,
         payload: &[u8],
         gso_size: Option<usize>,
     ) {
@@ -225,12 +221,6 @@ impl DatagramSink for WorkerIo<'_> {
             .next()
             .send_to(Endpoint::new(endpoint), payload, gso)
         {
-            // The datagram was already registered with the congestion
-            // controller: a local send error must return its bytes to the
-            // window instead of waiting for the watermark sweep.
-            if let (Some(device), Some(peer)) = (self.device, peer) {
-                device.on_send_drop(peer, payload.len());
-            }
             log::debug!("send to {endpoint} failed: {error}");
         }
     }
@@ -490,7 +480,7 @@ fn poll_inputs(source: &dyn SocketSource, tun: &Tun, fds: &mut Vec<libc::pollfd>
 
 /// Миллисекунды до ближайшего дедлайна в пределах `1..=IDLE_TIMEOUT_MS`.
 ///
-/// ACK и partial-блок FEC имеют дедлайны 0.5..=5 мс; опрос по ближайшему из
+/// Partial-блок FEC имеет дедлайн 0.1..=0.3 мс; опрос по ближайшему из
 /// них убирает ожидание до 10 мс. Минимум 1 мс не превращает цикл в busy-loop,
 /// а отсутствие дедлайна сохраняет прежний 10-мс простой.
 pub(crate) fn poll_timeout_ms(now: Instant, deadline: Option<Instant>) -> i32 {
@@ -556,47 +546,6 @@ fn send_run<R: rand_core::RngCore>(
     if plaintexts.is_empty() {
         return;
     }
-    if device.bbr_queue_active(peer) {
-        let mut small: [&[u8]; TUN_BATCH] = [&[]; TUN_BATCH];
-        let mut small_len = 0usize;
-        for packet in plaintexts {
-            if packet.len() <= 256 {
-                small[small_len] = packet;
-                small_len += 1;
-            } else if !device.bbr_enqueue(peer, packet) {
-                log::debug!(
-                    "BBR queue is full: dropped {} bytes ({} dropped so far)",
-                    packet.len(),
-                    device.bbr_queue_drop_count()
-                );
-            }
-        }
-        if small_len > 0 {
-            send_run_inner(
-                device,
-                socket,
-                tun,
-                rng,
-                now,
-                scratch,
-                fallback,
-                batch_buffer,
-                batch,
-                peer,
-                &small[..small_len],
-                rekey,
-                rx,
-            );
-        }
-        return;
-    }
-    {
-        let bytes: usize = plaintexts.iter().map(|packet| packet.len()).sum();
-        let delay = device.pacing_delay(peer, bytes, now);
-        if delay > Duration::from_millis(2) && plaintexts.len() > 1 {
-            thread::sleep(delay.min(Duration::from_millis(50)));
-        }
-    }
     if let Some(limit) = device.fec_packet_limit(peer) {
         for chunk in plaintexts.chunks(limit.max(1)) {
             send_run_inner(
@@ -655,9 +604,7 @@ fn send_run_inner<R: rand_core::RngCore>(
     }
     let record = tun.mtu() as usize + TUN_PACKET_MARGIN;
     if batch_flush_needed(batch.used(), plaintexts.len(), record, batch_buffer.len()) {
-        batch.flush_with(socket, batch_buffer, |peer, bytes| {
-            device.on_send_drop(peer, bytes);
-        });
+        batch.flush_with(socket, batch_buffer);
     }
     let mut offset = batch.used();
     let mut retried = false;
@@ -667,7 +614,6 @@ fn send_run_inner<R: rand_core::RngCore>(
             tun,
             rx,
             stats: None,
-            device: Some(device),
         };
         let mut context = IoContext::new(rng, now, scratch, &mut io);
         match device.send_batch(peer, plaintexts, &mut batch_buffer[offset..], &mut context) {
@@ -679,9 +625,7 @@ fn send_run_inner<R: rand_core::RngCore>(
                     break Err(error);
                 }
                 retried = true;
-                batch.flush_with(socket, batch_buffer, |peer, bytes| {
-                    device.on_send_drop(peer, bytes);
-                });
+                batch.flush_with(socket, batch_buffer);
                 offset = batch.used();
             }
         }
@@ -689,16 +633,13 @@ fn send_run_inner<R: rand_core::RngCore>(
     match result {
         Ok(sent) => {
             if sent.staged > 0 {
-                batch.flush_with(socket, batch_buffer, |peer, bytes| {
-                    device.on_send_drop(peer, bytes);
-                });
+                batch.flush_with(socket, batch_buffer);
                 if sent.needs_handshake {
                     let mut io = WorkerIo {
                         socket,
                         tun,
                         rx,
                         stats: None,
-                        device: Some(device),
                     };
                     let mut context = IoContext::new(rng, now, scratch, &mut io);
                     if let Err(error) = device.initiate_handshake(peer, &mut context) {
@@ -714,9 +655,7 @@ fn send_run_inner<R: rand_core::RngCore>(
                 return;
             };
             if !batch.push_for_peer(peer, endpoint, offset, &sent.layout, &sent.fec_caps) {
-                batch.flush_with(socket, batch_buffer, |peer, bytes| {
-                    device.on_send_drop(peer, bytes);
-                });
+                batch.flush_with(socket, batch_buffer);
                 if !batch.push_for_peer(peer, endpoint, offset, &sent.layout, &sent.fec_caps) {
                     return;
                 }
@@ -726,15 +665,12 @@ fn send_run_inner<R: rand_core::RngCore>(
             }
         }
         Err(DeviceError::BufferTooSmall { .. }) => {
-            batch.flush_with(socket, batch_buffer, |peer, bytes| {
-                device.on_send_drop(peer, bytes);
-            });
+            batch.flush_with(socket, batch_buffer);
             let mut io = WorkerIo {
                 socket,
                 tun,
                 rx,
                 stats: None,
-                device: Some(device),
             };
             let mut context = IoContext::new(rng, now, scratch, &mut io);
             for plaintext in plaintexts {
@@ -951,6 +887,7 @@ fn pump_tun_tx<R: rand_core::RngCore>(
 
 fn worker_loop(
     device: Arc<Device>,
+    control: Arc<ConfigControl>,
     mut tun: Tun,
     socket_buffer: usize,
     underlay: Underlay,
@@ -987,6 +924,7 @@ fn worker_loop(
 
     while !shutdown_requested() {
         let now = Instant::now();
+        control.sync_adaptive_mtu();
         device.refresh_under_load(now);
         let (want_port, want_epoch) = device.listen_port_request();
         let want_extra = usize::from(device.extra_ports());
@@ -1047,34 +985,11 @@ fn worker_loop(
                 tun: &tun,
                 rx: &mut rx,
                 stats: None,
-                device: Some(device.as_ref()),
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             let _ = device.flush_control(peer, &mut context);
         });
         rekey.clear();
-        let mut drained = BbrBatch::new();
-        device.for_each_peer(|peer| {
-            if device.bbr_drain_into(peer, now, MAX_BATCH_SIZE, &mut drained) == 0 {
-                return;
-            }
-            let slices: Vec<&[u8]> = drained.iter().collect();
-            send_run_inner(
-                &device,
-                active,
-                &tun,
-                &mut rng,
-                now,
-                &mut scratch,
-                &mut tx_buffer,
-                &mut batch_buffer,
-                &mut batch,
-                peer,
-                &slices,
-                &mut rekey,
-                &mut rx,
-            );
-        });
         let mut busy = pump_tun_tx(
             &device,
             active,
@@ -1093,9 +1008,7 @@ fn worker_loop(
         );
 
         if !batch.is_empty() {
-            batch.flush_with(active, &batch_buffer, |peer, bytes| {
-                device.on_send_drop(peer, bytes);
-            });
+            batch.flush_with(active, &batch_buffer);
         }
         for peer in &rekey {
             let mut io = WorkerIo {
@@ -1103,7 +1016,6 @@ fn worker_loop(
                 tun: &tun,
                 rx: &mut rx,
                 stats: None,
-                device: Some(device.as_ref()),
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             if let Err(error) = device.after_batch_sent(peer, &mut context) {
@@ -1136,7 +1048,6 @@ fn worker_loop(
                                 tun: &tun,
                                 rx: &mut rx,
                                 stats: None,
-                                device: Some(device.as_ref()),
                             };
                             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
                             match device.handle_incoming_with(
@@ -1170,7 +1081,6 @@ fn worker_loop(
                 tun: &tun,
                 rx: &mut rx,
                 stats: None,
-                device: Some(device.as_ref()),
             };
             let mut context = IoContext::new(&mut rng, now, &mut scratch, &mut io);
             if let Err(error) = device.flush_staged(peer, &mut context) {
@@ -1190,7 +1100,6 @@ fn worker_loop(
                 tun: &tun,
                 rx: &mut rx,
                 stats: None,
-                device: Some(device.as_ref()),
             };
             let started = Instant::now();
             let mut context = IoContext::new(&mut rng, started, &mut scratch, &mut io);
@@ -1272,11 +1181,9 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
         }
     }
     log::info!(
-        "extension: bbr={} fec={} shard={} ack_interval={}",
-        ext.bbr.as_str(),
+        "extension: fec={} shard={}",
         ext.fec.as_string(),
-        ext.max_shard_len,
-        ext.ack_interval
+        ext.max_shard_len
     );
     let device = Arc::new(Device::new(DeviceConfig {
         // The extension derives the FEC shard budget and the tunnel MTU from
@@ -1288,7 +1195,12 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
     })?);
     apply_under_load_config(&device);
     log::info!("{underlay}");
-    let tun_mtu = fec_tun_mtu(underlay, device.mtu(), device.obfuscation().s4, fec_enabled);
+    let tun_mtu = fec_tun_mtu(
+        underlay,
+        device.mtu(),
+        device.obfuscation().s4,
+        fec_mtu_required(device.ext_config().fec, device.fec_adaptive_active()),
+    );
     if tun_mtu != device.mtu() {
         log::info!(
             "TUN MTU {} -> {tun_mtu} bytes for FEC over the {}-byte underlay",
@@ -1352,20 +1264,22 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
     };
 
     let listener = UapiListener::bind(&socket_dir(), ifname)?;
-    let server = listener.spawn(Arc::new(ConfigControl::new(
+    let control = Arc::new(ConfigControl::new(
         Arc::clone(&device),
         Arc::clone(&guard),
         ifname,
         shard_cap,
-    )))?;
+    ));
+    let server = listener.spawn(Arc::clone(&control))?;
 
     let mut handles = Vec::with_capacity(workers);
     for tun in tun_set.into_queues() {
         let device = Arc::clone(&device);
+        let control = Arc::clone(&control);
         let handle = thread::Builder::new()
             .name("umbrawg-worker".to_owned())
             .spawn(move || {
-                if let Err(error) = worker_loop(device, tun, socket_buffer, underlay) {
+                if let Err(error) = worker_loop(device, control, tun, socket_buffer, underlay) {
                     log::error!("worker stopped: {error}");
                 }
             })?;
@@ -1391,10 +1305,6 @@ pub fn run(ifname: &str, foreground: bool) -> Result<(), Box<dyn std::error::Err
 
 fn ext_config_from_env() -> Result<ExtConfig, String> {
     let mut config = ExtConfig::default();
-    if let Ok(value) = env::var("UMBRAWG_BBR") {
-        config.bbr = BbrMode::parse(&value)
-            .ok_or_else(|| format!("UMBRAWG_BBR: неизвестный режим {value:?}"))?;
-    }
     if let Ok(value) = env::var("UMBRAWG_FEC") {
         config.fec = FecMode::parse(&value)
             .ok_or_else(|| format!("UMBRAWG_FEC: неизвестный режим {value:?}"))?;
@@ -1409,14 +1319,6 @@ fn ext_config_from_env() -> Result<ExtConfig, String> {
             .ok()
             .filter(|len| (MIN_MAX_SHARD_LEN..=DEFAULT_MAX_SHARD_LEN).contains(len))
             .ok_or_else(|| format!("UMBRAWG_FEC_SHARD: некорректно {value:?}"))?;
-    }
-    if let Ok(value) = env::var("UMBRAWG_ACK_INTERVAL") {
-        config.ack_interval = value
-            .trim()
-            .parse::<u16>()
-            .ok()
-            .filter(|interval| *interval > 0)
-            .ok_or_else(|| format!("UMBRAWG_ACK_INTERVAL: некорректно {value:?}"))?;
     }
     Ok(config)
 }
@@ -1443,7 +1345,7 @@ fn run_parallel(
         underlay,
         device.mtu(),
         device.obfuscation().s4,
-        device.ext_config().fec != FecMode::Off,
+        fec_mtu_required(device.ext_config().fec, device.fec_adaptive_active()),
     );
     let config = TunConfig::new(ifname)
         .with_multi_queue(workers > 1)
@@ -1461,12 +1363,13 @@ fn run_parallel(
     };
 
     let listener = UapiListener::bind(&socket_dir(), ifname)?;
-    let server = listener.spawn(Arc::new(ConfigControl::new(
+    let control = Arc::new(ConfigControl::new(
         Arc::clone(&device),
         Arc::clone(&guard),
         ifname,
         shard_cap,
-    )))?;
+    ));
+    let server = listener.spawn(Arc::clone(&control))?;
     let shared = Arc::new(parallel::SharedRx::new(
         workers,
         parallel.sched,
@@ -1475,11 +1378,14 @@ fn run_parallel(
 
     let rx_device = Arc::clone(&device);
     let rx_shared = Arc::clone(&shared);
+    let rx_control = Arc::clone(&control);
     let rx_failure = Arc::clone(&shared);
     let rx_handle = thread::Builder::new()
         .name("umbrawg-rx".to_owned())
         .spawn(move || {
-            if let Err(error) = parallel::rx_loop(rx_device, rx_shared, socket_buffer, underlay) {
+            if let Err(error) =
+                parallel::rx_loop(rx_device, rx_control, rx_shared, socket_buffer, underlay)
+            {
                 rx_failure.register_failure(format!("rx thread stopped: {error}"));
             }
         })?;

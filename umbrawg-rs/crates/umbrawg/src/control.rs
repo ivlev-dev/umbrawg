@@ -1,13 +1,14 @@
 //! UAPI-обёртка, проверяющая MTU после применения конфигурации.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use umbrawg_device::{Device, FecMode};
 use umbrawg_uapi::{DeviceControl, DeviceSnapshot, SetRequest, UapiError};
 
 use crate::mtu::{
-    fec_max_shard_len, fec_tun_mtu, interface_mtu, set_interface_mtu, MtuGuard, Underlay,
-    MIN_TUN_MTU,
+    fec_max_shard_len, fec_mtu_required, fec_tun_mtu, interface_mtu, set_interface_mtu, MtuGuard,
+    Underlay, MIN_TUN_MTU,
 };
 
 /// Делегирует управление устройством и перепроверяет MTU после `set=1`.
@@ -20,6 +21,9 @@ pub struct ConfigControl {
     guard: Arc<MtuGuard>,
     ifname: String,
     shard_cap: u16,
+    /// Last observed adaptive-activity state, so the event loop only touches
+    /// the interface MTU when the policy actually flips.
+    last_mtu_active: AtomicBool,
 }
 
 impl ConfigControl {
@@ -33,12 +37,26 @@ impl ConfigControl {
         ifname: impl Into<String>,
         shard_cap: u16,
     ) -> Self {
+        let last_mtu_active =
+            fec_mtu_required(device.ext_config().fec, device.fec_adaptive_active());
         Self {
             device,
             guard,
             ifname: ifname.into(),
             shard_cap,
+            last_mtu_active: AtomicBool::new(last_mtu_active),
         }
+    }
+
+    /// `true` when the FEC profile currently reserves TUN MTU for shards.
+    ///
+    /// A fixed profile reserves it immediately; adaptive only while parity is
+    /// active on at least one running peer.
+    fn fec_mtu_active(&self) -> bool {
+        fec_mtu_required(
+            self.device.ext_config().fec,
+            self.device.fec_adaptive_active(),
+        )
     }
 
     fn fec_enabled(&self) -> bool {
@@ -90,7 +108,7 @@ impl ConfigControl {
             self.underlay(),
             self.device.mtu(),
             self.device.obfuscation().s4,
-            self.fec_enabled(),
+            self.fec_mtu_active(),
         )
     }
 
@@ -141,7 +159,7 @@ impl ConfigControl {
                     self.ifname,
                     current.map_or_else(|| "?".to_owned(), |mtu| mtu.to_string()),
                     self.guard.underlay().mtu(),
-                    if self.fec_enabled() { "on" } else { "off" },
+                    if self.fec_mtu_active() { "on" } else { "off" },
                     self.device.obfuscation().s4
                 );
                 actual
@@ -155,6 +173,26 @@ impl ConfigControl {
                 current.unwrap_or(want)
             }
         }
+    }
+
+    /// Applies an adaptive on/off transition to the TUN MTU.
+    ///
+    /// Called from the RX/worker housekeeping, never from the TX hot path. It
+    /// performs no syscall unless [`Device::fec_adaptive_active`] flipped since
+    /// the previous call.
+    pub(crate) fn sync_adaptive_mtu(&self) -> bool {
+        let active = self.fec_mtu_active();
+        if self.last_mtu_active.swap(active, Ordering::Relaxed) == active {
+            return false;
+        }
+        let tun_mtu = self.sync_tun_mtu();
+        self.check(tun_mtu);
+        log::info!(
+            "adaptive FEC {}: TUN MTU of {} is {tun_mtu} bytes",
+            if active { "enabled" } else { "disabled" },
+            self.ifname
+        );
+        true
     }
 
     fn check(&self, tun_mtu: u16) {
@@ -187,6 +225,8 @@ impl DeviceControl for ConfigControl {
         self.sync_shard_limit();
         let tun_mtu = self.sync_tun_mtu();
         self.check(tun_mtu);
+        self.last_mtu_active
+            .store(self.fec_mtu_active(), Ordering::Relaxed);
         Ok(())
     }
 }
@@ -246,6 +286,49 @@ mod tests {
         assert_eq!(control.desired_tun_mtu(), 1132);
         control.sync_shard_limit();
         assert_eq!(device.ext_config().max_shard_len, 1165);
+    }
+
+    #[test]
+    fn adaptive_keeps_the_base_mtu_until_parity_is_active() {
+        let device = Arc::new(
+            Device::new(DeviceConfig {
+                underlay_mtu: 1500,
+                ext: ExtConfig {
+                    fec: FecMode::Adaptive,
+                    ..ExtConfig::default()
+                },
+                ..DeviceConfig::default()
+            })
+            .expect("device"),
+        );
+        let guard = Arc::new(MtuGuard::new(Underlay::new(1500, 64).expect("underlay")));
+        let control = ConfigControl::new(
+            Arc::clone(&device),
+            guard,
+            "uwg-test0",
+            DEFAULT_MAX_SHARD_LEN,
+        );
+        assert!(
+            !device.fec_adaptive_active(),
+            "a fresh adaptive device has no measured loss"
+        );
+        assert_eq!(
+            control.desired_tun_mtu(),
+            device.mtu(),
+            "adaptive must not lower the TUN MTU on a clean channel"
+        );
+        assert!(!control.sync_adaptive_mtu(), "no transition means no ioctl");
+
+        let fixed = ExtConfig {
+            fec: FecMode::Fixed { k: 2, m: 1 },
+            ..ExtConfig::default()
+        };
+        device.set_ext_config(fixed);
+        assert_eq!(
+            control.desired_tun_mtu(),
+            1352,
+            "a fixed profile reserves the shard budget immediately"
+        );
     }
 
     #[test]

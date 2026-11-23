@@ -9,7 +9,7 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::sync::Mutex;
 
-use umbrawg_device::{DEFAULT_MAX_SHARD_LEN, MIN_MAX_SHARD_LEN};
+use umbrawg_device::{FecMode, DEFAULT_MAX_SHARD_LEN, MIN_MAX_SHARD_LEN};
 use umbrawg_fec::MAX_SHARD_PADDING;
 use umbrawg_proto::control::{EXTENSION_HEADER_LEN, FEC_HEADER_LEN};
 use umbrawg_proto::messages::MESSAGE_PADDING_MULTIPLE;
@@ -166,6 +166,20 @@ fn validate_gso_segments(segments: usize) -> Result<usize, String> {
         ));
     }
     Ok(segments)
+}
+
+/// Нужно ли применять FEC-политику MTU.
+///
+/// Fixed-профиль резервирует место под шарды сразу; adaptive — только когда
+/// потеря измерена и parity действительно включён хотя бы на одном пире.
+/// Пока adaptive не активен, TUN MTU остаётся базовым.
+#[must_use]
+pub fn fec_mtu_required(fec: FecMode, adaptive_active: bool) -> bool {
+    match fec {
+        FecMode::Off => false,
+        FecMode::Fixed { .. } => true,
+        FecMode::Adaptive => adaptive_active,
+    }
 }
 
 /// MTU TUN-интерфейса при включённом FEC.
@@ -592,6 +606,41 @@ mod tests {
         assert_eq!(fec_tun_mtu(rules, 1420, 0, false), 1420);
         assert_eq!(fec_tun_mtu(rules, 1420, 60, false), 1420);
         assert_eq!(fec_tun_mtu(underlay(9000), 1420, 0, false), 1420);
+    }
+
+    #[test]
+    fn adaptive_mtu_is_applied_only_while_active() {
+        let rules = underlay(1500);
+        let base = 1420;
+        let inactive = fec_tun_mtu(rules, base, 0, fec_mtu_required(FecMode::Adaptive, false));
+        let active = fec_tun_mtu(rules, base, 0, fec_mtu_required(FecMode::Adaptive, true));
+        assert_eq!(
+            inactive, base,
+            "a clean adaptive channel keeps the base MTU"
+        );
+        assert_eq!(active, 1352, "active adaptive parity lowers the TUN MTU");
+        let restored = fec_tun_mtu(rules, base, 0, fec_mtu_required(FecMode::Adaptive, false));
+        assert_eq!(
+            restored, base,
+            "switching adaptive off restores the base MTU"
+        );
+        assert_eq!(
+            fec_tun_mtu(rules, base, 0, fec_mtu_required(FecMode::Off, true)),
+            base
+        );
+
+        // A fixed profile reserves the shard budget without waiting for loss,
+        // and keeps it regardless of the adaptive signal.
+        assert!(fec_mtu_required(FecMode::Fixed { k: 2, m: 1 }, false));
+        assert_eq!(
+            fec_tun_mtu(
+                rules,
+                base,
+                0,
+                fec_mtu_required(FecMode::Fixed { k: 2, m: 1 }, false)
+            ),
+            1352
+        );
     }
 
     #[test]
