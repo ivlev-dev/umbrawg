@@ -56,6 +56,17 @@
  * splitting every flow over every CPU is exactly what broke the 50-peer
  * case.
  */
+/* Cap the number of TCP segments the stack puts into one TUN GSO skb.
+ * The module transmits that skb as one UDP GSO superdatagram; a large
+ * superdatagram makes a single loss/queue event drop a burst of inner
+ * segments and lets the receiver observe them out of order. 0 keeps the
+ * stack default.
+ */
+static unsigned int tun_gso_max_segs;
+module_param(tun_gso_max_segs, uint, 0644);
+MODULE_PARM_DESC(tun_gso_max_segs,
+		 "Maximum segments per TUN GSO skb (0 = stack default)");
+
 static unsigned int crypt_queue_budget = MAX_QUEUED_PACKETS / 2;
 module_param(crypt_queue_budget, uint, 0644);
 MODULE_PARM_DESC(crypt_queue_budget,
@@ -363,6 +374,10 @@ static void uwg_setup(struct net_device *dev)
 	dev->features |= UWG_NETDEV_FEATURES;
 	dev->hw_features |= UWG_NETDEV_FEATURES;
 	dev->hw_enc_features |= UWG_NETDEV_FEATURES;
+	if (tun_gso_max_segs)
+		dev->gso_max_segs = (u16)clamp_t(unsigned int,
+						 tun_gso_max_segs, 1,
+						 U16_MAX);
 	dev->mtu = ETH_DATA_LEN - overhead;
 	dev->max_mtu = round_down(INT_MAX, MESSAGE_PADDING_MULTIPLE) - overhead;
 	dev->pcpu_stat_type = NETDEV_PCPU_STAT_TSTATS;
