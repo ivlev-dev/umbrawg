@@ -444,7 +444,13 @@ static int uwg_newlink(struct net_device *dev,
 	wq_flags = WQ_CPU_INTENSIVE | WQ_MEM_RECLAIM | WQ_PERCPU;
 	if (READ_ONCE(crypt_wq_highpri))
 		wq_flags |= WQ_HIGHPRI;
-	uwg->packet_crypt_wq = alloc_workqueue("uwg-crypt-%s", wq_flags, 0,
+	/* One active work per queue: the worker drains the whole ring, so
+	 * batching is unaffected, but two chains can no longer be encrypted
+	 * concurrently and overtake each other. Concurrent chains were the
+	 * source of out-of-order inner packets (TCP OFO/retransmits) on an
+	 * otherwise clean path.
+	 */
+	uwg->packet_crypt_wq = alloc_workqueue("uwg-crypt-%s", wq_flags, 1,
 					       dev->name);
 	if (!uwg->packet_crypt_wq)
 		goto err_destroy_handshake_send;
