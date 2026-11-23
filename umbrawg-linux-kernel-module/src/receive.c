@@ -51,6 +51,32 @@ static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 	u16 padding;
 	bool random_trailers = uwg->random_trailers;
 
+	/* Transport first, like the userspace implementation.
+	 *
+	 * With random trailers every kind's length gate is relaxed to `>=`, so a
+	 * transport packet is also compared against the magic ranges of the
+	 * three control kinds -- at the control kinds' padding offset, i.e. at
+	 * the wrong place. The decoded word there is unrelated to the real
+	 * message type and therefore hits a control range at random: with the
+	 * reference profile that silently dropped a few packets per second
+	 * under full load, and every drop collapsed the TCP congestion window.
+	 * A genuine transport packet always decodes into the transport range at
+	 * its own offset, so checking it first removes those false positives
+	 * from the hot path. The cost is a handshake that decodes into the
+	 * transport range at the transport offset; that is a ~4e-6 chance and
+	 * the handshake retry covers it.
+	 */
+	padding = uwg->transport_padding;
+	expected_len = padding + MESSAGE_MINIMUM_LENGTH;
+	if (skb->len >= expected_len &&
+		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
+		u32_range_contains(uwg->transport_header,
+			uwg_decoded_type(ptr, hash))) {
+		*res_padding = padding;
+		*res_type = MESSAGE_DATA;
+		return sizeof(struct message_data);
+	}
+
 	padding = uwg->init_padding;
 	expected_len = padding + sizeof(struct message_handshake_initiation);
 	if ((random_trailers ? skb->len >= expected_len : skb->len == expected_len) &&
@@ -82,17 +108,6 @@ static inline size_t uwg_determine_type_and_padding(struct sk_buff *skb,
 		*res_padding = padding;
 		*res_type = MESSAGE_HANDSHAKE_COOKIE;
 		return sizeof(struct message_handshake_cookie);
-	}
-
-	padding = uwg->transport_padding;
-	expected_len = padding + MESSAGE_MINIMUM_LENGTH;
-	if (skb->len >= expected_len &&
-		(ptr = skb_header_pointer(skb, padding, sizeof(buf), buf)) != NULL &&
-		u32_range_contains(uwg->transport_header,
-			uwg_decoded_type(ptr, hash))) {
-		*res_padding = padding;
-		*res_type = MESSAGE_DATA;
-		return sizeof(struct message_data);
 	}
 
 	net_dbg_skb_ratelimited("%s: Unknown message from %pISpfsc encountered, packet dropped\n",
@@ -597,7 +612,11 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 	if (unlikely(!uwg_ext_enabled(peer->device)) &&
 	    uwg_ext_peer_extension(skb))
 		uwg_ext_caps_extension_seen(peer);
-	uwg_ext_maybe_send_caps(peer);
+	/* Runs per data packet, so the lock and clock inside the callee are
+	 * only paid when it can actually send something.
+	 */
+	if (unlikely(uwg_peer_caps_may_send(peer)))
+		uwg_ext_maybe_send_caps(peer);
 	if (likely(PACKET_CB(skb)->keypair))
 		uwg_fec_adaptive_observe(peer, PACKET_CB(skb)->nonce,
 					 PACKET_CB(skb)->keypair->internal_id);

@@ -63,6 +63,21 @@ struct uwg_peer {
 	struct timer_list timer_retransmit_handshake, timer_send_keepalive;
 	struct timer_list timer_new_handshake, timer_zero_key_material;
 	struct timer_list timer_persistent_keepalive, timer_send_ack;
+	/* jiffies of the last *data* (or control) frame we sent, and of the
+	 * moment the keepalive timer was armed. The timer is no longer
+	 * cancelled on every send: that cost a timer-base lock per batch and,
+	 * because the next received packet then re-armed it, a mod_timer per
+	 * data packet. The expiry compares these stamps instead. Keepalives
+	 * themselves do not update last_data_tx, so an idle downlink still
+	 * emits one per keepalive_timeout, exactly like before.
+	 *
+	 * Kept next to the timers on purpose: this is written on every TX
+	 * batch, and the receive path reads is_dead per packet from the top of
+	 * the struct -- sharing that cacheline would invalidate it on every
+	 * send (measured as a ~7% loss at 50 peers).
+	 */
+	unsigned long keepalive_armed;
+	unsigned long last_data_tx;
 	unsigned int timer_handshake_attempts;
 	unsigned int max_handshake_attempts;
 	u32 persistent_keepalive_interval;
@@ -207,6 +222,26 @@ static inline unsigned int uwg_peer_skb_randomize_padding_addition(struct uwg_pe
 	add = u16_range_pick_one(uwg->content_padding_addition);
 	space = udp_window - size;
 	return min(add, space);
+}
+
+/*
+ * Cheap gate for uwg_ext_maybe_send_caps() on the per-packet receive path.
+ *
+ * With the extension switched off and no advertisement owed, the callee
+ * returns immediately -- but only after taking the peer caps lock and reading
+ * the clock, twice per data packet. This predicate is the exact set of
+ * conditions under which the callee can do anything at all: the local profile
+ * is advertised while BBR/FEC is on, and a revoke is due while the peer has
+ * shown extension traffic or an answer/retry is pending. Nothing else in the
+ * callee has a side effect, so skipping it here is behaviourally identical.
+ */
+static inline bool uwg_peer_caps_may_send(const struct uwg_peer *peer)
+{
+	return READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_OFF ||
+	       READ_ONCE(peer->device->fec_mode) != UWG_FEC_MODE_OFF ||
+	       READ_ONCE(peer->caps.extension_seen) ||
+	       READ_ONCE(peer->caps.resend) ||
+	       READ_ONCE(peer->caps.retry);
 }
 
 #endif /* _UWG_PEER_H */

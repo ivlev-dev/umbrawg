@@ -207,7 +207,8 @@ static inline bool uwg_queue_wakeup_drained(struct multicore_worker *worker,
  * single high-pps flow fills its CPU ring with individual skbs, so the
  * same number intentionally triggers much earlier in byte terms there.
  * One number for both keeps the policy simple; a split TX/RX threshold
- * would need its own measurement pass. A healthy multi-peer pipeline
+ * was measured (4/32/128 skb) and did not improve either direction, so the
+ * shared value stays. A healthy multi-peer pipeline
  * keeps only a couple of entries queued per peer and stays on the
  * batching path; a single flow that outruns its CPU grows a real backlog
  * and asks for help early. Four entries measured the best balance:

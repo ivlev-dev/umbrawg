@@ -19,6 +19,7 @@
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
 #include <linux/jiffies.h>
+#include <linux/module.h>
 
 #include <linux/uio.h>
 #include <linux/inetdevice.h>
@@ -32,8 +33,25 @@
 
 #define UWG_TX_MAX_ENTRIES 48
 #define UWG_TX_MAX_SKBS 128
-#define UWG_GSO_SEGS_MAX 44
+/* Hard ceiling of the UDP GSO_L4 segmentation: 65507 bytes of payload plus
+ * the outer IP/UDP headers, one segment per tunnel datagram. The default keeps
+ * a little headroom for a padded datagram on a 1420-byte tunnel MTU.
+ */
+#define UWG_GSO_SEGS_HARD_MAX 46
 #define UWG_GSO_MAX_BYTES 65000
+
+/*
+ * Segments per GSO superdatagram. More segments amortise the per-aggregate
+ * allocation (a full group is one high-order alloc_skb) and the per-datagram
+ * underlay transmit path; fewer keep that allocation inside the slab pages
+ * and make each underlay packet smaller. The default is the measured optimum
+ * on the veth stand; the knob exists so the aggregate size can be A/B tested
+ * without a rebuild.
+ */
+static unsigned int uwg_gso_segs_max = UWG_GSO_SEGS_HARD_MAX - 2;
+module_param_named(gso_segs_max, uwg_gso_segs_max, uint, 0644);
+MODULE_PARM_DESC(gso_segs_max,
+		 "Maximum segments per UDP GSO superdatagram (1..46, default 44)");
 
 /* Datagrams below this size are never delayed: pacing them would only add
  * latency to ACKs, keepalives and interactive traffic.
@@ -877,14 +895,17 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 	 */
 	for (i = 0; i < nskbs; ) {
 		unsigned int len = skbs[i]->len;
-		unsigned int group_max = UWG_GSO_SEGS_MAX;
+		unsigned int segs_max = clamp_t(unsigned int,
+						READ_ONCE(uwg_gso_segs_max), 1,
+						UWG_GSO_SEGS_HARD_MAX);
+		unsigned int group_max = segs_max;
 		u8 fec_m = PACKET_CB(skbs[i])->fec_m;
 		u8 ds = PACKET_CB(skbs[i])->ds;
 		bool is_fec = PACKET_CB(skbs[i])->is_fec;
 
 		if (is_fec)
 			group_max = min_t(unsigned int, fec_m ? fec_m : 1,
-					  UWG_GSO_SEGS_MAX);
+					  segs_max);
 
 		for (j = i + 1; j < nskbs; ++j) {
 			if (skbs[j]->len != len ||

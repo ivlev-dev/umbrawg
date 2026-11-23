@@ -87,11 +87,27 @@ static void uwg_expired_send_keepalive(struct timer_list *timer)
 	u16 timeout = !u16_range_is_zero(peer->device->keepalive_timeout) ?
 		u16_range_pick_one(peer->device->keepalive_timeout) : KEEPALIVE_TIMEOUT;
 
-	uwg_packet_send_keepalive(peer);
+	/* A keepalive is only needed when the peer has heard from us after the
+	 * window was armed. Sending data (or another keepalive) in the window
+	 * already proved liveness, so the expiry is silent in that case. The
+	 * timer then stays armed as long as traffic keeps arriving
+	 * (timer_need_another_keepalive), which is what allows the send path
+	 * to skip the timer_delete() it used to do on every batch.
+	 *
+	 * A non-empty staged queue always takes the call: the cwnd gate parks a
+	 * batch here and re-arms this very timer to retry it, and
+	 * uwg_packet_send_keepalive() then only drains that queue.
+	 */
+	if (!skb_queue_empty_lockless(&peer->staged_packet_queue) ||
+	    !time_after(peer->last_data_tx, peer->keepalive_armed))
+		uwg_packet_send_keepalive(peer);
 	if (peer->timer_need_another_keepalive) {
 		peer->timer_need_another_keepalive = false;
+		peer->keepalive_armed = jiffies;
 		mod_peer_timer(peer, &peer->timer_send_keepalive,
 			       jiffies + timeout * HZ);
+	} else {
+		peer->keepalive_armed = 0;
 	}
 }
 
@@ -166,6 +182,7 @@ void uwg_timers_data_sent(struct uwg_peer *peer)
 		rekey_timeout = !u16_range_is_zero(peer->device->rekey_timeout) ?
 		u16_range_pick_one(peer->device->rekey_timeout) : REKEY_TIMEOUT;
 
+	peer->last_data_tx = jiffies;
 	if (!timer_pending(&peer->timer_new_handshake))
 		mod_peer_timer(peer, &peer->timer_new_handshake,
 			jiffies + (keepalive_timeout + rekey_timeout) * HZ +
@@ -179,20 +196,33 @@ void uwg_timers_data_received(struct uwg_peer *peer)
 		u16_range_pick_one(peer->device->keepalive_timeout) : KEEPALIVE_TIMEOUT;
 
 	if (likely(netif_running(peer->device->dev))) {
-		if (!timer_pending(&peer->timer_send_keepalive))
+		if (!timer_pending(&peer->timer_send_keepalive)) {
+			peer->keepalive_armed = jiffies;
 			mod_peer_timer(peer, &peer->timer_send_keepalive,
 				       jiffies + timeout * HZ);
-		else
+		} else {
 			peer->timer_need_another_keepalive = true;
+		}
 	}
 }
 
 /* Should be called after any type of authenticated packet is sent, whether
  * keepalive, data, or handshake.
+ *
+ * This used to be timer_delete(): a timer-base lock per batch, and because the
+ * next received packet then saw an unarmed timer, a mod_timer per data packet.
+ * The timer is now left armed and the expiry compares last_data_tx with the
+ * moment the window was armed; only frames recorded by uwg_timers_data_sent()
+ * count as liveness, so a downlink that only ACKs sends no keepalives while an
+ * idle downlink still sends one per keepalive_timeout. See
+ * uwg_expired_send_keepalive().
  */
 void uwg_timers_any_authenticated_packet_sent(struct uwg_peer *peer)
 {
-	timer_delete(&peer->timer_send_keepalive);
+	/* Nothing to do: last_data_tx is recorded by uwg_timers_data_sent()
+	 * only for real frames, and the keepalive timer is left armed. See
+	 * the comment on uwg_expired_send_keepalive().
+	 */
 }
 
 /* Should be called after any type of authenticated packet is received, whether
