@@ -1,8 +1,8 @@
 %global debug_package %{nil}
-%global upstream_version 0.4.1
+%global upstream_version 0.5.0
 
 Name:           umbrawg-dkms
-Version:        0.4.1
+Version:        0.5.0
 Release:        1%{?dist}
 Epoch:          1
 URL:            https://github.com/ivlev-dev/umbrawg
@@ -86,6 +86,9 @@ exit 0
 %{_usrsrc}/umbrawg-%{version}
 
 %changelog
+* Mon Nov 23 2026 Yuri Egorov <ye@umbra.org> - 0.5.0-1
+- Remove BBR/ACK; FEC adaptive by default
+
 * Sat Nov 21 2026 Yuri Egorov <ye@umbra.org> - 0.4.1-1
 - Limit FEC GSO shard groups to m and rework the adaptive settle window
 - Revoke stale FEC profiles only after extension traffic; cap CAPS replies

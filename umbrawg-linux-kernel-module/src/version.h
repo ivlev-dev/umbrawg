@@ -1,3 +1,3 @@
 #ifndef UMBRAWG_VERSION
-#define UMBRAWG_VERSION "0.4.1"
+#define UMBRAWG_VERSION "0.5.0"
 #endif

@@ -1,47 +1,47 @@
 # Выпуск UmbraWG
 
-Единый чек-лист для монорепозитория `ivlev-dev/umbrawg`. Версия `0.4.1` —
-релизная (2026-11-21); теги `*-v0.4.1` ставятся отдельно и строго по
+Единый чек-лист для монорепозитория `ivlev-dev/umbrawg`. Версия `0.5.0` —
+релизная (2026-11-21); теги `*-v0.5.0` ставятся отдельно и строго по
 порядку из раздела «Порядок тегов».
 
 ## Компоненты, версии и теги
 
 | Компонент | Каталог | Манифест версии | Пакеты | Тег |
 |---|---|---|---|---|
-| netlink | `netlink-packet-umbrawg/` | `Cargo.toml` | `netlink-packet-umbrawg`, `rust-netlink-packet-umbrawg` | `netlink-v0.4.1` |
-| tools | `umbrawg-tools/` | `Cargo.toml` | `uwg`, `uwg-quick`, `umbrawg-tools` | `tools-v0.4.1` |
-| daemon | `umbrawg-rs/` | `Cargo.toml` | `umbrawg`, `umbrawg-daemon` | `rs-v0.4.1` |
-| kernel | `umbrawg-linux-kernel-module/` | `src/version.h` | DKMS-модуль `umbrawg` | `kernel-v0.4.1` |
+| netlink | `netlink-packet-umbrawg/` | `Cargo.toml` | `netlink-packet-umbrawg`, `rust-netlink-packet-umbrawg` | `netlink-v0.5.0` |
+| tools | `umbrawg-tools/` | `Cargo.toml` | `uwg`, `uwg-quick`, `umbrawg-tools` | `tools-v0.5.0` |
+| daemon | `umbrawg-rs/` | `Cargo.toml` | `umbrawg`, `umbrawg-daemon` | `rs-v0.5.0` |
+| kernel | `umbrawg-linux-kernel-module/` | `src/version.h` | DKMS-модуль `umbrawg` | `kernel-v0.5.0` |
 
 Теги **всегда** с префиксом компонента (`kernel-v*`, `netlink-v*`,
 `tools-v*`, `rs-v*`) — так устроены `paths`/`tags`-фильтры CI и
-`*-packaging.yml`. Голый `v0.4.1` больше не используется: он остался только
+`*-packaging.yml`. Голый `v0.5.0` больше не используется: он остался только
 у исторического `v0.1.0`.
 
-Каноническая строка версии модуля — `0.4.1`. Пакетные менеджеры нормализуют
-её: Arch и RPM используют `0.4.1`, Debian — upstream `0.4.1` с epoch
-(`1:0.4.1-1`). `modinfo` показывает `0.4.1`.
+Каноническая строка версии модуля — `0.5.0`. Пакетные менеджеры нормализуют
+её: Arch и RPM используют `0.5.0`, Debian — upstream `0.5.0` с epoch
+(`1:0.5.0-1`). `modinfo` показывает `0.5.0`.
 
 ## Порядок тегов
 
 Теги ставятся и пушатся строго по порядку:
 
-1. `netlink-v0.4.1` — `netlink-packet-umbrawg/`.
-2. `tools-v0.4.1` — `umbrawg-tools/` (зависит от netlink 0.4.1 и его lock).
-3. `rs-v0.4.1` — `umbrawg-rs/`.
-4. `kernel-v0.4.1` — `umbrawg-linux-kernel-module/`.
+1. `netlink-v0.5.0` — `netlink-packet-umbrawg/`.
+2. `tools-v0.5.0` — `umbrawg-tools/` (зависит от netlink 0.5.0 и его lock).
+3. `rs-v0.5.0` — `umbrawg-rs/`.
+4. `kernel-v0.5.0` — `umbrawg-linux-kernel-module/`.
 
 Причина: `umbrawg-tools/Cargo.lock` собран против `netlink-packet-umbrawg`
-0.4.1. Если сначала выпустить tools, CI возьмёт netlink из `master` со старой
+0.5.0. Если сначала выпустить tools, CI возьмёт netlink из `master` со старой
 версией и `cargo fetch --locked` упадёт. Стабильные PKGBUILD ссылаются на
 архивы тегов, поэтому `updpkgsums` и публикация в AUR — только после того,
 как все четыре тега запушены.
 
 ```sh
-git tag netlink-v0.4.1 && git push origin netlink-v0.4.1
-git tag tools-v0.4.1   && git push origin tools-v0.4.1
-git tag rs-v0.4.1      && git push origin rs-v0.4.1
-git tag kernel-v0.4.1  && git push origin kernel-v0.4.1
+git tag netlink-v0.5.0 && git push origin netlink-v0.5.0
+git tag tools-v0.5.0   && git push origin tools-v0.5.0
+git tag rs-v0.5.0      && git push origin rs-v0.5.0
+git tag kernel-v0.5.0  && git push origin kernel-v0.5.0
 ```
 
 Тег модуля обязан совпадать с `UMBRAWG_VERSION` в `src/version.h`: job
@@ -91,7 +91,7 @@ sudo UWG=../../umbrawg-tools/target/release/uwg src/tests/fec-profile-change.sh
 
 1. `cargo publish -p netlink-packet-umbrawg` из `netlink-packet-umbrawg`.
 2. Для публикации `uwg`/`uwg-quick` сначала опубликуй внутренние крейты
-   `umbrawg-config` и `umbrawg-ctl` (версии `0.4.1`), затем `uwg` и
+   `umbrawg-config` и `umbrawg-ctl` (версии `0.5.0`), затем `uwg` и
    `uwg-quick`. Зависимости уже содержат `version` + `path`.
 3. Для `umbrawg-rs` публикация не планируется: демон распространяется
    пакетами и tarball'ами.
@@ -99,14 +99,14 @@ sudo UWG=../../umbrawg-tools/target/release/uwg src/tests/fec-profile-change.sh
 ## Arch / AUR
 
 PKGBUILD лежат в `contrib/arch/<pkgname>/` каждого компонента. Стабильные
-PKGBUILD уже указывают на теги `0.4.1`:
+PKGBUILD уже указывают на теги `0.5.0`:
 
 - `netlink-packet-umbrawg/contrib/arch/rust-netlink-packet-umbrawg/` —
-  `netlink-v0.4.1`;
-- `umbrawg-tools/contrib/arch/umbrawg-tools/` — `tools-v0.4.1` +
-  `netlink-v0.4.1`;
-- `umbrawg-rs/contrib/arch/umbrawg-daemon/` — `rs-v0.4.1`;
-- `umbrawg-linux-kernel-module/contrib/arch/umbrawg-dkms/` — `kernel-v0.4.1`.
+  `netlink-v0.5.0`;
+- `umbrawg-tools/contrib/arch/umbrawg-tools/` — `tools-v0.5.0` +
+  `netlink-v0.5.0`;
+- `umbrawg-rs/contrib/arch/umbrawg-daemon/` — `rs-v0.5.0`;
+- `umbrawg-linux-kernel-module/contrib/arch/umbrawg-dkms/` — `kernel-v0.5.0`.
 
 Пока теги не запушены, `sha256sums` намеренно содержит заглушку
 `TODO_UPDPKGSUMS_AFTER_FIRST_TAG` — выдуманный хэш хуже явной заглушки.
@@ -121,7 +121,7 @@ PKGBUILD уже указывают на теги `0.4.1`:
    ```
 
 3. Проверь, что в `source`/`.SRCINFO` нет заглушки и версия совпадает с
-   тегом (`0.4.1`).
+   тегом (`0.5.0`).
 4. Скопируй `PKGBUILD`, `*.install` (если есть) и `.SRCINFO` в корень
    соответствующего AUR-репозитория и запушь:
    - `umbrawg-dkms`, `umbrawg-dkms-git`
@@ -143,10 +143,10 @@ CI собирает пакеты на тег **своего** компонент
 Ручной прогон без публикации (релиз пропускается):
 
 ```sh
-gh workflow run kernel-packaging.yml -f version=0.4.1
-gh workflow run netlink-packaging.yml -f version=0.4.1
-gh workflow run tools-packaging.yml -f version=0.4.1
-gh workflow run rs-packaging.yml -f version=0.4.1
+gh workflow run kernel-packaging.yml -f version=0.5.0
+gh workflow run netlink-packaging.yml -f version=0.5.0
+gh workflow run tools-packaging.yml -f version=0.5.0
+gh workflow run rs-packaging.yml -f version=0.5.0
 ```
 
 Локально:
@@ -158,7 +158,7 @@ scripts/package/build-rpm.sh
 
 Для deb модуля версия берётся из `debian/changelog` и подставляется в
 `dkms.conf`/`Makefile` в `debian/rules`; каталог один —
-`/usr/src/umbrawg-0.4.1`.
+`/usr/src/umbrawg-0.5.0`.
 
 ## Проверка релиза
 
@@ -185,8 +185,8 @@ scripts/package/build-rpm.sh
   TUN MTU 1420 датаграмма 1512 Б не влезает — включается IP-фрагментация
   (TCP падает в ~2.4 раза). Демон предупреждает; для таких профилей нужен
   TUN MTU ≤1380 или underlay 9000. Oversized-кадров GSO не даёт (≤1514).
-- **Версия модуля**: каноническая `0.4.1`; `Makefile`/`dkms.conf`
-  по умолчанию содержат `0.4.1` и переопределяются упаковкой.
+- **Версия модуля**: каноническая `0.5.0`; `Makefile`/`dkms.conf`
+  по умолчанию содержат `0.5.0` и переопределяются упаковкой.
 - **AUR**: нужен аккаунт и SSH-ключ; публикация через `scripts/aur-publish.sh`
   после тегов и `updpkgsums`.
 - **crates.io**: нужен токен; порядок публикации — netlink, затем внутренние

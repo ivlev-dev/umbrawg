@@ -1,3 +1,9 @@
+umbrawg-linux-kmod (1:0.5.0-1) unstable; urgency=medium
+
+  * Удаление BBR/ACK, FEC adaptive по умолчанию.
+
+ -- Alex Ivlev <ai@itegroup.ru>  Mon, 23 Nov 2026 12:00:00 +0300
+
 umbrawg-linux-kmod (1:0.4.1-1) unstable; urgency=medium
 
   * Limit FEC GSO shard groups to m and rework the adaptive settle window.

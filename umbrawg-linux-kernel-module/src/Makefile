@@ -2,7 +2,7 @@
 #
 # Copyright (C) 2015-2019 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
 
-UMBRAWG_VERSION = 0.4.1
+UMBRAWG_VERSION = 0.5.0
 OMIT_ENDPOINTS ?=
 
 KERNELRELEASE ?= $(shell uname -r)

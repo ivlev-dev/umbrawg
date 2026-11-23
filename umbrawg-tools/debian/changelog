@@ -1,3 +1,9 @@
+umbrawg-tools (0.5.0) unstable; urgency=medium
+
+  * Удаление bbr/bbr-stats, FEC adaptive по умолчанию.
+
+ -- Yuri Egorov <ye@umbra.org>  Mon, 23 Nov 2026 12:00:00 +0300
+
 umbrawg-tools (0.4.1) unstable; urgency=medium
 
   * Add underlay-mtu for the userspace daemon and uwg-quick.
