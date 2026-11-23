@@ -16,7 +16,6 @@ UDP_RATE=${UDP_RATE:-400M}
 DIR=${DIR:-k0}
 
 MIN_TCP_CLEAN_FEC=${MIN_TCP_CLEAN_FEC:-1000}
-MIN_TCP_BBR_FEC=${MIN_TCP_BBR_FEC:-500}
 MAX_UDP_LOSS_FEC=${MAX_UDP_LOSS_FEC:-1}
 MAX_UDP_LOSS_CLEAN=${MAX_UDP_LOSS_CLEAN:-0.2}
 MATCH_UDP_LOSS_MIN=${MATCH_UDP_LOSS_MIN:-1}
@@ -25,7 +24,7 @@ ADAPTIVE_TCP_TOL=${ADAPTIVE_TCP_TOL:-0.12}
 MAX_PING_LOSS_LOSSY=${MAX_PING_LOSS_LOSSY:-20}
 SETUP_EST=${SETUP_EST:-9}
 
-CASES=${CASES:-"mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec profile-mismatch adaptive-clean bbr-fec-clean clean-fec21"}
+CASES=${CASES:-"mixed-fec21 kernel-fec21 rust2-fec21 profile-mismatch adaptive-clean clean-fec21"}
 
 RUN_ID=${RUN_ID:-$(date +%Y%m%d-%H%M%S)}
 LOG_DIR=${LOG_DIR:-$HERE/tmp/ext-tests-$RUN_ID}
@@ -43,7 +42,7 @@ read -r -a CASE_LIST <<< "$CASES"
 
 known_case() {
     case "$1" in
-        mixed-fec21|kernel-fec21|rust2-fec21|rust2-bbr-fec|profile-mismatch|adaptive-clean|bbr-fec-clean|clean-fec21) return 0 ;;
+        mixed-fec21|kernel-fec21|rust2-fec21|profile-mismatch|adaptive-clean|clean-fec21) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -69,7 +68,7 @@ print_plan() {
     local n=0 runs
     log "plan only: ${#CASE_LIST[@]} cases, $RUNS_TOTAL runs, no traffic"
     log "env: DUR=$DUR DIR=$DIR UMTU=$UMTU TUNMTU=$TUNMTU NETEM_BOTH=$NETEM_BOTH UDP_RATE=$UDP_RATE SKIP_PING=$SKIP_PING KEEP=$KEEP"
-    log "thresholds: MIN_TCP_CLEAN_FEC=$MIN_TCP_CLEAN_FEC MIN_TCP_BBR_FEC=$MIN_TCP_BBR_FEC MAX_UDP_LOSS_FEC=$MAX_UDP_LOSS_FEC MAX_UDP_LOSS_CLEAN=$MAX_UDP_LOSS_CLEAN MATCH_UDP_LOSS=[$MATCH_UDP_LOSS_MIN..$MATCH_UDP_LOSS_MAX] ADAPTIVE_TCP_TOL=$ADAPTIVE_TCP_TOL"
+    log "thresholds: MIN_TCP_CLEAN_FEC=$MIN_TCP_CLEAN_FEC MAX_UDP_LOSS_FEC=$MAX_UDP_LOSS_FEC MAX_UDP_LOSS_CLEAN=$MAX_UDP_LOSS_CLEAN MATCH_UDP_LOSS=[$MATCH_UDP_LOSS_MIN..$MATCH_UDP_LOSS_MAX] ADAPTIVE_TCP_TOL=$ADAPTIVE_TCP_TOL"
     for name in "${CASE_LIST[@]}"; do
         runs=$(runs_of "$name")
         for i in $(seq 1 "$runs"); do
@@ -80,10 +79,8 @@ print_plan() {
             mixed-fec21) printf 'PLAN   command: IMPL=rust KFEC=2:1 RFEC=2:1 NETEM_LOSS=2\n' ;;
             kernel-fec21) printf 'PLAN   command: IMPL=kernel KFEC=2:1 NETEM_LOSS=2\n' ;;
             rust2-fec21) printf 'PLAN   command: IMPL=rust2 KFEC=2:1 RFEC=2:1 NETEM_LOSS=2\n' ;;
-            rust2-bbr-fec) printf 'PLAN   command: IMPL=rust2 KFEC=2:1 RFEC=2:1 KBBR=on RBBR=on NETEM_LOSS=0\n' ;;
             profile-mismatch) printf 'PLAN   command: IMPL=rust KFEC=2:1 RFEC=8:2 NETEM_LOSS=2\n' ;;
             adaptive-clean) printf 'PLAN   command: IMPL=rust KFEC=off RFEC=off NETEM_LOSS=0; IMPL=rust KFEC=adaptive RFEC=adaptive NETEM_LOSS=0\n' ;;
-            bbr-fec-clean) printf 'PLAN   command: IMPL=rust KFEC=2:1 RFEC=2:1 KBBR=on RBBR=on NETEM_LOSS=0\n' ;;
             clean-fec21) printf 'PLAN   command: IMPL=kernel KFEC=2:1 NETEM_LOSS=0\n' ;;
         esac
     done
@@ -113,16 +110,16 @@ R_RESULT="FAIL"
 R_ELAPSED=0
 
 run_wire() {
-    local tag=$1 impl=$2 kfec=$3 rfec=$4 kbbr=$5 rbbr=$6 loss=$7
+    local tag=$1 impl=$2 kfec=$3 rfec=$4 loss=$5
     local safe log_file wire_out rc start
     safe=$(sanitize "$tag")
     log_file="$LOG_DIR/$safe.log"
     wire_out="$LOG_DIR/$safe-wire"
     RUNS_DONE=$((RUNS_DONE + 1))
-    log "[$RUNS_DONE/$RUNS_TOTAL] run $safe impl=$impl fec=$kfec/$rfec bbr=$kbbr/$rbbr loss=$loss"
+    log "[$RUNS_DONE/$RUNS_TOTAL] run $safe impl=$impl fec=$kfec/$rfec loss=$loss"
     start=$SECONDS
     env IMPL="$impl" DIR="$DIR" \
-        KFEC="$kfec" RFEC="$rfec" KBBR="$kbbr" RBBR="$rbbr" \
+        KFEC="$kfec" RFEC="$rfec" \
         NETEM_LOSS="$loss" NETEM_BOTH="$NETEM_BOTH" \
         UMTU="$UMTU" TUNMTU="$TUNMTU" DUR="$DUR" UDP_RATE="$UDP_RATE" \
         TAG="$safe" SKIP_PING="$SKIP_PING" KEEP="$KEEP" OUT="$wire_out" \
@@ -243,7 +240,7 @@ chk_frag() {
 }
 
 case_mixed_fec21() {
-    run_wire "$RUN_TAG-mixed-fec21" rust 2:1 2:1 off off 2
+    run_wire "$RUN_TAG-mixed-fec21" rust 2:1 2:1 2
     chk_result || return 0
     chk_cmp tcp gt "$R_TCP" 0
     chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_FEC"
@@ -252,7 +249,7 @@ case_mixed_fec21() {
 }
 
 case_kernel_fec21() {
-    run_wire "$RUN_TAG-kernel-fec21" kernel 2:1 2:1 off off 2
+    run_wire "$RUN_TAG-kernel-fec21" kernel 2:1 2:1 2
     chk_result || return 0
     chk_cmp tcp gt "$R_TCP" 0
     chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_FEC"
@@ -261,7 +258,7 @@ case_kernel_fec21() {
 }
 
 case_rust2_fec21() {
-    run_wire "$RUN_TAG-rust2-fec21" rust2 2:1 2:1 off off 2
+    run_wire "$RUN_TAG-rust2-fec21" rust2 2:1 2:1 2
     chk_result || return 0
     chk_cmp tcp gt "$R_TCP" 0
     chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_FEC"
@@ -269,16 +266,8 @@ case_rust2_fec21() {
     chk_frag
 }
 
-case_rust2_bbr_fec() {
-    run_wire "$RUN_TAG-rust2-bbr-fec" rust2 2:1 2:1 on on 0
-    chk_result || return 0
-    chk_cmp tcp gt "$R_TCP" "$MIN_TCP_BBR_FEC"
-    chk_cmp udp_loss eq "$R_UDPLOSS" 0
-    chk_frag
-}
-
 case_profile_mismatch() {
-    run_wire "$RUN_TAG-profile-mismatch" rust 2:1 8:2 off off 2
+    run_wire "$RUN_TAG-profile-mismatch" rust 2:1 8:2 2
     chk_result || return 0
     chk_cmp tcp gt "$R_TCP" 0
     chk_cmp udp_loss ge "$R_UDPLOSS" "$MATCH_UDP_LOSS_MIN"
@@ -289,7 +278,7 @@ case_profile_mismatch() {
 
 case_adaptive_clean() {
     local legacy_tcp adaptive_tcp floor
-    run_wire "$RUN_TAG-adaptive-clean-legacy" rust off off off off 0
+    run_wire "$RUN_TAG-adaptive-clean-legacy" rust off off 0
     chk_result || return 0
     legacy_tcp=$R_TCP
     chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_CLEAN"
@@ -298,7 +287,7 @@ case_adaptive_clean() {
         fail "legacy_tcp=$legacy_tcp (нет данных)"
         return 0
     fi
-    run_wire "$RUN_TAG-adaptive-clean-adaptive" rust adaptive adaptive off off 0
+    run_wire "$RUN_TAG-adaptive-clean-adaptive" rust adaptive adaptive 0
     chk_result || return 0
     adaptive_tcp=$R_TCP
     chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_CLEAN"
@@ -310,16 +299,8 @@ case_adaptive_clean() {
     chk_frag
 }
 
-case_bbr_fec_clean() {
-    run_wire "$RUN_TAG-bbr-fec-clean" rust 2:1 2:1 on on 0
-    chk_result || return 0
-    chk_cmp tcp ge "$R_TCP" "$MIN_TCP_BBR_FEC"
-    chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_CLEAN"
-    chk_frag
-}
-
 case_clean_fec21() {
-    run_wire "$RUN_TAG-clean-fec21" kernel 2:1 2:1 off off 0
+    run_wire "$RUN_TAG-clean-fec21" kernel 2:1 2:1 0
     chk_result || return 0
     chk_cmp tcp ge "$R_TCP" "$MIN_TCP_CLEAN_FEC"
     chk_cmp udp_loss lt "$R_UDPLOSS" "$MAX_UDP_LOSS_CLEAN"

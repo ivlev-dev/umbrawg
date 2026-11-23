@@ -15,10 +15,10 @@ PROTO_LIST=udp UDP_RATE_LIST="1G 0" CONNS_LIST="1 10" bash bench.sh
 python3 bench-report.py results-20261116-120000.csv --md report.md --agg agg.csv
 ```
 
-## Тесты расширения BBR/FEC
+## Тесты расширения FEC
 
 `bench/wire-ext.sh`, `bench/ext-matrix.sh` и `bench/ext-tests.sh` проверяют
-расширение `BBR`/`FEC` на той же топологии, что и остальной стенд: два netns,
+расширение `FEC` (BBR удалён в 0.5.0) на той же топологии, что и остальной стенд: два netns,
 veth, kernel-модуль `umbrawg`; вторая сторона — Rust-демон (`IMPL=rust`),
 ещё один kernel-интерфейс (`IMPL=kernel`) или два Rust-демона без модуля
 (`IMPL=rust2`). `wire-ext.sh` делает один прогон (ping, TCP, UDP, pcap),
@@ -35,8 +35,8 @@ interop-кейсов с порогами и кодом возврата.
 
 ```bash
 sudo IMPL=kernel KFEC=2:1 DUR=4 bash bench/wire-ext.sh
-sudo IMPL=rust KFEC=adaptive RFEC=adaptive KBBR=on DUR=4 NETEM_LOSS=2 bash bench/wire-ext.sh
-sudo IMPL=rust2 KFEC=2:1 RFEC=2:1 KBBR=on RBBR=on DUR=4 NETEM_LOSS=2 bash bench/wire-ext.sh
+sudo IMPL=rust KFEC=adaptive RFEC=adaptive DUR=4 NETEM_LOSS=2 bash bench/wire-ext.sh
+sudo IMPL=rust2 KFEC=2:1 RFEC=2:1 DUR=4 NETEM_LOSS=2 bash bench/wire-ext.sh
 sudo IMPL=kernel KFEC=8:2 NETEM_LOSS=2 NETEM_BOTH=1 TUNMTU=1420 bash bench/wire-ext.sh
 sudo IMPL=kernel KFEC=2:1 NETEM_RATE=100mbit NETEM_DELAY=10 KEEP=1 bash bench/wire-ext.sh
 ```
@@ -44,7 +44,7 @@ sudo IMPL=kernel KFEC=2:1 NETEM_RATE=100mbit NETEM_DELAY=10 KEEP=1 bash bench/wi
 Строка результата (её же разбирает матрица):
 
 ```
-RESULT tag=smoke impl=kernel dir=k0 fec=2:1 bbr=off loss=2 tcp_mbit=663.0 udp_mbit=399.9 udp_loss=0.2 ping_loss=0 frag=0 result=OK
+RESULT tag=smoke impl=kernel dir=k0 fec=2:1 loss=2 tcp_mbit=663.0 udp_mbit=399.9 udp_loss=0.2 ping_loss=0 frag=0 result=OK
 ```
 
 `result`: `OK`, `FAIL_LINK` (не поднялся туннель), `FAIL_TCP`, `FAIL_UDP`.
@@ -56,7 +56,6 @@ RESULT tag=smoke impl=kernel dir=k0 fec=2:1 bbr=off loss=2 tcp_mbit=663.0 udp_mb
 | `IMPL` | rust | `rust` — kernel↔Rust, `rust2` — Rust↔Rust без модуля, `kernel` — kernel↔kernel |
 | `DIR` | k0 | на какой стороне kernel: `k0` (ns0) или `k1` (ns1) |
 | `KFEC` / `RFEC` | off | FEC kernel-стороны / Rust-стороны: `off`, `adaptive`, `K:M` |
-| `KBBR` / `RBBR` | off | BBR kernel-стороны / Rust-стороны: `off`, `monitor`, `on` |
 | `NETEM_LOSS` | 0 | потери в % на underlay |
 | `NETEM_DELAY` | 0 | задержка netem (мс или с единицей, напр. `10ms`) |
 | `NETEM_RATE` | пусто | полоса netem в единицах tc, напр. `100mbit` |
@@ -72,10 +71,10 @@ RESULT tag=smoke impl=kernel dir=k0 fec=2:1 bbr=off loss=2 tcp_mbit=663.0 udp_mb
 | `KO`, `UWG`, `RUST` | пути репозитория | бинарники стенда |
 | `PORT0`, `PORT1`, `IPERF_PORT` | 53920, 53921, 5291 | underlay-порты и порт iperf3 |
 
-В mixed-режиме (`IMPL=rust`) FEC/BBR задаются отдельно для каждой стороны.
-`RFEC`/`RBBR` по умолчанию повторяют `KFEC`/`KBBR`; для kernel↔kernel
-значения `RFEC`/`RBBR` игнорируются (обе стороны используют `KFEC`/`KBBR`).
-`FEC`/`BBR` работают как алиасы `KFEC`/`KBBR`.
+В mixed-режиме (`IMPL=rust`) FEC задаётся отдельно для каждой стороны.
+`RFEC` по умолчанию повторяет `KFEC`; для kernel↔kernel
+значение `RFEC` игнорируется (обе стороны используют `KFEC`).
+`FEC` работает как алиас `KFEC`. BBR удалён в 0.5.0.
 
 ### Rust↔Rust без kernel-модуля (`IMPL=rust2`)
 
@@ -85,15 +84,15 @@ netns (`xwg0`/`xwg1`) — и не загружает `umbrawg.ko` вовсе. К
 (`PrivateKey`, `PublicKey`, `ListenPort`, `Endpoint`, `AllowedIPs`,
 `PersistentKeepalive`) и собственные underlay-порты `PORT0`/`PORT1`.
 Расширение включается через env каждого процесса: сторона в `xwg0` получает
-`UMBRAWG_FEC=FEC_SIDE0`/`UMBRAWG_BBR=BBR_SIDE0`, сторона в `xwg1` —
-`FEC_SIDE1`/`BBR_SIDE1`; при `DIR=k0` это `KFEC`/`KBBR` и `RFEC`/`RBBR`
-соответственно. Секции `FEC`/`BBR` в конфиг не пишутся, чтобы env не
+`UMBRAWG_FEC=FEC_SIDE0`, сторона в `xwg1` —
+`FEC_SIDE1`; при `DIR=k0` это `KFEC` и `RFEC`
+соответственно. Секция `FEC` в конфиг не пишется, чтобы env не
 перетирался `setconf`. Ping, TCP, UDP, pcap, `RESULT`-строка и cleanup —
 общие с остальными режимами; по завершении убиваются оба демона, сокеты и
 netns. `KO` для этого режима не нужен, `UWG` (setconf) и `RUST` — нужны.
 
 ```bash
-sudo IMPL=rust2 KFEC=2:1 RFEC=2:1 KBBR=on RBBR=on DUR=4 bash bench/wire-ext.sh
+sudo IMPL=rust2 KFEC=2:1 RFEC=2:1 DUR=4 bash bench/wire-ext.sh
 sudo IMPL=rust2 KFEC=2:1 RFEC=2:1 NETEM_LOSS=2 NETEM_BOTH=1 bash bench/wire-ext.sh
 ```
 
@@ -105,14 +104,13 @@ sudo bash bench/ext-matrix.sh                # 32 прогона
 sudo DUR=2 FEC_LIST="off 2:1 adaptive" bash bench/ext-matrix.sh
 sudo LOSS_LIST="0 2 5" NETEM_RATE=100mbit bash bench/ext-matrix.sh
 sudo DIR_LIST="k0 k1" IMPL_LIST=kernel bash bench/ext-matrix.sh
-sudo IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive" BBR_LIST="off on" LOSS_LIST="0 2" bash bench/ext-matrix.sh
+sudo IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive" LOSS_LIST="0 2" bash bench/ext-matrix.sh
 ```
 
 | Ось | Значения по умолчанию | Что проверяет |
 |---|---|---|
 | `IMPL_LIST` | `rust kernel` | mixed kernel↔Rust и kernel↔kernel; `rust2` — Rust↔Rust без модуля (не требует `umbrawg.ko`) |
 | `FEC_LIST` | `off 2:1 8:2 adaptive` | цена fixed-режимов и поведение adaptive |
-| `BBR_LIST` | `off on` | вклад BBR-пейсинга |
 | `LOSS_LIST` | `0 2` | чистый канал и 2% потерь |
 | `DIR_LIST` | `k0` | сторона kernel; `k0 k1` для проверки симметрии |
 
@@ -124,7 +122,7 @@ sudo IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive" BBR_LIST="off on" LOSS_LIST
 CSV пишется в `bench/tmp/ext-matrix-<RUN_ID>.csv`:
 
 ```
-tag,impl,dir,fec,bbr,loss,tcp_mbit,udp_mbit,udp_loss,ping_loss,frag,result
+tag,impl,dir,fec,loss,tcp_mbit,udp_mbit,udp_loss,ping_loss,frag,result
 ```
 
 `tcp_mbit` — goodput TCP; `udp_mbit`/`udp_loss` — принятая скорость и потери
@@ -132,7 +130,7 @@ UDP при `UDP_RATE`; `ping_loss` — потери ICMP (`SKIP` при `SKIP_PI
 `frag` — число IP-фрагментов в pcap (`-`, если tcpdump недоступен); `result`
 — `OK` или причина отказа. Логи прогонов лежат в
 `bench/tmp/ext-matrix-<RUN_ID>/`. В конце печатается сводка по
-`impl/fec/bbr/loss` (медианы) и списки фрагментированных и упавших прогонов.
+`impl/fec/loss` (медианы) и списки фрагментированных и упавших прогонов.
 
 ### Interop-проверки (ext-tests.sh)
 
@@ -148,7 +146,7 @@ PLAN_ONLY=1 bash bench/ext-tests.sh              # план без root и тр�
 sudo bash bench/ext-tests.sh                     # все 8 кейсов, DUR=2
 sudo DUR=3 bash bench/ext-tests.sh               # длиннее и стабильнее
 sudo CASES="mixed-fec21 profile-mismatch" bash bench/ext-tests.sh
-sudo CASES="rust2-fec21 rust2-bbr-fec" bash bench/ext-tests.sh
+sudo CASES="rust2-fec21" bash bench/ext-tests.sh
 sudo FAILFAST=1 KEEP=1 CASES="mixed-fec21" bash bench/ext-tests.sh
 ```
 
@@ -157,14 +155,12 @@ sudo FAILFAST=1 KEEP=1 CASES="mixed-fec21" bash bench/ext-tests.sh
 | `mixed-fec21` | `IMPL=rust`, `2:1` с обеих сторон, loss 2% в обе стороны | `result=OK`, TCP>0, `udp_loss<1`, `ping_loss=0`, `frag=0` |
 | `kernel-fec21` | `IMPL=kernel`, `2:1`, loss 2% в обе стороны | то же: FEC восстанавливает потери в kernel↔kernel |
 | `rust2-fec21` | `IMPL=rust2`, `2:1` с обеих сторон, loss 2% в обе стороны | `result=OK`, TCP>0, `udp_loss<1`, `ping_loss` в пределах lossy-порога, `frag=0` |
-| `rust2-bbr-fec` | `IMPL=rust2`, `2:1`, `BBR=on` с обеих сторон, loss 0 | `result=OK`, TCP>500 Мбит/с, `udp_loss=0`, `frag=0` |
 | `profile-mismatch` | kernel `2:1`, Rust `8:2`, loss 2% | TCP>0, `udp_loss` в `[1..4]`, `ping_loss=0`: несовпадение профилей уходит в legacy без чёрной дыры |
 | `adaptive-clean` | два прогона: `off` и `adaptive`, loss 0 | `udp_loss<0.2`, `tcp_adaptive >= (1-0.12)*tcp_off` — adaptive на чистом канале не включается и не платит overhead |
-| `bbr-fec-clean` | `IMPL=rust`, `2:1`, `BBR=on`, loss 0 | TCP ≥ 500 Мбит/с, `udp_loss<0.2`, `frag=0` |
 | `clean-fec21` | `IMPL=kernel`, `2:1`, loss 0 | TCP ≥ 1000 Мбит/с на 9k underlay, `udp_loss<0.2` |
 
 Пороги вынесены в переменные: `MIN_TCP_CLEAN_FEC` (1000),
-`MIN_TCP_BBR_FEC` (500), `MAX_UDP_LOSS_FEC` (1), `MAX_UDP_LOSS_CLEAN` (0.2),
+`MAX_UDP_LOSS_FEC` (1), `MAX_UDP_LOSS_CLEAN` (0.2),
 `MAX_PING_LOSS_LOSSY` (20), `MATCH_UDP_LOSS_MIN`/`MATCH_UDP_LOSS_MAX` (1/4),
 `ADAPTIVE_TCP_TOL` (0.12).
 Пороги про Мбит/с зависят от машины: на слабом или занятом стенде их
@@ -173,14 +169,12 @@ sudo FAILFAST=1 KEEP=1 CASES="mixed-fec21" bash bench/ext-tests.sh
 Формат вывода:
 
 ```
-[ext-tests] [1/9] run ...-mixed-fec21 impl=rust fec=2:1/2:1 bbr=off/off loss=2
+[ext-tests] [1/9] run ...-mixed-fec21 impl=rust fec=2:1/2:1 loss=2
 [ext-tests] [1/9] done 14s result=OK tcp=663.0 udp=399.9 udp_loss=0.2 ping=0 frag=0
 [ext-tests] CASE mixed-fec21 PASS  14s  info=[result=OK tcp=663.0>0 udp_loss=0.2<1 ping_loss=0==0 frag=0==0]
 [ext-tests] CASE rust2-fec21 PASS  12s  info=[result=OK tcp=512.0>0 udp_loss=0.1<1 ping_loss=0<=20 frag=0==0]
-[ext-tests] CASE rust2-bbr-fec FAIL  18s  failed=[udp_loss=0.001 (нужно ==0)]
-[ext-tests]     info=[result=OK tcp=640.0>500 frag=0==0]
 [ext-tests] done: cases=8/8 pass=7 fail=1 runs=9/9 in 120s
-[ext-tests] failed cases: rust2-bbr-fec
+[ext-tests] failed cases: (none)
 ```
 
 `info` — фактические значения и проверенные границы, `failed` — что именно
@@ -203,7 +197,7 @@ sudo FAILFAST=1 KEEP=1 CASES="mixed-fec21" bash bench/ext-tests.sh
 
 **Новый кейс.** Добавьте имя в `known_case`, число прогонов в `runs_of`,
 функцию `case_<имя_через_подчёркивания>` (она вызывает `run_wire tag impl
-kfec rfec kbbr rbbr loss` и проверки `chk_cmp`/`chk_ping`/`chk_frag`), строку
+kfec rfec loss` и проверки `chk_cmp`/`chk_ping`/`chk_frag`), строку
 в `CASES` по умолчанию, команду в `print_plan` и строку в таблицу выше.
 `run_wire` заполняет `R_TCP`, `R_UDP`, `R_UDPLOSS`, `R_PING`, `R_FRAG`,
 `R_RESULT`; `chk_cmp` добавляет проверку в `info`/`failed` и возвращает
@@ -215,8 +209,6 @@ kfec rfec kbbr rbbr loss` и проверки `chk_cmp`/`chk_ping`/`chk_frag`), 
   активен. Fixed `2:1`/`8:2` ниже по TCP примерно на overhead `k+m`.
 - `loss=2`: у `off` `udp_loss` около 2%; fixed и adaptive FEC должны её
   снизить. Adaptive включается только при потерях в обе стороны.
-- BBR заметен на узком месте (`NETEM_RATE`): сравнивайте `bbr=off` и `bbr=on`
-  при одной полосе. На чистом 9k veth разница в пределах шума.
 - `frag>0` при `TUNMTU`, близком к underlay MTU, означает, что FEC-шарды или
   обфускация вышли за MTU.
 
@@ -576,9 +568,9 @@ workflow, вручную (`workflow_dispatch`) и по ночному cron (03:0
    (`cargo build --release --locked -p uwg`);
 4. на каждом push/PR гоняет `python3 bench/tests/test-detect.py`,
    `python3 bench/tests/test-golden-pcap.py` и
-   `PLAN_ONLY=1 CASES="mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec profile-mismatch adaptive-clean bbr-fec-clean clean-fec21" bash bench/ext-tests.sh`;
+   `PLAN_ONLY=1 CASES="mixed-fec21 kernel-fec21 rust2-fec21 profile-mismatch adaptive-clean clean-fec21" bash bench/ext-tests.sh`;
 5. только на push в master, `workflow_dispatch` и cron выполняет реальный
-   interop: `sudo DUR=2 CASES="rust2-fec21 rust2-bbr-fec" bash bench/ext-tests.sh`.
+   interop: `sudo DUR=2 CASES="rust2-fec21" bash bench/ext-tests.sh`.
 
 Полный прогон требует root (netns, `insmod`, `tc`, `tcpdump`) и занимает
 раннер на несколько минут, поэтому в PR он не запускается: сборка ловит
@@ -605,10 +597,10 @@ interop на раннере покрывает только `rust2-*` (Rust↔Ru
    (`umbrawg-tools`);
 3. ставит `iperf3`, `iproute2`, `tcpdump`, `python3`;
 4. гоняет `PLAN_ONLY=1` для матрицы `IMPL_LIST=rust2`, `FEC_LIST="off 2:1 8:2
-   adaptive"`, `BBR_LIST="off on"`, `LOSS_LIST="0 2"`;
+   adaptive"`, `LOSS_LIST="0 2"`;
 5. выполняет полный прогон
    `sudo -E env DUR=2 IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive"
-   BBR_LIST="off on" LOSS_LIST="0 2" bash bench/ext-matrix.sh`.
+   LOSS_LIST="0 2" bash bench/ext-matrix.sh`.
 
 Модуль `umbrawg.ko` **не собирается и не загружается**: на раннере нет
 подходящего ядра, а режим `rust2` (Rust↔Rust без модуля) его не требует.

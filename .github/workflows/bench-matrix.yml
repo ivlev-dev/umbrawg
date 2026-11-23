@@ -11,7 +11,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-# Ночной прогон матрицы расширения BBR/FEC в режиме Rust↔Rust (rust2): на
+# Ночной прогон матрицы расширения FEC в режиме Rust↔Rust (rust2): на
 # раннере нет подходящего ядра, поэтому kernel-модуль не собирается и не
 # загружается — rust2 работает без umbrawg.ko. Запуск только по cron и
 # вручную, не на каждый push.
@@ -56,14 +56,13 @@ jobs:
         env:
           IMPL_LIST: rust2
           FEC_LIST: "off 2:1 8:2 adaptive"
-          BBR_LIST: "off on"
           LOSS_LIST: "0 2"
         run: PLAN_ONLY=1 bash bench/ext-matrix.sh
 
       - name: Полный прогон матрицы (root)
         run: |
           set -euo pipefail
-          sudo -E env DUR=2 IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive" BBR_LIST="off on" LOSS_LIST="0 2" bash bench/ext-matrix.sh
+          sudo -E env DUR=2 IMPL_LIST=rust2 FEC_LIST="off 2:1 8:2 adaptive" LOSS_LIST="0 2" bash bench/ext-matrix.sh
 
       - name: Загрузить CSV и логи
         if: always()

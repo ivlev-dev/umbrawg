@@ -104,7 +104,7 @@ jobs:
 
       - name: PLAN_ONLY для interop-кейсов
         env:
-          CASES: mixed-fec21 kernel-fec21 rust2-fec21 rust2-bbr-fec profile-mismatch adaptive-clean bbr-fec-clean clean-fec21
+          CASES: mixed-fec21 kernel-fec21 rust2-fec21 profile-mismatch adaptive-clean clean-fec21
         run: PLAN_ONLY=1 bash bench/ext-tests.sh
 
       # На раннере модуль собран в Arch-контейнере под другое ядро и не
@@ -118,7 +118,7 @@ jobs:
           (github.event_name == 'push' && github.ref == 'refs/heads/master')
         env:
           DUR: "2"
-          CASES: rust2-fec21 rust2-bbr-fec
+          CASES: rust2-fec21
         run: |
           set -euo pipefail
           sudo -E env DUR="$DUR" CASES="$CASES" bash bench/ext-tests.sh

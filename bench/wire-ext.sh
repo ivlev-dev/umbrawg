@@ -26,10 +26,8 @@ fi
 
 IMPL=${IMPL:-rust}
 DIR=${DIR:-k0}
-KFEC=${KFEC:-${FEC:-off}}
+KFEC=${KFEC:-${FEC:-adaptive}}
 RFEC=${RFEC:-${FEC:-$KFEC}}
-KBBR=${KBBR:-${BBR:-off}}
-RBBR=${RBBR:-${BBR:-$KBBR}}
 NETEM_LOSS=${NETEM_LOSS:-0}
 NETEM_DELAY=${NETEM_DELAY:-0}
 NETEM_RATE=${NETEM_RATE:-}
@@ -74,13 +72,6 @@ validate_fec() {
     case "$1" in
         off|adaptive) return 0 ;;
         [0-9]*:[0-9]*) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
-validate_bbr() {
-    case "$1" in
-        off|monitor|on) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -144,8 +135,6 @@ esac
 [ "$DIR" = "k0" ] || [ "$DIR" = "k1" ] || die "DIR must be k0 or k1"
 validate_fec "$KFEC" || die "KFEC must be off, adaptive or K:M"
 validate_fec "$RFEC" || die "RFEC must be off, adaptive or K:M"
-validate_bbr "$KBBR" || die "KBBR must be off, monitor or on"
-validate_bbr "$RBBR" || die "RBBR must be off, monitor or on"
 case "$NETEM_LOSS" in
     ''|*[!0-9.]*) die "NETEM_LOSS must be a percentage number" ;;
 esac
@@ -215,18 +204,16 @@ esac
 
 if [ "$IMPL" = "kernel" ]; then
     PEER_FEC=$KFEC
-    PEER_BBR=$KBBR
 else
     PEER_FEC=$RFEC
-    PEER_BBR=$RBBR
 fi
 
 if [ "$DIR" = "k0" ]; then
-    FEC_SIDE0=$KFEC; BBR_SIDE0=$KBBR
-    FEC_SIDE1=$PEER_FEC; BBR_SIDE1=$PEER_BBR
+    FEC_SIDE0=$KFEC
+    FEC_SIDE1=$PEER_FEC
 else
-    FEC_SIDE0=$PEER_FEC; BBR_SIDE0=$PEER_BBR
-    FEC_SIDE1=$KFEC; BBR_SIDE1=$KBBR
+    FEC_SIDE0=$PEER_FEC
+    FEC_SIDE1=$KFEC
 fi
 
 RUST_ENV_BASE=()
@@ -235,8 +222,8 @@ RUST_ENV_BASE=()
 [ -n "$UMBRAWG_THREADS" ] && RUST_ENV_BASE+=(UMBRAWG_THREADS="$UMBRAWG_THREADS")
 
 start_rust_daemon() {
-    local ns=$1 ifname=$2 fec=$3 bbr=$4 logfile=$5
-    ip netns exec "$ns" env UMBRAWG_BBR="$bbr" UMBRAWG_FEC="$fec" "${RUST_ENV_BASE[@]+"${RUST_ENV_BASE[@]}"}" \
+    local ns=$1 ifname=$2 fec=$3 logfile=$4
+    ip netns exec "$ns" env UMBRAWG_FEC="$fec" "${RUST_ENV_BASE[@]+"${RUST_ENV_BASE[@]}"}" \
         "$RUST" --foreground "$ifname" >"$logfile" 2>&1 &
     LAST_PID=$!
 }
@@ -252,15 +239,15 @@ wait_rust_socket() {
 }
 
 if [ "$IMPL" = "rust2" ]; then
-    start_rust_daemon "$NS0" uwg0 "$FEC_SIDE0" "$BBR_SIDE0" "$OUT-rust-ns0.log"
+    start_rust_daemon "$NS0" uwg0 "$FEC_SIDE0" "$OUT-rust-ns0.log"
     DPID=$LAST_PID
-    start_rust_daemon "$NS1" uwg1 "$FEC_SIDE1" "$BBR_SIDE1" "$OUT-rust-ns1.log"
+    start_rust_daemon "$NS1" uwg1 "$FEC_SIDE1" "$OUT-rust-ns1.log"
     DPID2=$LAST_PID
     wait_rust_socket uwg0 "$OUT-rust-ns0.log" || die "rust2 daemon (ns0) is not ready"
     wait_rust_socket uwg1 "$OUT-rust-ns1.log" || die "rust2 daemon (ns1) is not ready"
 elif [ "$IMPL" = "rust" ]; then
     ip netns exec "$KNS" ip link add "$KIF" type umbrawg || die "cannot create $KIF in $KNS"
-    start_rust_daemon "$ONS" "$OIF" "$PEER_FEC" "$PEER_BBR" "$OUT-$IMPL.log"
+    start_rust_daemon "$ONS" "$OIF" "$PEER_FEC" "$OUT-$IMPL.log"
     DPID=$LAST_PID
     wait_rust_socket "$OIF" "$OUT-$IMPL.log" || die "rust daemon did not create $OIF"
 else
@@ -282,14 +269,13 @@ CONF0=$(mktemp "${TMPDIR:-/tmp}/wire-ext-conf0.XXXXXX")
 CONF1=$(mktemp "${TMPDIR:-/tmp}/wire-ext-conf1.XXXXXX")
 
 write_conf() {
-    local file=$1 priv=$2 port=$3 peer=$4 endpoint_ip=$5 endpoint_port=$6 fec=$7 bbr=$8
+    local file=$1 priv=$2 port=$3 peer=$4 endpoint_ip=$5 endpoint_port=$6 fec=$7
     {
         printf '[Interface]\n'
         printf 'PrivateKey = %s\n' "$priv"
         printf 'ListenPort = %s\n' "$port"
         if [ "$IMPL" != "rust2" ]; then
             printf 'FEC = %s\n' "$fec"
-            printf 'BBR = %s\n' "$bbr"
         fi
         printf '\n[Peer]\n'
         printf 'PublicKey = %s\n' "$peer"
@@ -299,8 +285,8 @@ write_conf() {
     } > "$file"
 }
 
-write_conf "$CONF0" "$K0" "$PORT0" "$P1" "$UL1" "$PORT1" "$FEC_SIDE0" "$BBR_SIDE0"
-write_conf "$CONF1" "$K1" "$PORT1" "$P0" "$UL0" "$PORT0" "$FEC_SIDE1" "$BBR_SIDE1"
+write_conf "$CONF0" "$K0" "$PORT0" "$P1" "$UL1" "$PORT1" "$FEC_SIDE0"
+write_conf "$CONF1" "$K1" "$PORT1" "$P0" "$UL0" "$PORT0" "$FEC_SIDE1"
 
 if ! OUT0=$(ip netns exec "$NS0" "$UWG" setconf uwg0 "$CONF0" 2>&1); then
     die "setconf uwg0 failed: $OUT0"
@@ -469,13 +455,13 @@ except Exception:
     [ "$UDP" = "FAIL" ] && RESULT=FAIL_UDP
 fi
 
-log "impl=$IMPL dir=$DIR kernel_fec=$KFEC peer_fec=$PEER_FEC kernel_bbr=$KBBR peer_bbr=$PEER_BBR"
+log "impl=$IMPL dir=$DIR kernel_fec=$KFEC peer_fec=$PEER_FEC"
 log "loss=${NETEM_LOSS}% delay=$NETEM_DELAY rate=${NETEM_RATE:-0} both=$NETEM_BOTH umtu=$UMTU tunmtu=$TUNMTU dur=$DUR"
 log "tcp=$TCP Mbit/s udp=$UDP Mbit/s udp_loss=$UDP_LOSS% ping_loss=$PING_LOSS% rtt=$PRTT pkt=$NPKT frag=$FRAG"
 log "artifacts=$OUT.*"
 
-printf 'RESULT tag=%s impl=%s dir=%s fec=%s bbr=%s loss=%s tcp_mbit=%s udp_mbit=%s udp_loss=%s ping_loss=%s frag=%s result=%s\n' \
-    "$TAG" "$IMPL" "$DIR" "$KFEC" "$KBBR" "$NETEM_LOSS" \
+printf 'RESULT tag=%s impl=%s dir=%s fec=%s loss=%s tcp_mbit=%s udp_mbit=%s udp_loss=%s ping_loss=%s frag=%s result=%s\n' \
+    "$TAG" "$IMPL" "$DIR" "$KFEC" "$NETEM_LOSS" \
     "$TCP" "$UDP" "$UDP_LOSS" "$PING_LOSS" "$FRAG" "$RESULT"
 
 [ "$RESULT" = "OK" ]
