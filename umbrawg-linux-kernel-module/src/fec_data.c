@@ -165,21 +165,74 @@ unsigned int uwg_fec_target_mtu(unsigned int underlay_mtu, unsigned int base_mtu
 	return target;
 }
 
+/* Adaptive FEC only spends the shard budget when it has actually armed on
+ * some peer. Scanning the peer list requires device_update_lock. */
+static bool uwg_fec_adaptive_any_on(struct uwg_device *uwg)
+{
+	struct uwg_peer *peer;
+
+	lockdep_assert_held(&uwg->device_update_lock);
+
+	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
+		struct uwg_fec_tx *tx;
+		bool on;
+
+		rcu_read_lock();
+		tx = rcu_dereference(peer->fec_tx);
+		on = tx && READ_ONCE(tx->adaptive_on);
+		rcu_read_unlock();
+		if (on)
+			return true;
+	}
+	return false;
+}
+
+static void uwg_fec_mtu_work_worker(struct work_struct *work)
+{
+	struct uwg_device *uwg = container_of(work, struct uwg_device,
+					      fec_mtu_work);
+
+	rtnl_lock();
+	mutex_lock(&uwg->device_update_lock);
+	uwg_fec_refresh_mtu(uwg);
+	mutex_unlock(&uwg->device_update_lock);
+	rtnl_unlock();
+}
+
+void uwg_fec_mtu_work_init(struct uwg_device *uwg)
+{
+	INIT_WORK(&uwg->fec_mtu_work, uwg_fec_mtu_work_worker);
+}
+
+void uwg_fec_mtu_refresh_schedule(struct uwg_device *uwg)
+{
+	schedule_work(&uwg->fec_mtu_work);
+}
+
 void uwg_fec_refresh_mtu(struct uwg_device *uwg)
 {
 	struct net_device *dev = uwg->dev;
 	unsigned int base = READ_ONCE(uwg->fec_base_mtu);
 	unsigned int cur_mtu = READ_ONCE(dev->mtu);
 	unsigned int target;
-	bool fec_on;
+	bool fec_on, adaptive = false;
 	int ret;
 
-	fec_on = uwg_fec_mode_config(READ_ONCE(uwg->fec_mode), NULL, NULL, NULL);
-
-	/* dev_set_mtu() is only allowed under rtnl: every caller (the netlink
-	 * SET_DEVICE path, which also covers peer creation) holds it.
+	/* dev_set_mtu() is only allowed under rtnl, and the adaptive check
+	 * below walks peer_list, so every caller holds both locks: the
+	 * netlink SET_DEVICE path, or uwg_fec_mtu_work_worker().
 	 */
+	lockdep_assert_held(&uwg->device_update_lock);
 	ASSERT_RTNL();
+
+	fec_on = uwg_fec_mode_config(READ_ONCE(uwg->fec_mode), NULL, NULL,
+				     &adaptive);
+	/* An adaptive profile reserves nothing until some peer has really
+	 * armed it: on a clean channel the data plane keeps the legacy path
+	 * and the MTU stays at the base value. Fixed profiles shrink now.
+	 */
+	if (fec_on && adaptive)
+		fec_on = uwg_fec_adaptive_any_on(uwg);
 
 	/* The MTU no longer matches the one programmed by the last refresh, so
 	 * the operator changed it by hand (`ip link set mtu`). Adopt it as the
@@ -254,10 +307,11 @@ static void uwg_fec_adaptive_window_reset(struct uwg_fec_tx *tx, u64 counter,
 	tx->adaptive_segment_start = now;
 }
 
-static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
+static bool uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 					    u64 keypair_id, unsigned long now)
 {
 	u64 expected, lost, loss_q16;
+	bool changed = false;
 
 	/* The transport counter restarts at zero with every new keypair. The
 	 * counter alone cannot distinguish that from reordering, so the epoch
@@ -269,18 +323,18 @@ static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 		tx->adaptive_valid = true;
 		tx->adaptive_keypair_id = keypair_id;
 		uwg_fec_adaptive_window_reset(tx, counter, now);
-		return;
+		return false;
 	}
 	if (counter < tx->adaptive_base) {
 		/* Same epoch, counter behind the open window: reordering. */
-		return;
+		return false;
 	}
 	if (counter > tx->adaptive_largest)
 		tx->adaptive_largest = counter;
 	tx->adaptive_received++;
 	expected = tx->adaptive_largest - tx->adaptive_base + 1;
 	if (expected < UWG_FEC_ADAPTIVE_MIN_WINDOW)
-		return;
+		return false;
 	if (unlikely(expected > UWG_FEC_ADAPTIVE_MAX_WINDOW)) {
 		/* A counter jump this large is a restart, not loss: drop the
 		 * segment instead of turning it into a bogus estimate.
@@ -288,7 +342,7 @@ static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 		tx->adaptive_base = tx->adaptive_largest + 1;
 		tx->adaptive_received = 0;
 		tx->adaptive_segment_start = now;
-		return;
+		return false;
 	}
 	/* Do not close the window before it had time to settle. Reordered
 	 * packets still arrive after the gap opened; as long as the window
@@ -297,7 +351,7 @@ static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 	 */
 	if (time_before(now, tx->adaptive_segment_start +
 				     UWG_FEC_ADAPTIVE_SETTLE_JIFFIES))
-		return;
+		return false;
 	lost = expected > tx->adaptive_received ?
 		expected - tx->adaptive_received : 0;
 	loss_q16 = (u32)div_u64(lost << 16, expected);
@@ -320,6 +374,7 @@ static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 		if (tx->adaptive_observed >= 1024 &&
 		    tx->adaptive_loss_q16 > 655) {
 			tx->adaptive_on = true;
+			changed = true;
 			/* Stale clean time from before the switch would make
 			 * the first clean sample turn adaptive off again
 			 * immediately.
@@ -331,6 +386,7 @@ static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 			tx->adaptive_clean_since = now;
 		else if (time_after(now, tx->adaptive_clean_since + 5 * HZ)) {
 			tx->adaptive_on = false;
+			changed = true;
 			tx->adaptive_clean_since = 0;
 			tx->adaptive_observed = 0;
 			tx->adaptive_loss_q16 = 0;
@@ -339,22 +395,34 @@ static void uwg_fec_adaptive_observe_locked(struct uwg_fec_tx *tx, u64 counter,
 	} else {
 		tx->adaptive_clean_since = 0;
 	}
+	return changed;
 }
 
 void uwg_fec_adaptive_observe(struct uwg_peer *peer, u64 counter,
 			      u64 keypair_id)
 {
+	struct uwg_device *uwg = peer->device;
 	struct uwg_fec_tx *tx;
+	bool changed = false;
 
 	rcu_read_lock();
 	tx = rcu_dereference(peer->fec_tx);
 	if (!tx || !tx->adaptive)
 		goto out;
 	spin_lock_bh(&tx->lock);
-	uwg_fec_adaptive_observe_locked(tx, counter, keypair_id, jiffies);
+	changed = uwg_fec_adaptive_observe_locked(tx, counter, keypair_id,
+						  jiffies);
 	spin_unlock_bh(&tx->lock);
 out:
 	rcu_read_unlock();
+
+	/* The MTU follows the armed state: dev_set_mtu() needs rtnl and
+	 * cannot run here, so the recompute is deferred. A transition is
+	 * reported once, not per sample, and schedule_work() coalesces
+	 * further requests while the worker is pending.
+	 */
+	if (changed)
+		uwg_fec_mtu_refresh_schedule(uwg);
 }
 
 bool uwg_fec_peer_tx_ready(const struct uwg_peer *peer)
@@ -549,9 +617,6 @@ static void uwg_fec_tx_emit(struct uwg_fec_tx *tx, bool with_parity,
 		PACKET_CB(skb)->ds = 0;
 		PACKET_CB(skb)->is_keepalive = false;
 		PACKET_CB(skb)->is_fec = true;
-		PACKET_CB(skb)->pace_len = i ? 0 :
-			total * (UWG_EXT_HEADER_LEN +
-				 UWG_EXT_FEC_HEADER_LEN + shard_len);
 		__skb_queue_tail(out, skb);
 		atomic64_inc(&peer->fec_counters.shards_sent);
 	}
@@ -1382,7 +1447,7 @@ static bool uwg_fec_adaptive_selftest(void)
 	struct uwg_fec_tx tx;
 	unsigned long now = jiffies;
 	u64 i, counter;
-	unsigned int sec;
+	unsigned int sec, flips;
 	bool ok = true;
 
 #define A_CHECK(cond) do {						\
@@ -1421,28 +1486,39 @@ static bool uwg_fec_adaptive_selftest(void)
 		if (i % 50)
 			uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
 	now += HZ;
-	uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now);
+	/* The arming sample must report the transition exactly once: that is
+	 * what schedules the deferred MTU refresh.
+	 */
+	A_CHECK(uwg_fec_adaptive_observe_locked(&tx, 4097, 1, now));
 	A_CHECK(tx.adaptive_on);
 	A_CHECK(!tx.adaptive_clean_since);
 
 	/* One clean sample right after enabling must not switch it off. */
 	now += HZ;
+	flips = 0;
 	for (i = 4098; i < 4098 + UWG_FEC_ADAPTIVE_MIN_WINDOW; i++)
-		uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
+		flips += uwg_fec_adaptive_observe_locked(&tx, i, 1, now);
 	A_CHECK(tx.adaptive_on);
+	A_CHECK(!flips);
 
 	/* ... but a run of clean samples does. The EWMA starts at the lossy
 	 * estimate, so it takes several one-second segments to decay and
-	 * then five more to expire the clean timer.
+	 * then five more to expire the clean timer. The disarm must also be
+	 * reported exactly once, so the MTU worker is not rescheduled on
+	 * every clean sample.
 	 */
 	counter = 4098 + UWG_FEC_ADAPTIVE_MIN_WINDOW;
+	flips = 0;
 	for (sec = 0; sec < 20; sec++) {
 		now += HZ;
 		for (i = 0; i < UWG_FEC_ADAPTIVE_MIN_WINDOW;
 		     i++, counter++)
-			uwg_fec_adaptive_observe_locked(&tx, counter, 1, now);
+			flips += uwg_fec_adaptive_observe_locked(&tx,
+								 counter, 1,
+								 now);
 	}
 	A_CHECK(!tx.adaptive_on);
+	A_CHECK(flips == 1);
 
 	/* Rekey: a long clean epoch leaves adaptive_base far beyond the
 	 * counters of the next epoch, which restart at zero. The estimator
@@ -1663,7 +1739,6 @@ int uwg_fec_mtu_selftest(void)
 	T_CHECK(!uwg_fec_shard_profile_ok(8, 1, 7, 2));
 
 	T_CHECK(uwg_fec_adaptive_selftest());
-	T_CHECK(uwg_ext_ack_selftest());
 	T_CHECK(uwg_ext_caps_selftest());
 
 	if (!ok)

@@ -168,7 +168,7 @@ setup_kr() { # kernel in NS0, Rust daemon in NS1, FEC 2:1
 	create_namespaces || return 1
 	ip -n "$NS0" link add uwg0 type umbrawg || return 1
 	mkdir -p /var/run/umbrawg
-	ip netns exec "$NS1" env UMBRAWG_FEC=2:1 UMBRAWG_BBR=off \
+	ip netns exec "$NS1" env UMBRAWG_FEC=2:1 \
 		"$RUST" --foreground uwg1 >"$WORK/rust.log" 2>&1 &
 	RUST_PID=$!
 	local i

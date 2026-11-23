@@ -71,10 +71,6 @@ struct uwg_device {
 	struct sock __rcu *sock4, *sock6;
 #define UWG_EXTRA_PORTS_MAX 8
 #define UWG_EXTRA_PORTS_DEFAULT 0
-#define UWG_BBR_MODE_OFF 0
-#define UWG_BBR_MODE_MONITOR 1
-#define UWG_BBR_MODE_ON 2
-#define UWG_BBR_MODE_MAX UWG_BBR_MODE_ON
 #define UWG_FEC_MODE_OFF 0
 #define UWG_FEC_MODE_ADAPTIVE 1
 #define UWG_FEC_MAX_SHARDS 255
@@ -82,7 +78,6 @@ struct uwg_device {
 	struct sock __rcu *sock6_extra[UWG_EXTRA_PORTS_MAX];
 	u8 sock4_extra_count, sock6_extra_count;
 	u8 extra_ports;
-	u8 bbr_mode;
 	u32 fec_mode;
 	/* MTU of the path between peers, as configured by the user. The FEC
 	 * MTU policy needs it to decide how large one shard datagram may be.
@@ -105,6 +100,11 @@ struct uwg_device {
 	struct allowedips peer_allowedips;
 	struct mutex device_update_lock, socket_update_lock;
 	struct list_head device_list, peer_list;
+	/* Deferred FEC MTU policy: adaptive FEC may arm or disarm on the TX
+	 * path, where dev_set_mtu() is impossible, so the recompute runs from
+	 * process context here.
+	 */
+	struct work_struct fec_mtu_work;
 	struct uwg_header_protection __rcu *header_protection;
 	/* Bounds the cost of unknown-peer notifications: every event allocates
 	 * a fresh ~8 KiB skb, which unauthenticated handshake initiations must

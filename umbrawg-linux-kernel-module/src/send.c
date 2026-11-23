@@ -15,7 +15,6 @@
 #include "type.h"
 #include "aead.h"
 #include "ext.h"
-#include "bbr.h"
 #include <linux/unaligned.h>
 #include <linux/highmem.h>
 #include <linux/jiffies.h>
@@ -52,27 +51,6 @@ static unsigned int uwg_gso_segs_max = UWG_GSO_SEGS_HARD_MAX - 2;
 module_param_named(gso_segs_max, uwg_gso_segs_max, uint, 0644);
 MODULE_PARM_DESC(gso_segs_max,
 		 "Maximum segments per UDP GSO superdatagram (1..46, default 44)");
-
-/* Datagrams below this size are never delayed: pacing them would only add
- * latency to ACKs, keepalives and interactive traffic.
- */
-#define UWG_TX_PACE_MIN_BYTES 512
-#define UWG_TX_PACE_MAX_NS UWG_BBR_DRAIN_DELAY_MAX_NS
-
-/*
- * A staged batch withheld by the congestion window is released
- * unconditionally after this long. The window only reopens on ACKs, so
- * without the timeout a lost ACK stream would park the tunnel for good.
- */
-#define UWG_TX_CWND_BLOCK_MAX_NS (5ULL * NSEC_PER_MSEC)
-
-/*
- * After the cwnd gate cut a batch short, pacing stays quiet for this long:
- * the gate already spaces batches at cwnd/RTT, and a token-bucket sleep on
- * top of it would add a second throughput ceiling. The window covers the
- * encrypt-queue hand-off, so ordinary batches are still paced.
- */
-#define UWG_TX_CWND_PACE_QUIET_NS (2ULL * NSEC_PER_MSEC)
 
 /* Handshake outer TOS is sampled per frame: DSCP is not negotiated and the
  * peer ignores it, but a constant value is a stable fingerprint.
@@ -508,7 +486,6 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 		PACKET_CB(skb)->is_keepalive = true;
 		PACKET_CB(skb)->is_fec = false;
 		PACKET_CB(skb)->fec_m = 0;
-		PACKET_CB(skb)->pace_len = 0;
 		skb_queue_tail(&peer->staged_packet_queue, skb);
 		net_dbg_ratelimited("%s: Sending keepalive packet to peer %llu (%pISpfsc)\n",
 				    peer->device->dev->name, peer->internal_id,
@@ -518,251 +495,17 @@ void uwg_packet_send_keepalive(struct uwg_peer *peer)
 	uwg_packet_send_staged_packets(peer);
 }
 
-/*
- * Whether BBR may shape traffic to this peer at all. A peer confirms that it
- * will acknowledge by setting UWG_EXT_CAP_ACK in CAPS. Until that confirmation
- * arrives (and again if the peer withdraws it) the controller stays out of the
- * data path: accounting, pacing and the cwnd gate are all skipped, so packets
- * leave immediately and inflight does not grow against a peer that never sends
- * feedback. The Rust implementation gates on the same flag.
- */
-static bool uwg_packet_bbr_peer_ack(const struct uwg_peer *peer)
-{
-	return READ_ONCE(peer->caps.peer_valid) &&
-	       (READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_ACK);
-}
-
-static void uwg_packet_bbr_on_send(struct uwg_peer *peer,
-				   struct sk_buff_head *packets,
-				   u64 keypair_id)
-{
-	struct uwg_bbr *bbr;
-	struct sk_buff *skb;
-	u64 now_ns;
-
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
-	    !uwg_packet_bbr_peer_ack(peer))
-		return;
-
-	rcu_read_lock();
-	bbr = uwg_peer_bbr_lookup(peer);
-	if (unlikely(!bbr)) {
-		rcu_read_unlock();
-		return;
-	}
-
-	now_ns = ktime_get_ns();
-	spin_lock_bh(&peer->bbr_lock);
-	/* FEC lowers the interface MTU to what fits one shard, so the
-	 * controller's unit of loss must follow it instead of a fixed 1400:
-	 * min_cwnd and the pacer burst are derived from it.
-	 */
-	uwg_bbr_set_mss(bbr, READ_ONCE(peer->device->dev->mtu));
-	skb_queue_walk(packets, skb) {
-		if (PACKET_CB(skb)->is_keepalive) {
-			/* Keepalives are not tracked in the ring, but their
-			 * counters appear in ACK.largest.
-			 */
-			uwg_bbr_note_sent(bbr, keypair_id, PACKET_CB(skb)->nonce);
-			continue;
-		}
-		uwg_bbr_on_send(bbr, keypair_id, PACKET_CB(skb)->nonce, skb->len,
-				now_ns);
-	}
-	spin_unlock_bh(&peer->bbr_lock);
-	rcu_read_unlock();
-}
-
-static void uwg_packet_bbr_on_sent(struct uwg_peer *peer,
-				   struct sk_buff *const *skbs,
-				   unsigned int count)
-{
-	struct uwg_bbr *bbr;
-	u64 now_ns;
-	unsigned int i;
-
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
-	    !uwg_packet_bbr_peer_ack(peer))
-		return;
-
-	rcu_read_lock();
-	bbr = uwg_peer_bbr_lookup(peer);
-	if (unlikely(!bbr)) {
-		rcu_read_unlock();
-		return;
-	}
-
-	/* One timestamp and one lock for the whole GSO group keeps the
-	 * intra-group spacing out of the RTT samples.
-	 */
-	now_ns = ktime_get_ns();
-	spin_lock_bh(&peer->bbr_lock);
-	for (i = 0; i < count; i++) {
-		if (PACKET_CB(skbs[i])->is_keepalive)
-			continue;
-		uwg_bbr_on_sent(bbr, PACKET_CB(skbs[i])->nonce, now_ns);
-	}
-	spin_unlock_bh(&peer->bbr_lock);
-	rcu_read_unlock();
-}
-
-/*
- * Datagrams that were registered with uwg_bbr_on_send() but never reached
- * the wire must leave inflight; otherwise a failing queue or crypto path
- * slowly inflates the window.
- */
-static void uwg_packet_bbr_on_drop(struct uwg_peer *peer, struct sk_buff *list)
-{
-	struct sk_buff *skb, *next;
-	struct uwg_bbr *bbr;
-
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
-	    !uwg_packet_bbr_peer_ack(peer))
-		return;
-
-	rcu_read_lock();
-	bbr = uwg_peer_bbr_lookup(peer);
-	if (bbr) {
-		spin_lock_bh(&peer->bbr_lock);
-		skb_list_walk_safe(list, skb, next) {
-			if (!PACKET_CB(skb)->is_keepalive)
-				uwg_bbr_on_drop(bbr, PACKET_CB(skb)->nonce);
-		}
-		spin_unlock_bh(&peer->bbr_lock);
-	}
-	rcu_read_unlock();
-}
-
-/*
- * Same release for the datagrams the underlay refused to take. The single
- * path has only the nonce left (the socket layer freed the skb); the GSO
- * path still owns its segments and passes them in.
- */
-static void uwg_packet_bbr_on_drop_one(struct uwg_peer *peer, u64 nonce)
-{
-	struct uwg_bbr *bbr;
-
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
-	    !uwg_packet_bbr_peer_ack(peer))
-		return;
-
-	rcu_read_lock();
-	bbr = uwg_peer_bbr_lookup(peer);
-	if (bbr) {
-		spin_lock_bh(&peer->bbr_lock);
-		uwg_bbr_on_drop(bbr, nonce);
-		spin_unlock_bh(&peer->bbr_lock);
-	}
-	rcu_read_unlock();
-}
-
-static void uwg_packet_bbr_on_drop_skbs(struct uwg_peer *peer,
-					struct sk_buff *const *skbs,
-					unsigned int count)
-{
-	struct uwg_bbr *bbr;
-	unsigned int i;
-
-	if (READ_ONCE(peer->device->bbr_mode) == UWG_BBR_MODE_OFF ||
-	    !uwg_packet_bbr_peer_ack(peer))
-		return;
-
-	rcu_read_lock();
-	bbr = uwg_peer_bbr_lookup(peer);
-	if (bbr) {
-		spin_lock_bh(&peer->bbr_lock);
-		for (i = 0; i < count; ++i) {
-			if (PACKET_CB(skbs[i])->is_keepalive)
-				continue;
-			uwg_bbr_on_drop(bbr, PACKET_CB(skbs[i])->nonce);
-		}
-		spin_unlock_bh(&peer->bbr_lock);
-	}
-	rcu_read_unlock();
-}
-
-static u64 uwg_packet_pace_delay_ns(struct uwg_peer *peer, unsigned int len)
-{
-	struct uwg_bbr *bbr;
-	u64 delay_ns = 0;
-
-	rcu_read_lock();
-	bbr = uwg_peer_bbr_lookup(peer);
-	if (bbr) {
-		spin_lock_bh(&peer->bbr_lock);
-		delay_ns = uwg_bbr_next_delay_ns(bbr, len, ktime_get_ns());
-		spin_unlock_bh(&peer->bbr_lock);
-	}
-	rcu_read_unlock();
-	return delay_ns;
-}
-
-/*
- * Spreads bulk datagrams over time at the BBR pacing rate. Only called from
- * the tx worker, i.e. process context: if that ever changes and the caller
- * sits in softirq or holds a spinlock, pacing is skipped rather than allowed
- * to sleep.
- */
-static void uwg_packet_pace(struct uwg_peer *peer, unsigned int len)
-{
-	u64 delay_ns, gate_ns;
-	u32 delay_us;
-
-	if (len < UWG_TX_PACE_MIN_BYTES)
-		return;
-	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_ON)
-		return;
-	if (!uwg_packet_bbr_peer_ack(peer))
-		return;
-	if (!preemptible())
-		return;
-
-	/* A batch the cwnd gate cut short is already spaced by the window:
-	 * sleeping it out here as well would halve the achieved rate.
-	 */
-	gate_ns = READ_ONCE(peer->cwnd_gate_ns);
-	if (gate_ns && ktime_get_ns() - gate_ns < UWG_TX_CWND_PACE_QUIET_NS)
-		return;
-
-	delay_ns = uwg_packet_pace_delay_ns(peer, len);
-	if (delay_ns < NSEC_PER_USEC)
-		return;
-	delay_ns = min(delay_ns, UWG_TX_PACE_MAX_NS);
-	delay_us = (u32)div_u64(delay_ns + NSEC_PER_USEC - 1, NSEC_PER_USEC);
-	usleep_range(delay_us, delay_us + delay_us / 4 + 1);
-}
-
 static void uwg_packet_send_one(struct uwg_peer *peer, struct sk_buff *skb,
-				bool *data_sent, bool pace)
+				bool *data_sent)
 {
 	bool is_keepalive = PACKET_CB(skb)->is_keepalive;
-	u32 pace_len = PACKET_CB(skb)->pace_len;
-	u64 nonce = PACKET_CB(skb)->nonce;
 	u8 ds = PACKET_CB(skb)->ds;
 
-	/* FEC blocks are paced as a whole: only the first shard carries the
-	 * block length in pace_len, the rest are sent right after it.
-	 */
-	if (pace && !is_keepalive) {
-		if (pace_len)
-			uwg_packet_pace(peer, pace_len);
-		else if (!PACKET_CB(skb)->is_fec)
-			uwg_packet_pace(peer, skb->len);
-	}
-
-	uwg_packet_bbr_on_sent(peer, &skb, 1);
-
-	/* The socket layer owns the skb on every path. A refused datagram
-	 * (no route, dead endpoint) has already consumed a ring slot, so it
-	 * must leave inflight here instead of waiting for the watermark.
-	 */
+	/* The socket layer owns the skb on every path. */
 	if (likely(!uwg_socket_send_skb_to_peer(peer, skb, ds))) {
 		if (!is_keepalive)
 			*data_sent = true;
-		return;
 	}
-	if (!is_keepalive)
-		uwg_packet_bbr_on_drop_one(peer, nonce);
 }
 
 static struct sk_buff *uwg_packet_gso_alloc(struct sk_buff **pkts,
@@ -811,43 +554,17 @@ static bool uwg_packet_send_gso(struct uwg_peer *peer, struct sk_buff **pkts,
 	if (unlikely(!agg))
 		return false;
 
-	/* Each segment consumed a nonce and a ring slot; the aggregate skb is
-	 * sent as one device packet but must update all of them. The segments
-	 * stay alive until the transmit result is known: a refused aggregate
-	 * has to return every slot to the window.
-	 */
-	uwg_packet_bbr_on_sent(peer, pkts, count);
 	for (i = 0; i < count; ++i)
 		keepalive |= PACKET_CB(pkts[i])->is_keepalive;
 
 	if (likely(!uwg_socket_send_skb_to_peer(peer, agg, ds))) {
 		if (!keepalive)
 			*data_sent = true;
-	} else {
-		uwg_packet_bbr_on_drop_skbs(peer, pkts, count);
 	}
 
 	for (i = 0; i < count; ++i)
 		kfree_skb(pkts[i]);
 	return true;
-}
-
-/*
- * Pacing cost of one datagram. FEC blocks are charged once, on the shard
- * that carries the whole block length in pace_len; the other shards of the
- * block add nothing, so a GSO group of shards is never charged twice.
- */
-static u32 uwg_packet_pace_bytes(struct sk_buff *skb)
-{
-	u32 pace_len = PACKET_CB(skb)->pace_len;
-
-	if (PACKET_CB(skb)->is_keepalive)
-		return 0;
-	if (pace_len)
-		return pace_len;
-	if (PACKET_CB(skb)->is_fec)
-		return 0;
-	return skb->len;
 }
 
 static void uwg_packet_create_data_done(struct uwg_peer *peer,
@@ -857,35 +574,27 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 	struct sk_buff *skbs[UWG_TX_MAX_SKBS];
 	unsigned int nskbs = 0, i, j;
 	bool data_sent = false;
-	u32 pace_len = 0;
 
 	for (i = 0; i < entries_len; ++i) {
 		struct sk_buff *skb, *next;
 
 		skb_list_walk_safe(entries[i], skb, next) {
 			skb_mark_not_on_list(skb);
-			if (likely(nskbs < UWG_TX_MAX_SKBS)) {
+			if (likely(nskbs < UWG_TX_MAX_SKBS))
 				skbs[nskbs++] = skb;
-				pace_len += uwg_packet_pace_bytes(skb);
-			} else {
-				uwg_packet_send_one(peer, skb, &data_sent, true);
-			}
+			else
+				uwg_packet_send_one(peer, skb, &data_sent);
 		}
 	}
 
 	uwg_timers_any_authenticated_packet_traversal(peer);
 	uwg_timers_any_authenticated_packet_sent(peer);
 
-	/* One sleep for the whole batch instead of one per datagram. */
-	if (pace_len)
-		uwg_packet_pace(peer, pace_len);
-
 	/* Neighbouring datagrams of equal size share one GSO skb. FEC shards of
 	 * a block have the same length by construction, so they aggregate the
 	 * same way transport packets do, but never together with non-FEC
 	 * traffic: every GSO segment has to remain a standalone ext frame with
-	 * its own shard header. Pacing is charged once per block by the shard
-	 * carrying pace_len, see uwg_packet_pace_bytes().
+	 * its own shard header.
 	 *
 	 * A GSO superdatagram is lost as a whole by the underlay, so a FEC
 	 * group is limited to the block's parity count: m shards may vanish
@@ -928,7 +637,7 @@ static void uwg_packet_create_data_done(struct uwg_peer *peer,
 		}
 
 		for (; i < j; ++i)
-			uwg_packet_send_one(peer, skbs[i], &data_sent, false);
+			uwg_packet_send_one(peer, skbs[i], &data_sent);
 	}
 
 	if (likely(data_sent))
@@ -961,7 +670,6 @@ void uwg_packet_tx_worker(struct work_struct *work)
 				continue;
 			}
 			uwg_noise_keypair_put(PACKET_CB(first)->keypair, false);
-			uwg_packet_bbr_on_drop(peer, first);
 			kfree_skb_list(first);
 			uwg_peer_put(peer);
 		}
@@ -1050,7 +758,6 @@ err:
 	rcu_read_unlock_bh();
 	if (likely(!ret || ret == -EPIPE))
 		return;
-	uwg_packet_bbr_on_drop(peer, first);
 	uwg_noise_keypair_put(PACKET_CB(first)->keypair, false);
 	uwg_peer_put(peer);
 	kfree_skb_list(first);
@@ -1081,9 +788,6 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 		uwg_noise_keypair_put(keypair, false);
 		return -EKEYREJECTED;
 	}
-	if (READ_ONCE(uwg->bbr_mode) != UWG_BBR_MODE_OFF)
-		uwg_peer_bbr_keypair_changed(peer, keypair->internal_id);
-
 	skb = alloc_skb(DATA_PACKET_HEAD_ROOM + len, GFP_ATOMIC);
 	if (unlikely(!skb)) {
 		uwg_noise_keypair_put(keypair, false);
@@ -1097,9 +801,8 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 	PACKET_CB(skb)->is_keepalive = false;
 	PACKET_CB(skb)->is_fec = false;
 	PACKET_CB(skb)->fec_m = 0;
-	PACKET_CB(skb)->pace_len = 0;
-	/* CAPS/ACK frames are tiny: cap their random tail instead of letting
-	 * the transport padding policy inflate them to the UDP window.
+	/* CAPS frames are tiny: cap their random tail instead of letting the
+	 * transport padding policy inflate them to the UDP window.
 	 */
 	PACKET_CB(skb)->padding = UWG_EXT_CONTROL_PADDING_MAX + 1;
 	PACKET_CB(skb)->nonce =
@@ -1109,23 +812,6 @@ int uwg_packet_send_control(struct uwg_peer *peer, const u8 *frame, size_t len)
 		uwg_noise_keypair_put(keypair, false);
 		kfree_skb(skb);
 		return -EOVERFLOW;
-	}
-	/* Control frames consume wire counters too: record the nonce so the
-	 * peer's ACKs for them are not rejected by the BBR validator.
-	 */
-	if (READ_ONCE(uwg->bbr_mode) == UWG_BBR_MODE_ON &&
-	    uwg_packet_bbr_peer_ack(peer)) {
-		struct uwg_bbr *bbr;
-
-		rcu_read_lock();
-		bbr = uwg_peer_bbr_lookup(peer);
-		if (bbr) {
-			spin_lock_bh(&peer->bbr_lock);
-			uwg_bbr_note_sent(bbr, keypair->internal_id,
-					  PACKET_CB(skb)->nonce);
-			spin_unlock_bh(&peer->bbr_lock);
-		}
-		rcu_read_unlock();
 	}
 	PACKET_CB(skb)->keypair = keypair;
 	uwg_peer_get(peer);
@@ -1157,181 +843,11 @@ void uwg_packet_send_fec_frames(struct uwg_peer *peer,
 	uwg_packet_send_staged_packets(peer);
 }
 
-/*
- * Wakes a batch the cwnd gate parked. The emergency release has to be
- * retried by somebody: with every ACK lost and no fresh traffic nothing
- * would ever look at the queue again. The peer's keepalive timer already
- * runs exactly the staged-send path and stays silent while packets are
- * queued, so it is re-armed a few milliseconds out instead of adding a
- * second timer per peer.
- */
-static void uwg_packet_cwnd_arm_retry(struct uwg_peer *peer)
-{
-	unsigned long delay = usecs_to_jiffies(UWG_TX_CWND_BLOCK_MAX_NS /
-					       NSEC_PER_USEC);
-
-	rcu_read_lock_bh();
-	if (likely(netif_running(peer->device->dev) &&
-		   !READ_ONCE(peer->is_dead)))
-		mod_timer(&peer->timer_send_keepalive,
-			  jiffies + max_t(unsigned long, 1, delay));
-	rcu_read_unlock_bh();
-}
-
-static void uwg_packet_stage_head(struct uwg_peer *peer,
-				  struct sk_buff_head *packets)
-{
-	if (skb_queue_empty(packets))
-		return;
-	spin_lock_bh(&peer->staged_packet_queue.lock);
-	skb_queue_splice(packets, &peer->staged_packet_queue);
-	spin_unlock_bh(&peer->staged_packet_queue.lock);
-}
-
-/*
- * ACK-clocked congestion window gate.
- *
- * Returns false when the whole batch has to stay queued; it then sits in
- * `hold` in its original order. When only a prefix fits the remaining
- * allowance, the prefix is left in `packets` and the rest is moved to
- * `hold`, again in order, so the caller can put it back at the head of the
- * staged queue. Keepalives bypass the gate: parking them would stall the
- * very traffic that is supposed to reopen the window.
- *
- * The allowance is taken from uwg_bbr_cwnd_allowance(), i.e. from the
- * effective window (raw cwnd floored at one worst-case ACK interval of
- * pacing). Without that floor a low-RTT path would send its whole cwnd and
- * then sit idle until the next delayed-ACK burst, which is the sleep
- * ceiling this gate exists to avoid.
- *
- * The gate is armed only after uwg_bbr_full_bw_reached() and only while
- * uwg_bbr_loss_limited() holds: in STARTUP, and on a clean channel, the
- * pacer is the only limiter. See the comment on the activation check below.
- *
- * All the BBR state is read under bbr_lock through the rcu-protected
- * pointer, exactly like the neighbouring send/ACK accounting.
- */
-static bool uwg_packet_cwnd_gate(struct uwg_peer *peer,
-				 struct sk_buff_head *packets,
-				 struct sk_buff_head *hold)
-{
-	struct uwg_bbr *bbr;
-	struct sk_buff *skb;
-	u64 allowance, used = 0, now_ns, blocked_ns;
-	unsigned int keep = 0, qlen;
-	bool arm_retry = false;
-
-	__skb_queue_head_init(hold);
-
-	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_ON)
-		return true;
-	if (!uwg_packet_bbr_peer_ack(peer))
-		return true;
-	/* Control frames never enter this queue; keepalives do, and are what
-	 * keeps a stalled tunnel alive.
-	 */
-	if (PACKET_CB(skb_peek(packets))->is_keepalive)
-		return true;
-
-	now_ns = ktime_get_ns();
-	rcu_read_lock();
-	bbr = uwg_peer_bbr_lookup(peer);
-	if (unlikely(!bbr)) {
-		rcu_read_unlock();
-		return true;
-	}
-	spin_lock_bh(&peer->bbr_lock);
-	/*
-	 * The gate is armed only in the steady, loss-bound state:
-	 *
-	 *  - STARTUP must not be gated. There cwnd is 2 * BDP while the pacer
-	 *    runs at a 2.77x gain, so the window is only marginally ahead of
-	 *    the token bucket; withholding on it thins the ACK stream (the
-	 *    peer acks in 8-16 packet bursts), which starves the bandwidth
-	 *    estimate and keeps cwnd -- and with it the floor -- from growing.
-	 *
-	 *  - On a clean channel cwnd is not a limit, it is a guess: the path
-	 *    is paced, not congestion-bound. Gating on it would let the ACK
-	 *    cadence, not the path, set the ceiling.
-	 *
-	 * cwnd is the reaction to congestion. inflight_hi is initialised to
-	 * U64_MAX and is only lowered by a loss cut, so inflight_hi < cwnd
-	 * means a loss response has already set a bound below the window and
-	 * withholding on it is the honest thing to do. Everything else stays
-	 * pacer-driven.
-	 */
-	if (!uwg_bbr_full_bw_reached(bbr) || !uwg_bbr_loss_limited(bbr)) {
-		peer->cwnd_blocked_ns = 0;
-		spin_unlock_bh(&peer->bbr_lock);
-		rcu_read_unlock();
-		return true;
-	}
-	allowance = uwg_bbr_cwnd_allowance(bbr);
-	blocked_ns = peer->cwnd_blocked_ns;
-	/* Emergency release: the window did not reopen in time, most likely
-	 * because the ACK stream is gone. Sending is better than a dead tunnel.
-	 */
-	if (blocked_ns && now_ns - blocked_ns >= UWG_TX_CWND_BLOCK_MAX_NS) {
-		peer->cwnd_blocked_ns = 0;
-		spin_unlock_bh(&peer->bbr_lock);
-		rcu_read_unlock();
-		net_dbg_ratelimited("%s: cwnd gate timed out for peer %llu, sending %u packet(s)\n",
-				    peer->device->dev->name, peer->internal_id,
-				    packets->qlen);
-		return true;
-	}
-	spin_unlock_bh(&peer->bbr_lock);
-	rcu_read_unlock();
-
-	qlen = packets->qlen;
-	skb_queue_walk(packets, skb) {
-		/* Datagrams are charged with the same length uwg_bbr_on_send()
-		 * accounts, so the gate and inflight stay in one unit.
-		 */
-		if (used + skb->len > allowance)
-			break;
-		used += skb->len;
-		++keep;
-	}
-
-	if (!keep) {
-		skb_queue_splice_tail_init(packets, hold);
-		spin_lock_bh(&peer->bbr_lock);
-		if (!peer->cwnd_blocked_ns) {
-			peer->cwnd_blocked_ns = now_ns;
-			arm_retry = true;
-		}
-		spin_unlock_bh(&peer->bbr_lock);
-		if (arm_retry)
-			uwg_packet_cwnd_arm_retry(peer);
-		return false;
-	}
-
-	if (keep < qlen) {
-		/* Move the tail over one skb at a time so `hold` keeps the
-		 * original order for skb_queue_splice() back to the head.
-		 */
-		while (packets->qlen > keep) {
-			skb = skb_dequeue_tail(packets);
-			__skb_queue_head(hold, skb);
-		}
-		WRITE_ONCE(peer->cwnd_gate_ns, now_ns);
-	}
-
-	/* Something goes out: the next stall starts its own timeout. */
-	spin_lock_bh(&peer->bbr_lock);
-	peer->cwnd_blocked_ns = 0;
-	spin_unlock_bh(&peer->bbr_lock);
-	return true;
-}
-
 void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 {
 	struct noise_keypair *keypair;
-	struct sk_buff_head packets, hold;
+	struct sk_buff_head packets;
 	struct sk_buff *skb;
-
-	__skb_queue_head_init(&hold);
 
 	/* Steal the current queue into our local one. */
 	__skb_queue_head_init(&packets);
@@ -1353,21 +869,6 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 	if (unlikely(uwg_birthdate_has_expired(keypair->sending.birthdate,
 					      REJECT_AFTER_TIME)))
 		goto out_invalid;
-
-	if (READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_OFF)
-		uwg_peer_bbr_keypair_changed(peer, keypair->internal_id);
-
-	/* The congestion window gates the batch before a single nonce is
-	 * burned, so withheld packets keep their place in the queue. They are
-	 * left with their socket owner intact: unlike the handshake wait in
-	 * out_nokey, this is a short ACK-clocked pause, and the charged write
-	 * memory is the backpressure the application should see.
-	 */
-	if (!uwg_packet_cwnd_gate(peer, &packets, &hold)) {
-		uwg_packet_stage_head(peer, &hold);
-		uwg_noise_keypair_put(keypair, false);
-		return;
-	}
 
 	/* After we know we have a somewhat valid key, we now try to assign
 	 * nonces to all of the packets in the queue. If we can't assign nonces
@@ -1395,28 +896,16 @@ void uwg_packet_send_staged_packets(struct uwg_peer *peer)
 			goto out_invalid;
 	}
 
-	uwg_packet_bbr_on_send(peer, &packets, keypair->internal_id);
-
 	packets.prev->next = NULL;
 	uwg_peer_get(keypair->entry.peer);
 	PACKET_CB(packets.next)->keypair = keypair;
 	uwg_packet_create_data(peer, packets.next);
-	/* The prefix is on its way, so the withheld tail can go back to the
-	 * head of the staged queue without a concurrent sender overtaking the
-	 * prefix. Order inside both lists is preserved.
-	 */
-	uwg_packet_stage_head(peer, &hold);
 	return;
 
 out_invalid:
 	WRITE_ONCE(keypair->sending.is_valid, false);
 out_nokey:
 	uwg_noise_keypair_put(keypair, false);
-
-	/* Restore the part the cwnd gate withheld behind the prefix, so the
-	 * batch goes back as one ordered queue.
-	 */
-	skb_queue_splice_tail_init(&hold, &packets);
 
 	/* We orphan the packets if we're waiting on a handshake, so that they
 	 * don't block a socket's pool.

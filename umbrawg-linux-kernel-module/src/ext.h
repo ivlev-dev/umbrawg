@@ -20,31 +20,26 @@ struct uwg_peer;
 #define UWG_EXT_HEADER_LEN 8
 
 #define UWG_EXT_KIND_CAPS 1
+/* Kind 2 was the ACK frame. ACKs and BBR were removed in 0.5.0; the kind stays
+ * reserved so a frame from an older peer is recognised and ignored instead of
+ * being delivered as inner traffic. The number must not be reused.
+ */
 #define UWG_EXT_KIND_ACK 2
 #define UWG_EXT_KIND_FEC_SHARD 3
 
 #define UWG_EXT_CAPS_LEN 12
-#define UWG_EXT_ACK_HEADER_LEN 16
-#define UWG_EXT_ACK_BITMAP_MAX 8
 #define UWG_EXT_FEC_HEADER_LEN 12
 
-#define UWG_EXT_MAX_FRAME_LEN \
-	(UWG_EXT_HEADER_LEN + UWG_EXT_ACK_HEADER_LEN + UWG_EXT_ACK_BITMAP_MAX)
+#define UWG_EXT_MAX_FRAME_LEN (UWG_EXT_HEADER_LEN + UWG_EXT_CAPS_LEN)
 
-#define UWG_EXT_ACK_BITMAP_BITS (UWG_EXT_ACK_BITMAP_MAX * 8)
-
-/* CAPS still advertises UWG_EXT_DEFAULT_ACK_INTERVAL for wire compatibility;
- * the cadence actually used for our own ACKs is randomised per ACK so that it
- * does not look like a metronome.
+/* CAPS keeps the legacy ack_interval field so the frame length stays the same.
+ * The field is informational only: this module no longer emits ACKs.
  */
-#define UWG_EXT_ACK_INTERVAL_MIN 8
-#define UWG_EXT_ACK_INTERVAL_MAX 16
-#define UWG_EXT_ACK_DELAY_MIN_US 2000
-#define UWG_EXT_ACK_DELAY_MAX_US 5000
+#define UWG_EXT_DEFAULT_ACK_INTERVAL 2
 
-/* Upper bound of the random tail appended to CAPS/ACK frames. Control frames
- * must stay small: padding them up to the transport window would turn every
- * ACK into a ~1 KB packet.
+/* Upper bound of the random tail appended to CAPS frames. Control frames must
+ * stay small: padding them up to the transport window would turn every
+ * advertisement into a ~1 KB packet.
  */
 #define UWG_EXT_CONTROL_PADDING_MAX 15
 
@@ -64,8 +59,6 @@ struct uwg_peer;
  */
 #define UWG_EXT_CAPS_CHANGED_MIN_MS 200
 
-#define UWG_EXT_CAP_BBR BIT(0)
-#define UWG_EXT_CAP_ACK BIT(1)
 #define UWG_EXT_CAP_FEC BIT(2)
 #define UWG_EXT_CAP_FEC_ADAPTIVE BIT(3)
 /* The peer understands parity on a partial FEC block: a flush with n < k
@@ -75,11 +68,15 @@ struct uwg_peer;
  */
 #define UWG_EXT_CAP_FEC_PARTIAL BIT(4)
 
-#define UWG_EXT_ACK_FLAG_ECN_CE BIT(0)
-
 #define UWG_EXT_FEC_FLAG_PARITY BIT(0)
 
-#define UWG_EXT_DEFAULT_ACK_INTERVAL 2
+/* Bits 0 and 1 used to mean BBR and ACK. They are no longer advertised and
+ * must be ignored when an older peer still sets them: only the FEC bits take
+ * part in the profile comparison.
+ */
+#define UWG_EXT_CAPS_KNOWN_FLAGS \
+	(UWG_EXT_CAP_FEC | UWG_EXT_CAP_FEC_ADAPTIVE | UWG_EXT_CAP_FEC_PARTIAL)
+
 #define UWG_EXT_DEFAULT_FEC_K 10
 #define UWG_EXT_DEFAULT_FEC_M 1
 
@@ -101,15 +98,6 @@ struct uwg_ext_caps {
 	u8 fec_k;
 	u8 fec_m;
 	u32 reserved;
-};
-
-struct uwg_ext_ack {
-	u64 largest;
-	u32 ack_delay_us;
-	u8 flags;
-	u8 bitmap_len;
-	u16 reserved;
-	u8 bitmap[UWG_EXT_ACK_BITMAP_MAX];
 };
 
 struct uwg_ext_fec_shard {
@@ -154,41 +142,11 @@ struct uwg_peer_caps {
 	spinlock_t lock;
 };
 
-struct uwg_peer_ack_state {
-	u64 largest;
-	u64 bitmap;
-	u64 keypair_id;
-	u32 pending;
-	/* Threshold and deadline of the current ACK cycle; both are drawn
-	 * anew whenever a cycle starts.
-	 */
-	u32 ack_target;
-	unsigned long ack_deadline;
-	ktime_t largest_ktime;
-	bool valid;
-	spinlock_t lock;
-};
-
-struct uwg_peer_ack_tracker {
-	u64 largest;
-	u64 bitmap;
-	u64 received;
-	u32 ack_delay_us;
-	u16 bitmap_len;
-	u8 flags;
-	bool valid;
-	unsigned long last_ack_jiffies;
-	ktime_t last_ack_ktime;
-};
-
 bool uwg_ext_detect(const u8 *data, size_t len);
 int uwg_ext_parse_header(const u8 *data, size_t len,
 			 struct uwg_ext_header *header);
 int uwg_ext_parse_caps(const u8 *payload, size_t len,
 		       struct uwg_ext_caps *caps);
-int uwg_ext_parse_ack(const u8 *payload, size_t len, struct uwg_ext_ack *ack);
-u64 uwg_ext_ack_bitmap(const struct uwg_ext_ack *ack);
-bool uwg_ext_ack_selftest(void);
 bool uwg_ext_caps_selftest(void);
 int uwg_ext_parse_fec_shard(const u8 *payload, size_t len,
 			    struct uwg_ext_fec_shard *shard);
@@ -201,7 +159,6 @@ enum uwg_ext_rx_result uwg_ext_receive(struct uwg_peer *peer,
 
 bool uwg_ext_enabled(const struct uwg_device *uwg);
 int uwg_ext_build_caps(u8 *buf, size_t len, const struct uwg_ext_caps *caps);
-int uwg_ext_build_ack(u8 *buf, size_t len, const struct uwg_ext_ack *ack);
 int uwg_ext_build_fec_shard_header(u8 *buf, size_t len,
 				   const struct uwg_ext_fec_shard *shard);
 void uwg_ext_maybe_send_caps(struct uwg_peer *peer);
@@ -209,8 +166,6 @@ void uwg_ext_caps_changed(struct uwg_device *uwg);
 void uwg_ext_caps_keypair_changed(struct uwg_peer *peer);
 bool uwg_ext_peer_extension(const struct sk_buff *skb);
 void uwg_ext_caps_extension_seen(struct uwg_peer *peer);
-void uwg_ext_data_received(struct uwg_peer *peer, u64 keypair_id, u64 nonce,
-			   bool count_for_ack);
-void uwg_ext_ack_timeout(struct uwg_peer *peer);
+void uwg_ext_caps_timeout(struct uwg_peer *peer);
 
 #endif /* _UWG_EXT_H */

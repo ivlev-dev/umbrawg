@@ -183,31 +183,27 @@ Notes:
 
 `* Assuming a basic internet connection with an MTU value of 1280.`
 
-### BBRv3 и FEC
+### FEC
 
-По умолчанию обе функции выключены (`bbr=off`, `fec=off`), накладных
-расходов нет. Настраиваются через netlink и `uwg`:
+FEC включён по умолчанию в адаптивном режиме (`fec=adaptive`): на чистом
+канале шарды не отправляются, накладных расходов нет и MTU остаётся
+базовым, при потерях выше 1% после прогрева включается профиль 2:1, а
+после 5 секунд потерь ниже 0.2% он снова выключается. BBR и ACK
+удалены в 0.5.0: атрибуты `UWGDEVICE_A_BBR` (36) и
+`UWGDEVICE_A_BBR_STATS` (39) сохранены как reserved и отклоняются с
+`-EINVAL`, кадр расширения `ACK` (kind 2) игнорируется.
 
-- `uwg set <if> bbr off|monitor|on` — `UWGDEVICE_A_BBR` (36, `u8`);
 - `uwg set <if> fec off|adaptive|K:M` — `UWGDEVICE_A_FEC` (37, `u32`,
   `(K<<8)|M`); data-plane принимает только `K=1..8`, `M=1..2`, иначе
   `-EINVAL`;
 - `uwg set <if> underlay-mtu N` — `UWGDEVICE_A_UNDERLAY_MTU` (40, `u16`,
   576..65535, по умолчанию 1500). При включённом FEC MTU интерфейса
   понижается до `underlay − 132 − S4` (1500 → 1368, при `S4=28` → 1340)
-  и восстанавливается при выключении FEC; floor — `min(576, base)`,
-  ручная база ниже 576 не поднимается;
-- `uwg show <if> bbr-stats|fec-stats` — вложенные `UWGDEVICE_A_BBR_STATS`
-  (39) и `UWGDEVICE_A_FEC_STATS` (38). `bbr_stats` содержит
-  `peers_no_ack` (вложенный атрибут 9): пиры без `ACK` в CAPS, к которым
-  BBR не применяется; в текущем `uwg show bbr-stats` поле пока не
-  печатается.
-
-BBR-пейсинг, учёт `inflight` и `cwnd`-гейт включаются только после того,
-как пир анонсировал `ACK` в CAPS. Пир без ACK не шейпится, его
-`inflight`/`pacing_rate` не растут; при потере ACK накопленный `inflight`
-сбрасывается. `bbr=on` нужно включать на обеих сторонах; модуль не
-анонсирует BBR в CAPS.
+  и восстанавливается при выключении FEC; в adaptive-режиме MTU
+  понижается только после того, как FEC реально включился хотя бы на
+  одном пире, и пересчитывается отложенно при каждом переключении;
+  floor — `min(576, base)`, ручная база ниже 576 не поднимается;
+- `uwg show <if> fec-stats` — вложенный `UWGDEVICE_A_FEC_STATS` (38).
 
 Partial FEC parity: при включённом FEC модуль выставляет CAPS-флаг
 `FEC_PARTIAL` (бит 4) и для неполного блока шлёт `k' = n`, `m' = m`

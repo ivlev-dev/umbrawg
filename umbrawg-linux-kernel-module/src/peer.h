@@ -22,7 +22,6 @@
 #include <net/dst_cache.h>
 
 struct uwg_device;
-struct uwg_bbr;
 struct uwg_fec_tx;
 struct uwg_fec_rx;
 
@@ -62,7 +61,7 @@ struct uwg_peer {
 	atomic64_t rx_bytes, tx_bytes;
 	struct timer_list timer_retransmit_handshake, timer_send_keepalive;
 	struct timer_list timer_new_handshake, timer_zero_key_material;
-	struct timer_list timer_persistent_keepalive, timer_send_ack;
+	struct timer_list timer_persistent_keepalive, timer_send_caps;
 	/* jiffies of the last *data* (or control) frame we sent, and of the
 	 * moment the keepalive timer was armed. The timer is no longer
 	 * cancelled on every send: that cost a timer-base lock per batch and,
@@ -92,19 +91,6 @@ struct uwg_peer {
 	atomic_t jp_packet_counter;
 	unsigned int udp_window;
 	struct uwg_peer_caps caps;
-	struct uwg_peer_ack_tracker ack_tracker;
-	struct uwg_peer_ack_state ack_state;
-	struct uwg_bbr __rcu *bbr;
-	u64 bbr_keypair_id;
-	/* Monotonic ns when the cwnd gate first withheld the staged queue;
-	 * zero while nothing is blocked. Guarded by bbr_lock.
-	 */
-	u64 cwnd_blocked_ns;
-	/* Monotonic ns of the last batch the cwnd gate cut short. Read
-	 * lockless by the pacer to avoid stacking a token-bucket sleep on top
-	 * of an ACK-clocked window.
-	 */
-	u64 cwnd_gate_ns;
 	struct uwg_fec_tx __rcu *fec_tx;
 	struct uwg_fec_rx __rcu *fec_rx;
 	struct uwg_fec_counters fec_counters;
@@ -114,23 +100,11 @@ struct uwg_peer {
 	 * would drop every restarted id as stale.
 	 */
 	atomic_t fec_block_id;
-	spinlock_t bbr_lock;
 };
 
 struct uwg_peer *uwg_peer_create(struct uwg_device *uwg,
 			       const u8 public_key[NOISE_PUBLIC_KEY_LEN],
 			       const u8 preshared_key[NOISE_SYMMETRIC_KEY_LEN]);
-
-struct uwg_bbr *uwg_peer_bbr_lookup(struct uwg_peer *peer);
-void uwg_peer_bbr_keypair_changed(struct uwg_peer *peer, u64 keypair_id);
-/* The peer's CAPS no longer advertise ACK: discard the in-flight window that
- * was accumulated while it did. Pacing and the cwnd gate are skipped for a
- * peer without ACK, so the records would never be released.
- */
-void uwg_peer_bbr_ack_lost(struct uwg_peer *peer);
-void uwg_peer_bbr_release(struct uwg_peer *peer);
-int uwg_peer_bbr_sync(struct uwg_peer *peer);
-int uwg_peer_bbr_sync_device(struct uwg_device *uwg);
 
 int uwg_peer_fec_sync(struct uwg_peer *peer);
 int uwg_peer_fec_sync_device(struct uwg_device *uwg, u32 mode);
@@ -231,14 +205,13 @@ static inline unsigned int uwg_peer_skb_randomize_padding_addition(struct uwg_pe
  * returns immediately -- but only after taking the peer caps lock and reading
  * the clock, twice per data packet. This predicate is the exact set of
  * conditions under which the callee can do anything at all: the local profile
- * is advertised while BBR/FEC is on, and a revoke is due while the peer has
+ * is advertised while FEC is on, and a revoke is due while the peer has
  * shown extension traffic or an answer/retry is pending. Nothing else in the
  * callee has a side effect, so skipping it here is behaviourally identical.
  */
 static inline bool uwg_peer_caps_may_send(const struct uwg_peer *peer)
 {
-	return READ_ONCE(peer->device->bbr_mode) != UWG_BBR_MODE_OFF ||
-	       READ_ONCE(peer->device->fec_mode) != UWG_FEC_MODE_OFF ||
+	return READ_ONCE(peer->device->fec_mode) != UWG_FEC_MODE_OFF ||
 	       READ_ONCE(peer->caps.extension_seen) ||
 	       READ_ONCE(peer->caps.resend) ||
 	       READ_ONCE(peer->caps.retry);

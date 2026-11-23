@@ -71,7 +71,6 @@ struct packet_cb {
 	u32 mtu;
 	u32 type;
 	u32 padding;
-	u32 pace_len;
 	u8 ds;
 	bool is_keepalive;
 	bool is_fec;

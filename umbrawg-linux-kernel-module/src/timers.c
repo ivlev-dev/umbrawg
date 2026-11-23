@@ -94,8 +94,8 @@ static void uwg_expired_send_keepalive(struct timer_list *timer)
 	 * (timer_need_another_keepalive), which is what allows the send path
 	 * to skip the timer_delete() it used to do on every batch.
 	 *
-	 * A non-empty staged queue always takes the call: the cwnd gate parks a
-	 * batch here and re-arms this very timer to retry it, and
+	 * A non-empty staged queue always takes the call: packets parked
+	 * while no keypair was available are retried here, and
 	 * uwg_packet_send_keepalive() then only drains that queue.
 	 */
 	if (!skb_queue_empty_lockless(&peer->staged_packet_queue) ||
@@ -166,12 +166,12 @@ static void uwg_expired_send_persistent_keepalive(struct timer_list *timer)
 		uwg_packet_send_keepalive(peer);
 }
 
-static void uwg_expired_send_ack(struct timer_list *timer)
+static void uwg_expired_send_caps(struct timer_list *timer)
 {
 	struct uwg_peer *peer = timer_container_of(peer, timer,
-						  timer_send_ack);
+						  timer_send_caps);
 
-	uwg_ext_ack_timeout(peer);
+	uwg_ext_caps_timeout(peer);
 }
 
 /* Should be called after an authenticated data packet is sent. */
@@ -288,7 +288,7 @@ void uwg_timers_init(struct uwg_peer *peer)
 		    uwg_expired_zero_key_material, 0);
 	timer_setup(&peer->timer_persistent_keepalive,
 		    uwg_expired_send_persistent_keepalive, 0);
-	timer_setup(&peer->timer_send_ack, uwg_expired_send_ack, 0);
+	timer_setup(&peer->timer_send_caps, uwg_expired_send_caps, 0);
 	INIT_WORK(&peer->clear_peer_work, uwg_queued_expired_zero_key_material);
 	peer->timer_handshake_attempts = 0;
 	peer->max_handshake_attempts = !u16_range_is_zero(peer->device->max_handshake_attempts) ? u16_range_pick_one(peer->device->max_handshake_attempts) : MAX_TIMER_HANDSHAKES;
@@ -296,18 +296,18 @@ void uwg_timers_init(struct uwg_peer *peer)
 	peer->timer_need_another_keepalive = false;
 }
 
-/* Arm the delayed-ACK timer with the same guard as mod_peer_timer().
- * uwg_ext_ack_armed() runs from the NAPI poll (and from the ACK timer
- * callback itself), so it can race with peer teardown; timer_reduce() has no
+/* Arm the deferred-CAPS timer with the same guard as mod_peer_timer().
+ * uwg_ext_caps_arm() runs from the receive path (and from the timer callback
+ * itself), so it can race with peer teardown; timer_reduce() has no
  * is_dead/netif_running check of its own and would re-arm a timer after
  * uwg_timers_stop() has already returned.
  */
-void uwg_timers_ack_reduce(struct uwg_peer *peer, unsigned long expires)
+void uwg_timers_caps_reduce(struct uwg_peer *peer, unsigned long expires)
 {
 	rcu_read_lock_bh();
 	if (likely(netif_running(peer->device->dev) &&
 		   !READ_ONCE(peer->is_dead)))
-		timer_reduce(&peer->timer_send_ack, expires);
+		timer_reduce(&peer->timer_send_caps, expires);
 	rcu_read_unlock_bh();
 }
 
@@ -318,14 +318,14 @@ void uwg_timers_stop(struct uwg_peer *peer)
 	timer_delete_sync(&peer->timer_new_handshake);
 	timer_delete_sync(&peer->timer_zero_key_material);
 	timer_delete_sync(&peer->timer_persistent_keepalive);
-	timer_delete_sync(&peer->timer_send_ack);
+	timer_delete_sync(&peer->timer_send_caps);
 	flush_work(&peer->clear_peer_work);
 }
 
 /* Final peer teardown. The caller has already marked the peer dead and run
  * synchronize_net() (uwg_peer_remove()/uwg_peer_remove_all()), so no RCU/NAPI
  * reader can pass the is_dead check in mod_peer_timer() or
- * uwg_timers_ack_reduce() and arm a timer any more. timer_shutdown_sync()
+ * uwg_timers_caps_reduce() and arm a timer any more. timer_shutdown_sync()
  * additionally poisons the timers, which matters because the peer is freed
  * later from an RCU callback: a late arm would otherwise target freed memory.
  *
@@ -339,6 +339,6 @@ void uwg_timers_shutdown(struct uwg_peer *peer)
 	timer_shutdown_sync(&peer->timer_new_handshake);
 	timer_shutdown_sync(&peer->timer_zero_key_material);
 	timer_shutdown_sync(&peer->timer_persistent_keepalive);
-	timer_shutdown_sync(&peer->timer_send_ack);
+	timer_shutdown_sync(&peer->timer_send_caps);
 	flush_work(&peer->clear_peer_work);
 }

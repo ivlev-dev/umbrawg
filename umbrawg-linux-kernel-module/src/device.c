@@ -255,7 +255,6 @@ static netdev_tx_t uwg_xmit(struct sk_buff *skb, struct net_device *dev)
 		PACKET_CB(skb)->mtu = mtu;
 		PACKET_CB(skb)->is_keepalive = false;
 		PACKET_CB(skb)->is_fec = false;
-		PACKET_CB(skb)->pace_len = 0;
 
 		if (uwg_fec_tx_push(peer, skb, &packets))
 			continue;
@@ -303,6 +302,13 @@ static void uwg_destruct(struct net_device *dev)
 {
 	struct uwg_device *uwg = netdev_priv(dev);
 	int i;
+
+	/* The deferred MTU worker takes rtnl and device_update_lock, so it
+	 * must be stopped before either is acquired here. disable_work_sync()
+	 * also rejects any later queue from a straggling reader, which is what
+	 * makes the free below safe.
+	 */
+	disable_work_sync(&uwg->fec_mtu_work);
 
 	rtnl_lock();
 	list_del(&uwg->device_list);
@@ -371,11 +377,11 @@ static void uwg_setup(struct net_device *dev)
 	memset(uwg, 0, sizeof(*uwg));
 	uwg->dev = dev;
 	uwg->extra_ports = UWG_EXTRA_PORTS_DEFAULT;
-	uwg->bbr_mode = UWG_BBR_MODE_OFF;
-	uwg->fec_mode = UWG_FEC_MODE_OFF;
+	uwg->fec_mode = UWG_FEC_MODE_ADAPTIVE;
 	uwg->underlay_mtu = UWG_UNDERLAY_MTU_DEFAULT;
 	uwg->fec_base_mtu = dev->mtu;
 	uwg->fec_applied_mtu = dev->mtu;
+	uwg_fec_mtu_work_init(uwg);
 	/* At most ten unknown-peer notifications per five seconds per device:
 	 * a wider burst only buys log and skb churn on an unauthenticated
 	 * flood, and the useful signal is lost anyway.

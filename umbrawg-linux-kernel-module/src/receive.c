@@ -621,8 +621,7 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 		uwg_fec_adaptive_observe(peer, PACKET_CB(skb)->nonce,
 					 PACKET_CB(skb)->keypair->internal_id);
 
-	if (unlikely(peer->device->bbr_mode != UWG_BBR_MODE_OFF ||
-		     peer->device->fec_mode != UWG_FEC_MODE_OFF)) {
+	if (unlikely(peer->device->fec_mode != UWG_FEC_MODE_OFF)) {
 		switch (uwg_ext_receive(peer, skb)) {
 		case UWG_EXT_RX_CONSUMED:
 			update_rx_stats(peer, message_data_len(0) + skb->len);
@@ -639,9 +638,6 @@ static void uwg_packet_consume_data_done(struct uwg_peer *peer,
 			break;
 		}
 	}
-
-	uwg_ext_data_received(peer, PACKET_CB(skb)->keypair->internal_id,
-			      PACKET_CB(skb)->nonce, true);
 
 	/* A packet with length 0, or with all zeroes (content padding)
 	 * is a keepalive packet

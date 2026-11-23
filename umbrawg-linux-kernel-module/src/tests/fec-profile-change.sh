@@ -398,7 +398,7 @@ else
 	note "tc missing: lost-CAPS convergence check skipped"
 fi
 
-# Regression: two devices with both FEC and BBR off must stay silent. A zero
+# Regression: two devices with FEC off must stay silent. A zero
 # CAPS retracts a stale advertisement, but it is itself an extension frame;
 # treating it as proof that the peer still sends extension traffic made both
 # kernels answer each other with another zero CAPS every 2 s forever.

@@ -30,7 +30,6 @@
  *    UWGDEVICE_A_LISTEN_PORT: NLA_U16
  *    UWGDEVICE_A_FWMARK: NLA_U32
  *    UWGDEVICE_A_EXTRA_PORTS: NLA_U8
- *    UWGDEVICE_A_BBR: NLA_U8
  *    UWGDEVICE_A_FEC: NLA_U32
  *    UWGDEVICE_A_UNDERLAY_MTU: NLA_U16
  *    UWGDEVICE_A_FEC_STATS: NLA_NESTED
@@ -41,16 +40,6 @@
  *        UWGDEVICE_FEC_STATS_A_DECODE_FAIL: NLA_U64
  *        UWGDEVICE_FEC_STATS_A_DROPPED_BOUNDS: NLA_U64
  *        UWGDEVICE_FEC_STATS_A_DROPPED_DISABLED: NLA_U64
- *    UWGDEVICE_A_BBR_STATS: NLA_NESTED
- *        UWGDEVICE_BBR_STATS_A_MODE: NLA_U8
- *        UWGDEVICE_BBR_STATS_A_CWND: NLA_U64
- *        UWGDEVICE_BBR_STATS_A_INFLIGHT: NLA_U64
- *        UWGDEVICE_BBR_STATS_A_PACING_RATE: NLA_U64
- *        UWGDEVICE_BBR_STATS_A_BTL_BW: NLA_U64
- *        UWGDEVICE_BBR_STATS_A_MIN_RTT_NS: NLA_U64
- *        UWGDEVICE_BBR_STATS_A_ROUND_LOST: NLA_U32
- *        UWGDEVICE_BBR_STATS_A_PEERS: NLA_U32
- *        UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK: NLA_U32
  *    UWGDEVICE_A_PEERS: NLA_NESTED
  *        0: NLA_NESTED
  *            UWGPEER_A_PUBLIC_KEY: NLA_EXACT_LEN, len UWG_KEY_LEN
@@ -108,7 +97,8 @@
  *    UWGDEVICE_A_FWMARK: NLA_U32, 0 to disable
  *    UWGDEVICE_A_EXTRA_PORTS: NLA_U8, number of additional external UDP
  *                            ports, from 0 to 8
- *    UWGDEVICE_A_BBR: NLA_U8, 0 to disable, 1 to monitor, 2 to enable
+ *    UWGDEVICE_A_BBR: removed in 0.5.0; the attribute number is reserved and
+ *                    any request carrying it is rejected with -EINVAL
  *    UWGDEVICE_A_FEC: NLA_U32, 0 to disable, 1 to use adaptive mode,
  *                    otherwise (K << 8) | M for K data and M parity
  *                    shards, where K >= 1, M >= 1 and K + M <= 255
@@ -253,10 +243,10 @@ enum uwgdevice_attribute {
 	UWGDEVICE_A_RANDOM_TRAILERS,
 	UWGDEVICE_A_DISABLE_COOKIES,
 	UWGDEVICE_A_EXTRA_PORTS,
-	UWGDEVICE_A_BBR,
+	UWGDEVICE_A_BBR,	/* 36: removed in 0.5.0, reserved (rejected) */
 	UWGDEVICE_A_FEC,
 	UWGDEVICE_A_FEC_STATS,	/* 38: nested uwgdevice_fec_stats_attrs */
-	UWGDEVICE_A_BBR_STATS,	/* 39: nested uwgdevice_bbr_stats_attrs */
+	UWGDEVICE_A_BBR_STATS,	/* 39: removed in 0.5.0, reserved (rejected) */
 	UWGDEVICE_A_UNDERLAY_MTU,	/* 40: u16, MTU of the path between peers */
 	UWGDEVICE_A_CRYPT_SPILL,	/* 41: u64, successful ring overflows */
 	__UWGDEVICE_A_LAST
@@ -273,24 +263,6 @@ enum uwgdevice_fec_stats_attrs {
 	UWGDEVICE_FEC_STATS_A_DROPPED_BOUNDS,	/* u64 */
 	UWGDEVICE_FEC_STATS_A_DROPPED_DISABLED,	/* u64 */
 	__UWGDEVICE_FEC_STATS_A_LAST,
-};
-
-enum uwgdevice_bbr_stats_attrs {
-	UWGDEVICE_BBR_STATS_A_UNSPEC,
-	UWGDEVICE_BBR_STATS_A_MODE,		/* u8, значения как UWGDEVICE_A_BBR */
-	UWGDEVICE_BBR_STATS_A_CWND,		/* u64, байты */
-	UWGDEVICE_BBR_STATS_A_INFLIGHT,		/* u64, байты */
-	UWGDEVICE_BBR_STATS_A_PACING_RATE,	/* u64, байт/с */
-	UWGDEVICE_BBR_STATS_A_BTL_BW,		/* u64, байт/с */
-	UWGDEVICE_BBR_STATS_A_MIN_RTT_NS,	/* u64, нс */
-	UWGDEVICE_BBR_STATS_A_ROUND_LOST,	/* u32, пакеты */
-	UWGDEVICE_BBR_STATS_A_PEERS,		/* u32, число пиров с BBR-состоянием */
-	UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK,	/* u32, пиры без подтверждения
-						 * ACK в CAPS: BBR не
-						 * применяется, в агрегаты
-						 * выше не входят
-						 */
-	__UWGDEVICE_BBR_STATS_A_LAST,
 };
 
 enum uwgpeer_flag {

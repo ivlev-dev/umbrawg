@@ -59,6 +59,8 @@ unsigned int uwg_fec_target_mtu(unsigned int underlay_mtu,
 				unsigned int base_mtu, bool fec_on,
 				unsigned int underlay_padding);
 void uwg_fec_refresh_mtu(struct uwg_device *uwg);
+void uwg_fec_mtu_work_init(struct uwg_device *uwg);
+void uwg_fec_mtu_refresh_schedule(struct uwg_device *uwg);
 int uwg_fec_mtu_selftest(void);
 
 #define UWG_FEC_DATA_MAX_K 8

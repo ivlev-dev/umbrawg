@@ -195,8 +195,7 @@ out:
 /*
  * Hands one datagram to the underlay. The skb is consumed on every path:
  * on success udp_tunnel_xmit_skb() takes ownership, on failure it is freed
- * here. Callers track the datagram in BBR and must release its ring slot
- * (uwg_packet_bbr_on_drop) when this returns non-zero.
+ * here.
  */
 int uwg_socket_send_skb_to_peer(struct uwg_peer *peer, struct sk_buff *skb, u8 ds)
 {

@@ -7,7 +7,6 @@
 #include "device.h"
 #include "header_protection.h"
 #include "peer.h"
-#include "bbr.h"
 #include "socket.h"
 #include "queueing.h"
 #include "messages.h"
@@ -77,11 +76,15 @@ static const struct nla_policy device_policy[UWGDEVICE_A_MAX + 1] = {
 	[UWGDEVICE_A_RANDOM_TRAILERS] = { .type = NLA_U8 },
 	[UWGDEVICE_A_DISABLE_COOKIES] = { .type = NLA_U8 },
 	[UWGDEVICE_A_EXTRA_PORTS] = { .type = NLA_U8 },
-	[UWGDEVICE_A_BBR] = { .type = NLA_U8 },
+	/* BBR was removed in 0.5.0. The attribute numbers stay reserved and
+	 * are rejected strictly instead of being silently ignored, so an old
+	 * userspace tool sees a clear error.
+	 */
+	[UWGDEVICE_A_BBR] = { .type = NLA_REJECT },
 	[UWGDEVICE_A_FEC] = { .type = NLA_U32 },
 	[UWGDEVICE_A_UNDERLAY_MTU] = { .type = NLA_U16 },
 	[UWGDEVICE_A_FEC_STATS] = { .type = NLA_NESTED },
-	[UWGDEVICE_A_BBR_STATS] = { .type = NLA_NESTED },
+	[UWGDEVICE_A_BBR_STATS] = { .type = NLA_REJECT },
 	[UWGDEVICE_A_CRYPT_SPILL] = { .type = NLA_U64 },
 };
 
@@ -423,75 +426,6 @@ err:
 	return -EMSGSIZE;
 }
 
-struct uwg_bbr_stats {
-	u8 mode;
-	u32 peers;
-	u32 peers_no_ack;
-	u64 cwnd;
-	u64 inflight;
-	u64 pacing_rate;
-	u64 btl_bw;
-	u64 min_rtt_ns;
-	u64 round_lost;
-};
-
-/*
- * Collects one snapshot per peer. Called with device_update_lock held, which
- * keeps peer_list stable; the BBR state itself is read under RCU and
- * peer->bbr_lock, the same order the data path uses. No lock is taken in the
- * opposite direction anywhere, so mutex -> RCU -> bbr_lock nests safely.
- * The aggregates are summed only after the spinlock is dropped.
- */
-static void uwg_bbr_stats_fill_device(struct uwg_device *uwg,
-				      struct uwg_bbr_stats *stats)
-{
-	struct uwg_peer *peer;
-
-	memset(stats, 0, sizeof(*stats));
-	stats->mode = READ_ONCE(uwg->bbr_mode);
-
-	list_for_each_entry(peer, &uwg->peer_list, peer_list) {
-		struct uwg_bbr_snapshot snap;
-		struct uwg_bbr *bbr;
-
-		/* A peer that never confirmed ACK is not shaped by BBR: the
-		 * data path skips accounting, pacing and the cwnd gate for it,
-		 * so its controller snapshot would only report estimates that
-		 * are not in use. Count it separately and keep it out of the
-		 * aggregates, which then show inflight/pacing as inactive.
-		 * Without CAPS the peer is unconfirmed too, not legacy: BBR
-		 * must not pace a link whose feedback is not negotiated.
-		 */
-		if (!READ_ONCE(peer->caps.peer_valid) ||
-		    !(READ_ONCE(peer->caps.peer.flags) & UWG_EXT_CAP_ACK)) {
-			stats->peers_no_ack++;
-			continue;
-		}
-
-		rcu_read_lock();
-		bbr = uwg_peer_bbr_lookup(peer);
-		if (!bbr) {
-			rcu_read_unlock();
-			continue;
-		}
-		spin_lock_bh(&peer->bbr_lock);
-		uwg_bbr_snapshot_get(bbr, &snap);
-		spin_unlock_bh(&peer->bbr_lock);
-		rcu_read_unlock();
-
-		stats->peers++;
-		stats->cwnd += snap.cwnd;
-		stats->inflight += snap.inflight;
-		stats->pacing_rate += snap.pacing_rate;
-		stats->btl_bw += snap.btl_bw;
-		stats->round_lost += snap.round_lost;
-		/* 0 means "no measured sample"; only real minima take part. */
-		if (snap.min_rtt_ns &&
-		    (!stats->min_rtt_ns || snap.min_rtt_ns < stats->min_rtt_ns))
-			stats->min_rtt_ns = snap.min_rtt_ns;
-	}
-}
-
 static int uwg_put_fec_stats(struct sk_buff *skb, struct uwg_device *uwg)
 {
 	struct uwg_fec_stats stats;
@@ -525,39 +459,6 @@ static int uwg_put_fec_stats(struct sk_buff *skb, struct uwg_device *uwg)
 	return 0;
 }
 
-static int uwg_put_bbr_stats(struct sk_buff *skb,
-			     const struct uwg_bbr_stats *stats)
-{
-	struct nlattr *nest;
-
-	nest = nla_nest_start(skb, UWGDEVICE_A_BBR_STATS);
-	if (!nest)
-		return -EMSGSIZE;
-
-	if (nla_put_u8(skb, UWGDEVICE_BBR_STATS_A_MODE, stats->mode) ||
-	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_CWND, stats->cwnd,
-			      UWGDEVICE_BBR_STATS_A_UNSPEC) ||
-	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_INFLIGHT,
-			      stats->inflight, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
-	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_PACING_RATE,
-			      stats->pacing_rate, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
-	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_BTL_BW,
-			      stats->btl_bw, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
-	    nla_put_u64_64bit(skb, UWGDEVICE_BBR_STATS_A_MIN_RTT_NS,
-			      stats->min_rtt_ns, UWGDEVICE_BBR_STATS_A_UNSPEC) ||
-	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_ROUND_LOST,
-			(u32)min_t(u64, stats->round_lost, U32_MAX)) ||
-	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_PEERS, stats->peers) ||
-	    nla_put_u32(skb, UWGDEVICE_BBR_STATS_A_PEERS_NO_ACK,
-			stats->peers_no_ack)) {
-		nla_nest_cancel(skb, nest);
-		return -EMSGSIZE;
-	}
-
-	nla_nest_end(skb, nest);
-	return 0;
-}
-
 static int uwg_get_device_start(struct netlink_callback *cb)
 {
 	struct uwg_device *uwg;
@@ -574,7 +475,6 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 	struct uwg_peer *peer, *next_peer_cursor;
 	struct dump_ctx *ctx = DUMP_CTX(cb);
 	struct uwg_device *uwg = ctx->uwg;
-	struct uwg_bbr_stats bbr_stats;
 	struct nlattr *peers_nest;
 	int ret = -EMSGSIZE;
 	bool done = true;
@@ -601,7 +501,6 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 				uwg->incoming_port) ||
 		    nla_put_u32(skb, UWGDEVICE_A_FWMARK, uwg->fwmark) ||
 		    nla_put_u8(skb, UWGDEVICE_A_EXTRA_PORTS, uwg->extra_ports) ||
-		    nla_put_u8(skb, UWGDEVICE_A_BBR, uwg->bbr_mode) ||
 		    nla_put_u32(skb, UWGDEVICE_A_FEC, uwg->fec_mode) ||
 		    nla_put_u16(skb, UWGDEVICE_A_UNDERLAY_MTU,
 				uwg->underlay_mtu) ||
@@ -630,12 +529,7 @@ static int uwg_get_device_dump(struct sk_buff *skb, struct netlink_callback *cb)
 			nla_put_u8(skb, UWGDEVICE_A_DISABLE_COOKIES, uwg->disable_cookies))
 			goto out;
 
-		/* Both aggregates are always present, zeroed when the feature
-		 * is disabled, so clients never have to guess.
-		 */
-		uwg_bbr_stats_fill_device(uwg, &bbr_stats);
-		if (uwg_put_fec_stats(skb, uwg) ||
-		    uwg_put_bbr_stats(skb, &bbr_stats))
+		if (uwg_put_fec_stats(skb, uwg))
 			goto out;
 
 		if ((uwg->ispecs[0].desc &&
@@ -998,7 +892,6 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 	if (info->attrs[UWGDEVICE_A_LISTEN_PORT] ||
 	    info->attrs[UWGDEVICE_A_FWMARK] ||
 	    info->attrs[UWGDEVICE_A_EXTRA_PORTS] ||
-	    info->attrs[UWGDEVICE_A_BBR] ||
 	    info->attrs[UWGDEVICE_A_FEC]) {
 		struct net *net;
 		rcu_read_lock();
@@ -1039,29 +932,6 @@ static int uwg_set_device(struct sk_buff *skb, struct genl_info *info)
 		ret = set_extra_ports(uwg, val8);
 		if (ret)
 			goto out;
-	}
-
-	if (info->attrs[UWGDEVICE_A_BBR]) {
-		u8 val8 = nla_get_u8(info->attrs[UWGDEVICE_A_BBR]);
-
-		if (val8 > UWG_BBR_MODE_MAX) {
-			net_dbg_ratelimited(
-				"%s: BbrMode must be %d, %d or %d\n",
-				uwg->dev->name, UWG_BBR_MODE_OFF,
-				UWG_BBR_MODE_MONITOR, UWG_BBR_MODE_ON);
-			ret = -EINVAL;
-			goto out;
-		}
-		WRITE_ONCE(uwg->bbr_mode, val8);
-		if (uwg_peer_bbr_sync_device(uwg))
-			net_dbg_ratelimited(
-				"%s: Could not allocate BBR state for every peer\n",
-				uwg->dev->name);
-		/* BBR changes the ACK capability advertised in CAPS, exactly
-		 * like a FEC change does. Re-arm the exchange so the peer sees
-		 * the new profile instead of waiting for the next keypair.
-		 */
-		uwg_ext_caps_changed(uwg);
 	}
 
 	if (info->attrs[UWGDEVICE_A_FEC]) {
