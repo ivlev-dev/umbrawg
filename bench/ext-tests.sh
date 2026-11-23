@@ -272,7 +272,7 @@ case_profile_mismatch() {
     chk_cmp tcp gt "$R_TCP" 0
     chk_cmp udp_loss ge "$R_UDPLOSS" "$MATCH_UDP_LOSS_MIN"
     chk_cmp udp_loss le "$R_UDPLOSS" "$MATCH_UDP_LOSS_MAX"
-    chk_ping
+    chk_ping_lossy
     chk_frag
 }
 
