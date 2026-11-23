@@ -3,7 +3,7 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
-## [0.4.1] — 2026-11-21
+## [0.4.1] — 2026-11-23
 
 ### Добавлено
 

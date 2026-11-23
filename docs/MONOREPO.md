@@ -43,8 +43,10 @@
 
 Актуальная сводка матрицы 2026-11-21 (AmneziaWG baseline, потери, FEC/BBR,
 AES/mixed, обфускация, multi-peer 5/10/50, UDP, RTT) —
-[`BENCHMARKS-2026-11-21.md`](BENCHMARKS-2026-11-21.md). Сырые CSV и pcap
-остаются на стенде: `/root/bench-matrix/{v2,v3,aes,obf,multi}`.
+[`BENCHMARKS-2026-11-21.md`](BENCHMARKS-2026-11-21.md); её §14 — полная
+матрица v4 от 2026-11-22 (четыре реализации, 198 ячеек). Сырые CSV и pcap
+остаются на стенде: `/root/bench-matrix/{v2,v3,aes,obf,multi}` и
+`/root/bench-matrix/v4/results.csv`.
 В репозитории, по правилу 5, только методика, скрипты и небольшие эталонные
 CSV.
 
