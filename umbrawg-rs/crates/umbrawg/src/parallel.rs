@@ -163,10 +163,11 @@ impl RxSchedule {
 
 /// Возвращает `true`, если параллельный приём включён значением переменной.
 pub(crate) fn parallel_rx_enabled(value: Option<&str>) -> bool {
-    matches!(
-        value.map(str::trim),
-        Some("1" | "true" | "yes" | "on" | "TRUE" | "YES" | "ON")
-    )
+    match value.map(str::trim) {
+        None => true,
+        Some("0" | "false" | "no" | "off" | "FALSE" | "NO" | "OFF") => false,
+        Some(_) => true,
+    }
 }
 
 /// Определяет число крипто-воркеров.
@@ -1617,8 +1618,8 @@ mod tests {
         assert!(parallel_rx_enabled(Some(" true ")));
         assert!(parallel_rx_enabled(Some("on")));
         assert!(!parallel_rx_enabled(Some("0")));
-        assert!(!parallel_rx_enabled(Some("")));
-        assert!(!parallel_rx_enabled(None));
+        assert!(parallel_rx_enabled(Some("")));
+        assert!(parallel_rx_enabled(None));
     }
 
     fn control_packet() -> DetectedPacket {

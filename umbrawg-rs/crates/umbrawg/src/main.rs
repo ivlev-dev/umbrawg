@@ -49,7 +49,7 @@ fn print_help() {
     println!(
         "  UMBRAWG_SOCKET_BUFFER потолок буферов UDP-сокета в байтах: 212 КиБ..64 МиБ (8 МиБ)"
     );
-    println!("  UMBRAWG_PARALLEL_RX   1 — параллельный приём (RX-поток + крипто-воркеры)");
+    println!("  UMBRAWG_PARALLEL_RX   0 — выключить параллельный приём (по умолчанию включён)");
     println!("  UMBRAWG_RX_WORKERS    число крипто-воркеров параллельного приёма (по умолчанию");
     println!("                        как UMBRAWG_THREADS: 2 на хосте ≤ 8 ГиБ RAM)");
     println!("  UMBRAWG_RX_SCHED      выбор воркера: peer (по умолчанию) или queue");
