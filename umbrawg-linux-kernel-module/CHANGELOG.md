@@ -3,7 +3,7 @@
 Формат основан на [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/),
 версии соответствуют [SemVer](https://semver.org/lang/ru/).
 
-## [0.4.1] — 2026-11-21
+## [0.4.1] — 2026-11-23
 
 ### FEC
 
@@ -93,6 +93,29 @@
   10.652 против 8.246 (+29%), mixed 7.797. UDP 50×8 — 0.400/0% у всех.
   На AES-NI/VAES AES — предпочтительный шифр; mixed зависит от доли
   AES-пиров, ChaCha — fallback без AES-NI/VAES.
+- Классификация transport-first (`67f8e66d`, `receive.c`): data-пакет
+  проверяется первым. При random trailers гейты control-типов ослаблены до
+  `>=`, и transport-пакет по чужому offset попадал в их диапазон — **72
+  пакета** на 4.49M RX молча терялись под нагрузкой, каждый дроп ронял
+  `cwnd`; после фикса **0/4.44M**. Медиана RTT на 5 пирах — 0.48–0.53 →
+  **0.10–0.22 мс**, throughput в пределах шума.
+- CAPS-гейт на RX-пути (`uwg_peer_caps_may_send()` перед
+  `uwg_ext_maybe_send_caps()`): при выключенных BBR/FEC и без долга рекламы
+  `caps-lock` и часы на каждом пакете не берутся. 1 пир — 4.60 против 4.43
+  (**+4%**), 5 пиров — паритет.
+- Keepalive-таймер больше не снимается на каждой отправке: `timer_delete()`
+  в `uwg_timers_any_authenticated_packet_sent()` убран, expiry сравнивает
+  `last_data_tx` с `keepalive_armed`. `mod_timer` на 1 пире не изменился —
+  источник не keepalive, а `uwg_packet_cwnd_arm_retry()` и TCP. Soak
+  (idle 180 с, downlink-only, rekey каждые 15 с, 50 пиров): поведение на
+  проводе совпадает с базой, дропов нет. Интерливный A/B 50 пиров —
+  **+2.8%** (в пределах ±7%), «только keepalive» — +5.8%. Простой downlink
+  по-прежнему шлёт один keepalive за `keepalive_timeout`.
+- `gso_segs_max` — `module_param` 1..46, default **44**: A/B на 1 пире 44 →
+  4.63, 16 → 4.16–4.33, 8 → 4.41, 2 → 3.34, 1 → 3.74; на 5 пирах 44 → 6.94,
+  1 → 5.70. 44 — оптимум на стенде, поведение по умолчанию не изменилось.
+- Раздельные пороги `UWG_CRYPT_STEAL_THRESHOLD` (4/32/128 skb) замерены —
+  выигрыша нет ни в TX, ни в RX, общее значение 4 оставлено (`queueing.h`).
 
 ### UAPI и тесты
 
